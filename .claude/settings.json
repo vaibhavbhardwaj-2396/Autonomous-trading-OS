@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "Edit(path) rules cover ALL file-editing tools including Write; Write(path) rules are",
+    "NOT evaluated, so every deny below is expressed as Edit(...).",
+    "",
+    "Bash allows are broad on the project's own venv python deliberately. The first live",
+    "run was blocked from sending its own state-mismatch alert because narrow per-module",
+    "patterns didn't match what it tried to run. An agent that cannot raise an alarm when",
+    "something is wrong is more dangerous than one with slightly wider shell access —",
+    "especially since the deny list below still protects every safety-critical file, and",
+    "orders can only be placed through engine.execute, which re-validates independently."
+  ],
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit(memory/trade_log.md)",
+      "Edit(memory/research_log.md)",
+      "Edit(memory/strategy.md)",
+      "Edit(memory/mission.md)",
+      "WebSearch",
+      "WebFetch",
+      "Bash(venv/bin/python:*)",
+      "Bash(/root/trading-agent/venv/bin/python:*)",
+      "Bash(cd /root/trading-agent && venv/bin/python:*)",
+      "Bash(cd /root/trading-agent; venv/bin/python:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(date:*)",
+      "Bash(tail:*)",
+      "Bash(head:*)",
+      "Bash(grep:*)",
+      "Bash(wc:*)",
+      "Bash(echo:*)"
+    ],
+    "deny": [
+      "Edit(memory/guardrails.md)",
+      "Edit(engine/guardrails.py)",
+      "Edit(engine/execute.py)",
+      "Edit(memory/state.json)",
+      "Edit(memory/trades.jsonl)",
+      "Edit(memory/regime_log.jsonl)",
+      "Edit(.env)",
+      "Read(.env)",
+      "Edit(.claude/settings.json)",
+      "Edit(run_cycle.sh)",
+      "Edit(tests/test_guardrails.py)",
+      "Edit(research/registry/*)",
+      "Edit(research/market_memory.db)",
+      "Edit(research/schema.sql)",
+      "Edit(research/store.py)",
+      "Edit(research/contracts.py)",
+      "Bash(rm:*)",
+      "Bash(git push:*)",
+      "Bash(pip:*)",
+      "Bash(curl:*)"
+    ]
+  }
+}

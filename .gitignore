@@ -1,0 +1,38 @@
+.env
+*.key
+*.pem
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+memory/.hmm_model.pkl
+memory/.kite_session.json
+logs/
+
+# Research store — rebuildable from sources, never committed
+research/*.db
+research/*.db-wal
+research/*.db-shm
+
+# Dashboard frontend config — per-deployment API base URL/token, never
+# committed (same convention as .env). Copy frontend/config.example.js.
+frontend/config.js
+
+# Dashboard API's own minimal secrets file (deploy/api.env.example is the
+# committed template; the real file is per-VPS, never committed).
+deploy/api.env
+
+# Live capital state, trade/regime history, and broker session files —
+# exactly the list INSTALL.md already documents as "never overwritten by a
+# deploy" (live state is per-installation, not versioned code). Templates
+# and config-like files (memory/state.json.template, memory/mission.md,
+# memory/guardrails.md, memory/strategy.md, memory/review_process.md) are
+# NOT in this list — those are meant to ship with the repo.
+memory/state.json
+memory/trades.jsonl
+memory/regime_log.jsonl
+memory/trade_log.md
+memory/research_log.md
+memory/portfolio_state.md
+memory/.indstocks_session.json
+memory/.instruments.json

@@ -1,0 +1,40 @@
+# deploy/Caddyfile.tradingbotapi — reverse proxy for the read-only dashboard API.
+#
+# Same pattern as the existing tradingagent.bhardwajvaibhav.com block
+# (docs/VPS_DEPLOY.md §3, used for the Kite login callback): Caddy terminates
+# HTTPS with an automatic, free, auto-renewing Let's Encrypt certificate and
+# reverse-proxies to the API process on localhost. NOT deployed by this
+# slice — see docs/DEPLOYMENT.md for when/how to actually install this.
+#
+# Before this can issue a certificate:
+#   1. An A (and/or AAAA) record for tradingbotapi.bhardwajvaibhav.com must
+#      point at this VPS's public IP (Netlify DNS — see docs/SETUP.md §4 for
+#      where the existing tradingagent.bhardwajvaibhav.com record lives; add
+#      this one the same way).
+#   2. Ports 80 and 443 must be reachable from the public internet on this
+#      VPS (Caddy uses 80 for the ACME HTTP-01 challenge, 443 to serve).
+#   3. DASHBOARD_API_PORT below must match deploy/api.env's value and the
+#      port trading-api.service actually binds to.
+#
+# Install (see docs/DEPLOYMENT.md step 18-19 for the full sequence):
+#   sudo cp deploy/Caddyfile.tradingbotapi /etc/caddy/conf.d/tradingbotapi.caddy
+#   # or append this block into the existing /etc/caddy/Caddyfile alongside
+#   # the tradingagent.bhardwajvaibhav.com block already there.
+#   sudo systemctl reload caddy
+#
+# Verify: curl https://tradingbotapi.bhardwajvaibhav.com/health  ->  {"status":"ok",...}
+
+tradingbotapi.bhardwajvaibhav.com {
+    # Must match trading-api.service's gunicorn --bind port (deploy/api.env's
+    # DASHBOARD_API_PORT). The API process itself binds to 127.0.0.1 only —
+    # Caddy is the sole public entry point, exactly as for the existing
+    # tradingagent.bhardwajvaibhav.com / kite-callback.service pair.
+    reverse_proxy 127.0.0.1:8787
+
+    # Optional but recommended once this is live: a basic access log,
+    # matching this project's existing "everything gets logged" convention
+    # (run_cycle.sh, scripts/*). Uncomment if you want it:
+    # log {
+    #     output file /var/log/caddy/tradingbotapi-access.log
+    # }
+}

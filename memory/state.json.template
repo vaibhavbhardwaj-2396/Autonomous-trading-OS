@@ -1,0 +1,35 @@
+{
+  "_comment": "allocated_capital is the agent's MANDATE \u2014 the only money it may manage. It is set by Vaibhav and is deliberately independent of what the brokerage account happens to hold. The account also contains long-term holdings the agent must never touch.",
+  "allocated_capital": 10000.0,
+  "capital": 10000.0,
+  "peak_capital": 10000.0,
+  "cash_available": 10000.0,
+  "realized_pnl_alltime": 0.0,
+  "total_costs_alltime": 0.0,
+  "risk_per_trade_pct": 0.02,
+  "consecutive_losing_days": 0,
+  "trading_paused": false,
+  "pause_reason": null,
+  "awaiting_human_ack": false,
+  "drawdown_level": "NORMAL",
+  "day": {
+    "date": null,
+    "starting_capital": 10000.0,
+    "realized_pnl": 0.0,
+    "trades_taken": 0,
+    "process_grade": null
+  },
+  "week": {
+    "start_date": null,
+    "starting_capital": 10000.0
+  },
+  "open_positions": [],
+  "overlap_approved_symbols": [],
+  "broker_snapshot": {
+    "total_account_value": null,
+    "free_cash": null,
+    "unmanaged_symbols": [],
+    "synced_at": null
+  },
+  "last_updated": null
+}

@@ -1,0 +1,60 @@
+[Unit]
+# Living Quant — read-only dashboard API (api/wsgi.py, behind gunicorn).
+# Same pattern as the existing kite-callback.service (docs/VPS_DEPLOY.md §5):
+# a simple, always-restart systemd unit, no container/orchestration layer.
+Description=Living Quant read-only dashboard API (gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+# Least-privilege: this unit runs as its own unprivileged system user, never
+# as root — unlike the trading-cycle cron jobs (run_cycle.sh), which stay on
+# the existing all-root convention (docs/VPS_DEPLOY.md, docs/RESEARCH_DEPLOY.md)
+# since they are out of this deployment slice's scope. See docs/DEPLOYMENT.md
+# step 4/13 for exactly how `tradingapi` is created and what it can read/write.
+User=tradingapi
+Group=tradingapi
+
+WorkingDirectory=/root/trading-agent
+
+# A SEPARATE, minimal env file — NOT the main .env that also holds
+# KITE_API_SECRET / INDSTOCKS_MPIN / TELEGRAM_BOT_TOKEN. This process only
+# ever needs DASHBOARD_API_TOKEN / DASHBOARD_CORS_ORIGINS / DASHBOARD_API_HOST
+# / DASHBOARD_API_PORT (see deploy/api.env.example) — giving it the full .env
+# would mean a bug in this read-only API could leak broker/Telegram secrets
+# it never actually uses. See docs/DEPLOYMENT.md step 11/12.
+EnvironmentFile=/root/trading-agent/deploy/api.env
+
+# gunicorn's own --bind stays 127.0.0.1 (port taken from DASHBOARD_API_PORT,
+# set in deploy/api.env — see deploy/api.env.example, must be set, no
+# fallback here since systemd's ExecStart does not support shell-style
+# ${VAR:-default} syntax) — never 0.0.0.0. Caddy
+# (deploy/Caddyfile.tradingbotapi) is the only thing that should ever be
+# reachable from the public internet; this process must never be exposed
+# directly.
+ExecStart=/root/trading-agent/venv/bin/gunicorn \
+    --bind 127.0.0.1:${DASHBOARD_API_PORT} \
+    --workers 2 \
+    --timeout 30 \
+    --access-logfile /root/trading-agent/logs/api-access.log \
+    --error-logfile /root/trading-agent/logs/api-error.log \
+    api.wsgi:app
+
+# Clean shutdown: gunicorn's master forwards SIGTERM to its workers and waits
+# for in-flight requests to finish before exiting — exactly what systemd's
+# default stop signal (SIGTERM) already sends, so no override is needed here.
+Restart=always
+RestartSec=5
+
+# -- filesystem hardening -----------------------------------------------
+# Everything is read-only to this unit except the two places it legitimately
+# writes: research/ (Store.open() does a small idempotent meta upsert even
+# for read-only callers — see api/data.py's module docstring) and logs/
+# (gunicorn's own access/error log files above).
+ProtectSystem=strict
+ReadWritePaths=/root/trading-agent/research /root/trading-agent/logs
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+kiteconnect
+flask
+requests
+python-dotenv
+pandas
+yfinance
+hmmlearn
+pyotp
+
+# Production WSGI server for api/ (see docs/DEPLOYMENT.md). `python -m api.app`
+# (Flask's own dev server) stays fine for local development; gunicorn is what
+# systemd runs on the VPS.
+gunicorn
