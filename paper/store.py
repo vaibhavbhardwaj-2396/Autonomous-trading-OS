@@ -87,6 +87,37 @@ class PaperStore:
         store._ensure_account()
         return store
 
+    @classmethod
+    def open_readonly(cls, path: Optional[Path] = None) -> "PaperStore":
+        """Open strictly for reading: never creates the database file or
+        its parent directory, and never runs schema DDL — so this needs no
+        write permission anywhere, unlike open() above. This is what
+        api/paper_data.py uses. The dashboard/API must never need write
+        access to paper state; only paper/runner.py (invoked by cron or by
+        hand, never by a web request) does, and it always goes through
+        open() instead.
+
+        This split exists because a production deployment reasonably runs
+        the read-only dashboard API as a locked-down, non-root service
+        account with read-only access to application state (the same
+        posture it already had for memory/ and research/ before Slice AA
+        existed) — open()'s implicit schema write breaks that isolation
+        for no real benefit, since the schema is already guaranteed to
+        exist by the time anything has actually written paper data.
+
+        Raises FileNotFoundError if the database does not exist yet (e.g.
+        no paper cycle and no eligibility decision has ever run) — callers
+        should treat that as "nothing to show yet," not as a failure. See
+        api.paper_data.get_default_paper_store().
+        """
+        resolved = Path(path) if path is not None else paper_config.db_path()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"paper store not yet initialized: {resolved}")
+        conn = sqlite3.connect(f"file:{resolved.as_posix()}?mode=ro", uri=True,
+                               isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        return cls(_conn=conn, path=resolved)
+
     def close(self) -> None:
         self._conn.close()
 

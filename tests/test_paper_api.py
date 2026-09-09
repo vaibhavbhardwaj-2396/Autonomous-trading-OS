@@ -170,19 +170,31 @@ print("\n--- unavailable paper store -> 503, no leaked path ---")
 
 paper_data.reset_default_paper_store_for_testing()
 prior_db_path = os.environ.get("PAPER_DB_PATH")
-# /etc/passwd is a real FILE, not a directory — Path.mkdir(parents=True) on a
-# path underneath it fails with NotADirectoryError regardless of user
-# permissions (unlike a plain nonexistent path, which mkdir(parents=True)
-# would happily create when running as root, as this sandbox does).
-os.environ["PAPER_DB_PATH"] = "/etc/passwd/impossible/paper.db"
+# A nonexistent path is no longer a failure case: PaperStore.open_readonly()
+# treats it as "no paper cycle has run yet" and api.paper_data returns a
+# zero-state default (see that module's docstrings) — that is the whole
+# point of Slice AA's read-only-service-account fix. To exercise a
+# genuinely BROKEN store under open_readonly(), the target path must exist
+# as a real file (so Path.is_file() is True and open_readonly() does not
+# take the "not yet initialized" branch) but contain garbage that is not a
+# valid SQLite database — sqlite3.connect(..., mode=ro) succeeds at
+# connect time regardless, but the first real query against it raises
+# sqlite3.DatabaseError, which api.paper_data's own try/except still turns
+# into a safe 503.
+garbage_db_path = tempfile.mktemp(suffix="-broken-paper.db")
+with open(garbage_db_path, "w") as f:
+    f.write("this is not a sqlite database\n")
+os.environ["PAPER_DB_PATH"] = garbage_db_path
 try:
     r = client.get("/paper/account", headers=AUTH)
-    check("an unopenable paper DB path -> 503, not a 500 or a stack trace",
+    check("a corrupt paper DB file -> 503, not a 500 or a stack trace",
           r.status_code == 503)
     body = r.get_json()
     check("the 503 body never leaks the underlying filesystem path",
-          "/etc/passwd/impossible" not in str(body))
+          garbage_db_path not in str(body))
 finally:
+    if os.path.exists(garbage_db_path):
+        os.remove(garbage_db_path)
     if prior_db_path is not None:
         os.environ["PAPER_DB_PATH"] = prior_db_path
     else:
