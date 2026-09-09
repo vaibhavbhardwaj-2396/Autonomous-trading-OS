@@ -24,7 +24,7 @@ WorkingDirectory=/root/trading-agent
 # would mean a bug in this read-only API could leak broker/Telegram secrets
 # it never actually uses. See docs/DEPLOYMENT.md step 11/12.
 EnvironmentFile=/root/trading-agent/deploy/api.env
-
+Environment=HOME=/tmp
 # gunicorn's own --bind stays 127.0.0.1 (port taken from DASHBOARD_API_PORT,
 # set in deploy/api.env — see deploy/api.env.example, must be set, no
 # fallback here since systemd's ExecStart does not support shell-style
