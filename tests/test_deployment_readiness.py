@@ -171,11 +171,21 @@ _restore(_saved)
 print("\n--- C: no real secret in any file `git add -A` would stage ---")
 # ===========================================================================
 
-# This repo was `git init`-ed this session but nothing has been committed
-# yet (deliberately — see docs/DEPLOYMENT.md's report), so `git ls-files`
-# would return nothing. `git add -A --dry-run` reports every path that is
-# NOT excluded by .gitignore, which is exactly "everything a future `git
-# add -A && git commit` would actually capture" — the right set to scan.
+# The repo is now committed and pushed (see docs/DEPLOYMENT.md), so
+# `git add -A --dry-run` on its own is NOT "everything a future `git add -A
+# && git commit` would capture" — it only ever reports paths that differ
+# from HEAD (new, modified, or deleted), so an unchanged already-committed
+# file like .env.example or requirements.txt no longer appears in it at
+# all. The actual invariant we want — "the set of paths that would exist in
+# the repo the instant someone ran `git add -A && git commit` from this
+# worktree" — is the union of what's already tracked (`git ls-files`) and
+# what the dry-run would newly add, minus anything the dry-run would
+# remove. This union is correct in all three repo states this test must
+# tolerate: a fresh, never-committed repo (`ls-files` is empty, so this
+# reduces to the dry-run's "add" list — the old behavior), a committed repo
+# with a clean tree (the dry-run adds nothing, so this is just the tracked
+# list), and a committed repo with legitimate pending changes, as is
+# routinely the case mid-development (both halves contribute).
 
 _dry_run = subprocess.run(
     ["git", "add", "-A", "--dry-run"],
@@ -183,14 +193,29 @@ _dry_run = subprocess.run(
 )
 check("C: `git add -A --dry-run` runs cleanly against the repo", _dry_run.returncode == 0, _dry_run.stderr)
 
-_staged_paths = []
+_dry_run_added = []
+_dry_run_removed = []
 for line in _dry_run.stdout.splitlines():
-    # Lines look like: "add 'api/wsgi.py'"
+    # Lines look like: "add 'api/wsgi.py'" (new/modified) or
+    # "remove 'old/path.py'" (deleted from the worktree but still tracked).
     m = re.match(r"^add '(.+)'$", line.strip())
     if m:
-        _staged_paths.append(m.group(1))
+        _dry_run_added.append(m.group(1))
+        continue
+    m = re.match(r"^remove '(.+)'$", line.strip())
+    if m:
+        _dry_run_removed.append(m.group(1))
 
-check("C: at least the expected core files would be staged (sanity check on the dry-run parse)",
+_ls_files = subprocess.run(
+    ["git", "ls-files"],
+    cwd=REPO_ROOT, capture_output=True, text=True, timeout=30,
+)
+check("C: `git ls-files` runs cleanly against the repo", _ls_files.returncode == 0, _ls_files.stderr)
+_tracked_paths = [p for p in _ls_files.stdout.splitlines() if p.strip()]
+
+_staged_paths = sorted((set(_tracked_paths) | set(_dry_run_added)) - set(_dry_run_removed))
+
+check("C: at least the expected core files would be staged (sanity check on the dry-run/ls-files union)",
       any(p == "api/wsgi.py" for p in _staged_paths) and any(p == "requirements.txt" for p in _staged_paths),
       str(_staged_paths[:10]))
 
