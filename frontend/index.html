@@ -17,6 +17,7 @@
   <nav class="tabs">
     <button data-view="overview" class="active">Overview</button>
     <button data-view="trading">Trading</button>
+    <button data-view="paper">Paper</button>
     <button data-view="research">Research</button>
     <button data-view="strategies">Strategies</button>
   </nav>
@@ -63,6 +64,41 @@
 
       <div class="readonly-note">
         Observation only — this dashboard cannot place, modify, or cancel an order.
+      </div>
+    </section>
+
+    <!-- ============================== Paper (Slice AA) ============================== -->
+    <section id="view-paper" class="view">
+      <div class="paper-banner">
+        <span class="dot"></span>
+        <span>PAPER / SHADOW — simulated only. No real order has ever been placed from this tab.</span>
+      </div>
+
+      <div id="paper-cards" class="grid"></div>
+
+      <section class="panel">
+        <h2>Active Paper Strategies</h2>
+        <div id="paper-strategies" class="table-wrap"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Open Paper Positions</h2>
+        <div id="paper-positions" class="table-wrap"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Paper Orders</h2>
+        <div id="paper-orders" class="table-wrap"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Paper Trades</h2>
+        <div id="paper-trades" class="table-wrap"></div>
+      </section>
+
+      <div class="readonly-note">
+        Observation only — paper P&amp;L is a simulation and is never counted as real account P&amp;L.
+        A paper trade never affected the broker and never will.
       </div>
     </section>
 
