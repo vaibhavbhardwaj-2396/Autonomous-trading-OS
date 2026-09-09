@@ -15,14 +15,21 @@ api/app.py — Phase 4 Slice Z: the read-only HTTP API.
     GET /strategies                  |
     GET /backtests                  /
 
-Every route is a thin function: parse query params -> call one api.data
-function -> jsonify the result. No business logic, no write, no import of
-engine.execute / engine.guardrails.validate_order|save_state /
-engine.broker* / research.brain.hypothesis_intake.approve_and_lock /
-research.experiments.runner.run_experiment /
+    GET /paper/account               \\
+    GET /paper/positions              |  Slice AA — paper/shadow engine
+    GET /paper/orders                 |  reads (also protected). See
+    GET /paper/trades                 |  api/paper_data.py. Distinct from
+    GET /paper/strategies             |  the live routes above on purpose —
+    GET /paper/performance           /   never merged into /account etc.
+
+Every route is a thin function: parse query params -> call one api.data (or
+api.paper_data) function -> jsonify the result. No business logic, no
+write, no import of engine.execute / engine.guardrails.validate_order|
+save_state / engine.broker* / research.brain.hypothesis_intake.
+approve_and_lock / research.experiments.runner.run_experiment /
 research.experiments.strategy_backtest.run_backtest /
-strategies.registry.save_version anywhere in this file — grep for "import"
-to re-verify.
+strategies.registry.save_version / paper.runner.run_paper_cycle anywhere in
+this file — grep for "import" to re-verify.
 
 Run locally:  python -m api.app          (see docs/API.md for env setup)
 """
@@ -39,6 +46,7 @@ from flask import Flask, Response, jsonify, request  # noqa: E402
 from werkzeug.exceptions import HTTPException  # noqa: E402
 
 from . import auth, config, data  # noqa: E402
+from . import paper_data  # noqa: E402 — Slice AA: read-only paper/shadow endpoints
 
 APP_NAME = "living-quant-api"
 APP_VERSION = "1.0.0"
@@ -85,6 +93,11 @@ def create_app() -> Flask:
     @app.errorhandler(data.DataSourceError)
     def _data_unavailable(e: data.DataSourceError):
         app.logger.warning("data source unavailable: %s", e, exc_info=e.__cause__ or e)
+        return jsonify({"error": "service_unavailable", "detail": str(e)}), 503
+
+    @app.errorhandler(paper_data.PaperDataSourceError)
+    def _paper_data_unavailable(e: paper_data.PaperDataSourceError):
+        app.logger.warning("paper data source unavailable: %s", e, exc_info=e.__cause__ or e)
         return jsonify({"error": "service_unavailable", "detail": str(e)}), 503
 
     @app.errorhandler(404)
@@ -202,6 +215,51 @@ def create_app() -> Flask:
         if err:
             return err
         return jsonify(data.get_backtests(data.get_default_store(), limit=limit))
+
+    # -- Paper / shadow (Slice AA) -------------------------------------------
+    # Every route below is GET-only and reads exclusively through
+    # api/paper_data.py -> paper/store.py. None of them can trigger a paper
+    # trading cycle, open/close a paper position, or touch anything live —
+    # see api/paper_data.py's own module docstring. Response shapes are
+    # deliberately parallel to the live /account, /positions, /orders,
+    # /trades routes above, with "paper"/"PAPER" made unmistakable in every
+    # payload (never silently mixed into the live endpoints).
+
+    @app.route("/paper/account", methods=["GET"])
+    @auth.require_auth
+    def paper_account():
+        return jsonify(paper_data.get_paper_account())
+
+    @app.route("/paper/positions", methods=["GET"])
+    @auth.require_auth
+    def paper_positions():
+        return jsonify(paper_data.get_paper_positions())
+
+    @app.route("/paper/orders", methods=["GET"])
+    @auth.require_auth
+    def paper_orders():
+        limit, err = _int_query_param("limit", 100)
+        if err:
+            return err
+        return jsonify(paper_data.get_paper_orders(limit=limit))
+
+    @app.route("/paper/trades", methods=["GET"])
+    @auth.require_auth
+    def paper_trades():
+        limit, err = _int_query_param("limit", 100)
+        if err:
+            return err
+        return jsonify(paper_data.get_paper_trades(limit=limit))
+
+    @app.route("/paper/strategies", methods=["GET"])
+    @auth.require_auth
+    def paper_strategies():
+        return jsonify(paper_data.get_paper_strategies())
+
+    @app.route("/paper/performance", methods=["GET"])
+    @auth.require_auth
+    def paper_performance():
+        return jsonify(paper_data.get_paper_performance())
 
     return app
 

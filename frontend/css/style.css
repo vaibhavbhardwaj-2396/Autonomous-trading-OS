@@ -8,6 +8,7 @@
   --good: #34c77b;
   --warn: #e0a83e;
   --bad: #e0554f;
+  --paper: #e0a83e;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
@@ -194,8 +195,37 @@ td.neg { color: var(--bad); }
 .badge.normal { background: rgba(52, 199, 123, 0.15); color: var(--good); }
 .badge.amber { background: rgba(224, 168, 62, 0.15); color: var(--warn); }
 .badge.orange, .badge.red { background: rgba(224, 85, 79, 0.15); color: var(--bad); }
+.badge.filled { background: rgba(52, 199, 123, 0.15); color: var(--good); }
+.badge.rejected, .badge.skipped { background: rgba(139, 149, 165, 0.2); color: var(--text-dim); }
 
 .subtext { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+
+/* Paper/shadow — Slice AA. Everything on this tab must read as clearly
+   simulated, never mistaken for the live Trading tab. */
+.paper-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(224, 168, 62, 0.1);
+  border: 1px solid rgba(224, 168, 62, 0.35);
+  color: var(--paper);
+  border-radius: 8px;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.paper-banner .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--paper);
+  flex-shrink: 0;
+}
+.paper-banner .detail {
+  font-weight: 400;
+  color: var(--text-dim);
+}
 
 .readonly-note {
   color: var(--text-dim);

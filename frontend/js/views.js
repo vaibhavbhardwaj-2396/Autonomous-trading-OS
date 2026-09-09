@@ -254,6 +254,138 @@ function tradingCardsHtml(acct, risk) {
 }
 
 // --------------------------------------------------------------------------
+// Paper / shadow (Slice AA) — every card/table here reads from /paper/*
+// only; nothing on this tab ever touches a live endpoint, and nothing on
+// the live Trading tab ever reads a /paper/* endpoint. See api/paper_data.py.
+// --------------------------------------------------------------------------
+
+export async function renderPaper() {
+  const results = [];
+
+  const [acctRes, perfRes] = await Promise.all([
+    apiGet("/paper/account"),
+    apiGet("/paper/performance"),
+  ]);
+  if (acctRes.ok || perfRes.ok) {
+    el("paper-cards").innerHTML = paperCardsHtml(
+      acctRes.ok ? acctRes.data : null,
+      perfRes.ok ? perfRes.data : null
+    );
+  } else {
+    errorState(el("paper-cards"), "Paper account/performance unavailable.");
+  }
+  results.push({ ok: acctRes.ok, status: acctRes.status, error: acctRes.error });
+  results.push({ ok: perfRes.ok, status: perfRes.status, error: perfRes.error });
+
+  results.push(
+    await load("/paper/strategies", "paper-strategies", (data) => {
+      table(
+        el("paper-strategies"),
+        [
+          { key: "strategy_id", label: "Strategy" },
+          { key: "version_id", label: "Version" },
+          { key: "algorithm_id", label: "Algorithm" },
+          { key: "approved_by", label: "Approved By" },
+          { key: "approved_at", label: "Approved", cell: (r) => `<td>${dt(r.approved_at)}</td>` },
+        ],
+        data.strategies,
+        "No StrategyVersion is currently paper-eligible."
+      );
+    }, "Paper strategy list unavailable")
+  );
+
+  results.push(
+    await load("/paper/positions", "paper-positions", (data) => {
+      table(
+        el("paper-positions"),
+        [
+          { key: "symbol", label: "Symbol" },
+          { key: "strategy_version_id", label: "Version" },
+          { key: "quantity", label: "Qty", cell: (r) => `<td class="num">${num(r.quantity, 0)}</td>` },
+          { key: "avg_entry_price", label: "Avg Entry", cell: (r) => `<td class="num">${money(r.avg_entry_price)}</td>` },
+          { key: "current_price", label: "Current", cell: (r) => `<td class="num">${money(r.current_price)}</td>` },
+          {
+            key: "unrealized_pnl", label: "Unrealized P&L",
+            cell: (r) => `<td class="num ${pnlClass(r.unrealized_pnl)}">${money(r.unrealized_pnl)}</td>`,
+          },
+          { key: "opened_at", label: "Opened", cell: (r) => `<td>${dt(r.opened_at)}</td>` },
+        ],
+        data.positions,
+        "No open paper positions."
+      );
+    }, "Paper positions unavailable")
+  );
+
+  results.push(
+    await load("/paper/orders", "paper-orders", (data) => {
+      table(
+        el("paper-orders"),
+        [
+          { key: "symbol", label: "Symbol" },
+          { key: "side", label: "Side", cell: (r) => `<td>${badge(r.side, r.side)}</td>` },
+          { key: "status", label: "Status", cell: (r) => `<td>${badge(r.status, r.status)}</td>` },
+          { key: "requested_quantity", label: "Qty", cell: (r) => `<td class="num">${num(r.requested_quantity, 0)}</td>` },
+          { key: "fill_price", label: "Fill", cell: (r) => `<td class="num">${money(r.fill_price)}</td>` },
+          { key: "strategy_version_id", label: "Version" },
+          { key: "reason", label: "Reason" },
+          { key: "created_at", label: "Time", cell: (r) => `<td>${dt(r.created_at)}</td>` },
+        ],
+        data.orders,
+        "No paper orders yet."
+      );
+    }, "Paper orders unavailable")
+  );
+
+  results.push(
+    await load("/paper/trades", "paper-trades", (data) => {
+      table(
+        el("paper-trades"),
+        [
+          { key: "symbol", label: "Symbol" },
+          { key: "quantity", label: "Qty", cell: (r) => `<td class="num">${num(r.quantity, 0)}</td>` },
+          { key: "entry_price", label: "Entry", cell: (r) => `<td class="num">${money(r.entry_price)}</td>` },
+          { key: "exit_price", label: "Exit", cell: (r) => `<td class="num">${money(r.exit_price)}</td>` },
+          { key: "net_pnl", label: "Net P&L", cell: (r) => `<td class="num ${pnlClass(r.net_pnl)}">${money(r.net_pnl)}</td>` },
+          { key: "strategy_version_id", label: "Version" },
+          { key: "closed_at", label: "Closed", cell: (r) => `<td>${dt(r.closed_at)}</td>` },
+        ],
+        data.trades,
+        "No paper trades closed yet."
+      );
+    }, "Paper trades unavailable")
+  );
+
+  return results;
+}
+
+function paperCardsHtml(acct, perf) {
+  const cards = [];
+  if (acct) {
+    cards.push({ label: "Paper Capital", value: money(acct.initial_capital) });
+    cards.push({ label: "Paper Cash", value: money(acct.cash) });
+  }
+  if (perf) {
+    cards.push({ label: "Paper Equity", value: money(perf.current_equity) });
+    cards.push({ label: "Realized P&L", value: money(perf.realized_pnl), cls: pnlClass(perf.realized_pnl) });
+    cards.push({ label: "Unrealized P&L", value: money(perf.unrealized_pnl), cls: pnlClass(perf.unrealized_pnl) });
+    cards.push({ label: "Total Net P&L", value: money(perf.total_net_pnl), cls: pnlClass(perf.total_net_pnl) });
+    cards.push({
+      label: "Trades / Win Rate",
+      value: `${num(perf.n_trades, 0)} <span class="subtext" style="display:inline">(${
+        perf.win_rate === null || perf.win_rate === undefined ? "—" : num(perf.win_rate * 100, 0) + "%"
+      })</span>`,
+    });
+    cards.push({ label: "Open Paper Positions", value: num(perf.open_position_count, 0) });
+  }
+  return cards
+    .map(
+      (c) => `<div class="card"><div class="label">${esc(c.label)}</div>
+        <div class="value ${c.cls || ""}">${c.value}</div></div>`
+    )
+    .join("");
+}
+
+// --------------------------------------------------------------------------
 // Research
 // --------------------------------------------------------------------------
 
