@@ -44,20 +44,31 @@ class EligibilityError(ValueError):
     registered is never recorded, silently or otherwise."""
 
 
-def _log_path(directory: Optional[Path] = None) -> Path:
-    d = directory if directory is not None else paper_config.eligibility_dir()
+def _resolve_dir(directory: Optional[Path] = None) -> Path:
+    return directory if directory is not None else paper_config.eligibility_dir()
+
+
+def _log_path_for_write(directory: Optional[Path] = None) -> Path:
+    """Resolves the eligibility log path AND ensures its directory exists.
+    Only ever called from the write side (_append_event, below) — a read
+    must never create a directory as a side effect. See _read_events(),
+    which api.paper_data.get_paper_strategies() calls on every dashboard
+    poll: that path must work under a strictly read-only service account
+    (no write permission on paper/ at all), the same posture the API
+    already had for memory/ and research/ before Slice AA existed."""
+    d = _resolve_dir(directory)
     d.mkdir(parents=True, exist_ok=True)
     return d / LOG_FILENAME
 
 
 def _append_event(event: dict, directory: Optional[Path] = None) -> None:
-    path = _log_path(directory)
+    path = _log_path_for_write(directory)
     with open(path, "a") as f:
         f.write(json.dumps(event, sort_keys=True, default=str) + "\n")
 
 
 def _read_events(directory: Optional[Path] = None) -> list[dict]:
-    path = _log_path(directory)
+    path = _resolve_dir(directory) / LOG_FILENAME
     if not path.exists():
         return []
     out = []
