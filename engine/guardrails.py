@@ -117,14 +117,65 @@ class SizingResult:
 
 
 # ---------------------------------------------------------------------------
+# The equity risk sizing and the drawdown ladder run against.
+#
+# A MIGRATED state carries a `managed` block (state["managed"]) whose
+# `portfolio_value` is recomputed from live broker data every sync
+# (engine.execute.sync_from_broker):
+#     managed equity = managed cash + Σ(managed position qty × current LTP)
+# and whose `peak_growth` ratchets on `growth = portfolio_value − Σ(recorded
+# cash-flow events)` — so a deposit or withdrawal never moves the drawdown.
+#
+# A state that PRE-DATES the model — and every fixture in the frozen
+# tests/test_guardrails.py — has no `managed` block and falls back to the
+# legacy `capital` / `peak_capital` fields, byte-for-byte unchanged.
+# See docs/CAPITAL_MODEL.md.
+# ---------------------------------------------------------------------------
+
+def _managed(state: dict) -> dict:
+    return state.get("managed") or {}
+
+
+def managed_equity(state: dict) -> float:
+    """Current managed portfolio equity — the figure risk is sized against."""
+    m = _managed(state)
+    v = m.get("portfolio_value")
+    return float(v) if v is not None else float(state.get("capital", 0.0))
+
+
+def _cashflow_total(state: dict) -> float:
+    return sum(float(e.get("amount", 0.0)) for e in _managed(state).get("cashflow_events") or [])
+
+
+def _ladder_peak(state: dict) -> float:
+    """Peak equity the AMBER/ORANGE/RED thresholds are drawn from. On the
+    dynamic model this is (Σ cash-flows + peak strategy growth), i.e. the
+    equity high after removing external deposits/withdrawals."""
+    m = _managed(state)
+    if m.get("peak_growth") is not None:
+        return _cashflow_total(state) + float(m["peak_growth"])
+    return float(state.get("peak_capital") or 0.0)
+
+
+# ---------------------------------------------------------------------------
 # Drawdown ladder (guardrails.md §1a)
 # ---------------------------------------------------------------------------
 
 def drawdown_pct(state: dict) -> float:
-    peak = state.get("peak_capital") or 0.0
+    m = _managed(state)
+    if m.get("portfolio_value") is not None and m.get("peak_growth") is not None:
+        # cash-flow-adjusted: drawdown is measured on strategy P&L only, so a
+        # user deposit/withdrawal (which shifts portfolio_value and the
+        # cash-flow total by the same amount) leaves it unchanged.
+        flow = _cashflow_total(state)
+        growth = float(m["portfolio_value"]) - flow
+        peak_growth = float(m["peak_growth"])
+        base = flow + peak_growth
+        return 0.0 if base <= 0 else max(0.0, (peak_growth - growth) / base)
+    peak = state.get("peak_capital") or 0.0                       # legacy path
     if peak <= 0:
         return 0.0
-    return max(0.0, (peak - state["capital"]) / peak)
+    return max(0.0, (peak - float(state.get("capital", 0.0))) / peak)
 
 
 def drawdown_level(state: dict) -> str:
@@ -180,17 +231,19 @@ def check_can_open_positions(state: Optional[dict] = None) -> GateResult:
     elif level == "AMBER":
         reasons.append(f"AMBER drawdown {dd:.1%} (>= {DD_AMBER:.0%}) — diagnostic required before new entries")
 
+    equity = managed_equity(state)
+
     # --- Daily loss cap ---
     day = state.get("day", {})
-    day_start = day.get("starting_capital") or state["capital"]
+    day_start = day.get("starting_managed_equity") or day.get("starting_capital") or equity
     day_pnl = day.get("realized_pnl", 0.0)
     if day_start > 0 and day_pnl < 0 and abs(day_pnl) / day_start >= DAILY_LOSS_CAP:
         reasons.append(f"daily loss cap hit ({day_pnl:.0f} on {day_start:.0f}, cap {DAILY_LOSS_CAP:.0%})")
 
     # --- Weekly loss cap ---
     week = state.get("week", {})
-    week_start = week.get("starting_capital") or state["capital"]
-    week_pnl = state["capital"] - week_start
+    week_start = week.get("starting_managed_equity") or week.get("starting_capital") or equity
+    week_pnl = equity - week_start
     if week_start > 0 and week_pnl < 0 and abs(week_pnl) / week_start >= WEEKLY_LOSS_CAP:
         reasons.append(f"weekly loss cap hit ({week_pnl:.0f} on {week_start:.0f}, cap {WEEKLY_LOSS_CAP:.0%})")
 
@@ -205,10 +258,10 @@ def check_can_open_positions(state: Optional[dict] = None) -> GateResult:
 
     # --- Aggregate open risk ---
     total_open_risk = sum(p.get("open_risk", 0.0) for p in open_positions)
-    if state["capital"] > 0 and total_open_risk / state["capital"] >= MAX_TOTAL_OPEN_RISK:
+    if equity > 0 and total_open_risk / equity >= MAX_TOTAL_OPEN_RISK:
         reasons.append(
             f"total open risk {total_open_risk:.0f} is at/over "
-            f"{MAX_TOTAL_OPEN_RISK:.0%} of capital"
+            f"{MAX_TOTAL_OPEN_RISK:.0%} of managed equity"
         )
 
     return GateResult(
@@ -220,8 +273,8 @@ def check_can_open_positions(state: Optional[dict] = None) -> GateResult:
             "risk_per_trade": current_risk_per_trade(state),
             "open_positions": len(open_positions),
             "total_open_risk": round(total_open_risk, 2),
-            "capital": state["capital"],
-            "peak_capital": state["peak_capital"],
+            "capital": equity,
+            "peak_capital": _ladder_peak(state),
         },
     )
 
@@ -231,9 +284,11 @@ def check_can_open_positions(state: Optional[dict] = None) -> GateResult:
 # ---------------------------------------------------------------------------
 
 def allowed_instruments(state: Optional[dict] = None) -> dict:
-    """What this account size may trade. See strategy.md capital tiers."""
+    """What this account size may trade. See strategy.md capital tiers.
+    'Size' here is current managed equity (dynamic, broker-derived), not a
+    fixed capital base — TIER_*_CAPITAL stay as policy thresholds."""
     state = state or load_state()
-    capital = state["capital"]
+    capital = managed_equity(state)
 
     perms = {
         "equity_cash": True,
@@ -264,8 +319,8 @@ def check_instrument_permitted(instrument_type: str, state: Optional[dict] = Non
         return GateResult(
             False,
             [
-                f"'{instrument_type}' not permitted at capital ₹{state['capital']:,.0f} "
-                f"(current tier {perms['tier']})"
+                f"'{instrument_type}' not permitted at managed equity "
+                f"₹{managed_equity(state):,.0f} (current tier {perms['tier']})"
             ],
             detail=perms,
         )
@@ -289,7 +344,7 @@ def size_position(
     There is no 'round up to at least 1' — if the arithmetic says zero, there is no trade.
     """
     state = state or load_state()
-    capital = state["capital"]
+    capital = managed_equity(state)   # current managed equity — risk % is applied to THIS
     reasons: list[str] = []
 
     # --- Basic sanity ---
@@ -477,15 +532,17 @@ def status_summary(state: Optional[dict] = None) -> dict:
     perms = allowed_instruments(state)
     day = state.get("day", {})
     week = state.get("week", {})
-    capital = state["capital"]
-    day_start = day.get("starting_capital") or capital
-    week_start = week.get("starting_capital") or capital
+    capital = managed_equity(state)                       # current managed equity
+    ladder_peak = _ladder_peak(state)
+    day_start = day.get("starting_managed_equity") or day.get("starting_capital") or capital
+    week_start = week.get("starting_managed_equity") or week.get("starting_capital") or capital
 
     return {
         "can_open_new_positions": gate.allowed,
         "blocking_reasons": gate.reasons,
-        "capital": capital,
-        "peak_capital": state["peak_capital"],
+        "capital": capital,                               # = managed equity (dynamic)
+        "managed_equity": capital,
+        "peak_capital": ladder_peak,                      # cash-flow-adjusted peak
         "cash_available": state.get("cash_available", capital),
         "drawdown_pct": round(drawdown_pct(state) * 100, 2),
         "drawdown_level": drawdown_level(state),
@@ -503,9 +560,9 @@ def status_summary(state: Optional[dict] = None) -> dict:
         "trading_paused": state.get("trading_paused", False),
         "awaiting_human_ack": state.get("awaiting_human_ack", False),
         "ladder_thresholds": {
-            "amber": round(state["peak_capital"] * (1 - DD_AMBER), 2),
-            "orange": round(state["peak_capital"] * (1 - DD_ORANGE), 2),
-            "red": round(state["peak_capital"] * (1 - DD_RED), 2),
+            "amber": round(ladder_peak * (1 - DD_AMBER), 2),
+            "orange": round(ladder_peak * (1 - DD_ORANGE), 2),
+            "red": round(ladder_peak * (1 - DD_RED), 2),
         },
     }
 

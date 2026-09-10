@@ -97,9 +97,10 @@ export function brokerCard(acct) {
 // remain in the /account payload for the stale-state check, but the dynamic
 // broker account is what the dashboard presents. See docs/CAPITAL_MODEL.md.)
 
-/** The one-line notice to show above the account cards when data is stale,
- * incomplete, or has a book-value warning — or "" when everything is fresh
- * and verified. Includes the broker sync timestamp. */
+/** The red PROBLEM banner above the account cards — stale/incomplete broker
+ * data, or a genuine internal-state inconsistency. "" when the account data
+ * is fine (calm context lives in accountInfoNotes(), not here). Includes the
+ * broker sync timestamp. */
 export function accountStaleNotice(acct) {
   if (!acct) return "";
   const warnings = Array.isArray(acct.account_warnings) ? acct.account_warnings : [];
@@ -109,6 +110,15 @@ export function accountStaleNotice(acct) {
     return `Broker account data is ${String(acct.account_value_status).replace(/_/g, " ")} — showing the agent's last known book value, not a live balance. (${stamp})`;
   }
   return "";
+}
+
+/** Calm, informational context (NOT problems): an absent allocated_capital
+ * key (harmless — the engine defaults it), or the legacy pre-migration
+ * peak_capital the drawdown is measured against. Array of strings, possibly
+ * empty. Rendered as a low-key note, never a red error. */
+export function accountInfoNotes(acct) {
+  if (!acct || !Array.isArray(acct.account_notes)) return [];
+  return acct.account_notes.filter((n) => typeof n === "string" && n.length);
 }
 
 /** "Account Total" card: the verified broker account value, or the literal

@@ -211,8 +211,14 @@ def get_account() -> dict:
         "pnl_today": day.get("realized_pnl"),
         # --- autonomous mandate (a scaffold cap, NOT the account value) ------
         "allocated_capital": state.get("allocated_capital"),
+        "allocated_capital_set": truth["book_value"]["allocated_capital_set"],
         "realized_pnl_alltime": state.get("realized_pnl_alltime"),
+        # peak_capital is legacy internal risk-state — kept for /risk context,
+        # never shown by the dashboard as an account/portfolio figure.
         "peak_capital": state.get("peak_capital"),
+        "peak_capital_is_legacy": truth["peak_capital"]["is_legacy"],
+        "peak_capital_note": truth["peak_capital"]["note"],
+        "implied_drawdown_pct": truth["peak_capital"]["implied_drawdown_pct"],
         "broker_synced_at": snap.get("synced_at"),
         "as_of": state.get("last_updated"),
         # --- broker truth / freshness (see api/broker_truth.py) ---------------
@@ -221,12 +227,13 @@ def get_account() -> dict:
         "account_value_status": truth["account_value_status"],
         "expected_book_value": truth["book_value"]["expected_book_value"],
         "book_value_reconciled": truth["book_value"]["reconciled"],
-        "book_value_note": truth["book_value"]["reason"],
+        "book_value_note": truth["book_value"]["reason"] or truth["book_value"]["note"],
         "unmanaged_holdings": {
             "count": truth["unmanaged_holdings_count"],
             "value": truth["safe_unmanaged_value"],
         },
         "account_warnings": truth["warnings"],
+        "account_notes": truth["notes"],
     }
 
 

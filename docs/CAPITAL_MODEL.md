@@ -33,52 +33,149 @@ card is removed. `allocated_capital` now appears only as a small
 | `frontend/js/views.js` | **removed** the "Agent Book Value" / "Agent Allocated Capital" cards; `allocated_capital` now only the "Autonomous Mandate" card, explained | presentation |
 | `paper/config.py` | `PAPER_INITIAL_CAPITAL` is *deliberately decoupled* — "never derived from `memory/state.json`'s real `allocated_capital`" | (not coupled) |
 
-**Verdict: `allocated_capital` is a genuine, load-bearing execution-safety
-boundary today, not merely legacy scaffolding.** The *value* (₹10,000) is a
-scaffold; the *mechanism* (cap agent deployment / sizing at an explicit
-authorised amount, independent of the account balance) is exactly the
-`Broker account ≠ currently authorised autonomous portfolio` distinction we
-want to keep. So this slice does **not** remove it — it stops the dashboard
-*mislabelling* it as the user's capital.
+**Verdict (superseded by §3):** the *mechanism* — the agent sizes/risks
+against an explicitly-authorised subset of the account, never the whole
+brokerage balance — is genuine and is KEPT. The *implementation* — a fixed
+₹10,000 `allocated_capital` rupee value, `capital = allocated + realised
+P&L`, `peak_capital` ratcheting on that fixed base — was legacy scaffolding
+and has been **replaced** by the dynamic broker-derived model (§3). The
+authorised subset is now: the agent's own positions + promoted holdings +
+the broker free cash, all valued at current LTP. `allocated_capital` is
+removed from `state.json` by the migration. The account-vs-authority
+distinction now lives in the managed/unmanaged *holdings* split, not in a
+rupee number.
 
-## 3. Planned dynamic model (future, separately approved slice)
+## 2a. Two legacy internal-state artifacts on the VPS (post first real sync)
+
+After the first successful INDmoney sync the VPS `memory/state.json` is:
 
 ```
-INDmoney account (dynamic, broker-derived)
-    account_total_value      = free cash + Σ(holding LTP · qty)
-    broker_free_cash
-    holdings_market_value
-        │
-        │  explicit, governed promotion / reconciliation
-        ▼
-Currently authorised autonomous portfolio  (was: fixed allocated_capital)
-    - a chosen fraction of, or an explicit rupee cap on, the account
-    - or a set of specific holdings promoted into the managed set
-    - re-evaluated on fund add/withdraw, never silently expanded by a sync
-        │
-        ▼
-engine.guardrails sizes trades off THIS, not the account total
+allocated_capital : (key absent)          capital            : 10000.0
+cash_available    : 32.31                 peak_capital       : 570447.95   ← legacy
+realized_pnl_alltime : 0.0                broker_snapshot.*  : correct & fresh
 ```
 
-Requirements for that slice (all need explicit approval — they touch frozen
-files):
+### (a) `allocated_capital` key is absent — harmless, not a bug
 
-1. `memory/state.json` schema: replace the fixed `allocated_capital` with a
-   mandate *definition* (`{"kind": "fixed_rupees" | "account_fraction" |
-   "promoted_holdings", ...}`) plus the last resolved value.
-2. `engine/execute.py:sync_from_broker`: resolve the mandate against the
-   live `account_total_value` / `broker_free_cash` each sync, still
-   `spendable = min(resolved_mandate - deployed, broker_free_cash)`.
-3. A **governed promotion process**: the human (or a future portfolio
-   engine, via an explicit gate like the existing `approve SYMBOL` Telegram
-   command) moves an unmanaged holding into the managed set. A sync alone
-   must never do it.
-4. Guardrails unchanged in shape — they already key off `capital`; only
-   what `sync` writes into `capital` changes.
+**No code writes `allocated_capital`.** It is only ever seeded
+(`memory/state.json.template`) or hand-set. `engine.execute.sync_from_broker`
+reads it as `float(state.get("allocated_capital", 10000.0))` — so an absent
+key means the live engine uses **₹10,000**, computes `capital = 10000 + 0`,
+and `engine.journal.update_capital` persists `capital` but **never writes
+`allocated_capital` back**. So the key stays absent while `capital` is fully
+consistent with the ₹10k default. `engine.execute sync`'s *response dict*
+reports `allocated_capital: 10000` because it applied the same default when
+reading.
 
-Until then: the fixed `allocated_capital` stays, the dashboard calls it
-"Autonomous Mandate", and existing holdings stay **research-visible but
-non-tradeable** (see `docs/BROKER_TRUTH.md` and PART D below).
+**Nothing to fix in the kernel.** The dashboard's
+`reconcile_book_value()` was falsely reporting "book value cannot be
+reconciled" purely because the key wasn't explicitly present — **that check
+is now corrected** to apply the same `DEFAULT_ALLOCATED_CAPITAL = 10_000.0`
+the engine uses (`allocated_capital_set` records that the key was absent, as
+a calm note, not a warning). Setting the key explicitly in `state.json` is a
+future governed change, not required for correctness.
+
+### (b) `peak_capital = 570447.95` — a genuine legacy artifact (KEPT, documented)
+
+`engine.journal.update_capital` **only ever raises** `peak_capital`
+(`if capital > peak: peak = capital`). Before the broker migration, the
+pre-mandate sync briefly computed `capital` as the whole ~₹5.7L brokerage
+account, so `peak_capital` ratcheted to `570447.95` and **stayed** there
+after `capital` fell back to ₹10k. `engine.guardrails.drawdown_level` (which
+the live engine reads) therefore measures a **~98% drawdown** against a dead
+peak → would classify **RED** (full stop, human decision) *if the live cron
+were running* (it is not).
+
+- **Diagnostic vs execution:** the dashboard warning was diagnostic-only;
+  the peak itself **would** gate live execution (safely — it halts trading —
+  but on a bogus basis).
+- **Superseded** — the dynamic model in §3 is now IMPLEMENTED. The legacy
+  ratchet is neutralised by the migration (`peak_capital` set to the current
+  broker-derived managed equity; the old value survives only in
+  `memory/capital_model_migration.jsonl`).
+
+## 3. The dynamic broker-derived capital model (IMPLEMENTED)
+
+The active broker (INDmoney / INDstocks) is the source of truth. Nothing
+below is a stored, historical, or fixed rupee amount.
+
+### Two figures, recomputed from the broker on every successful sync
+
+```
+CURRENT ACCOUNT VALUE   = broker free cash
+                        + Σ(broker holding/position qty × current LTP)
+
+CURRENT MANAGED EQUITY  = managed cash
+                        + Σ(managed position qty × current LTP)
+     managed cash       = the broker free cash  (all of it — NO ring-fenced grant,
+                          no cash_grant, no fixed number)
+     managed positions  = the agent's own open_positions
+                        + any holdings a GOVERNED process has promoted into
+                          state["managed"]["symbols"]  (empty by default;
+                          a sync never promotes)
+```
+
+`broker free cash` ← `INDstocksBroker.funds()` → `/funds.detailed_avl_balance.eq_cnc`.
+`current LTP` ← `INDstocksBroker.holdings()/positions()` → `/market/quotes/ltp`
+(both confirmed endpoints).
+
+- User deposits cash → next sync sees more `broker free cash` → managed
+  equity rises automatically. No number to update.
+- User withdraws cash → managed equity falls automatically.
+- A holding's price or quantity moves → account value (and managed equity,
+  if it's a managed position) moves on the next sync.
+- **Unmanaged holdings** are in ACCOUNT VALUE and visible to research, but
+  never in MANAGED EQUITY — they are only summed into `managed_positions`
+  once explicitly promoted.
+
+### Deposits / withdrawals — an explicit cash-flow ledger
+
+`state["managed"]["cashflow_events"]` = `[{ts, amount, kind, reason, by}]`
+(deposit `amount > 0`, withdrawal `amount < 0`). Written ONLY by
+`engine.journal.record_cashflow_event` — a governed human/portfolio-engine
+action, **never inferred by a sync**.
+
+```
+Σ cashflow      = Σ(cashflow_events.amount)          # net external capital ever added
+growth          = managed_portfolio_value − Σ cashflow   # cumulative STRATEGY P&L
+peak_growth     = max(peak_growth, growth)           # ratchet on P&L, not raw equity
+drawdown_pct    = max(0, peak_growth − growth) / (Σ cashflow + peak_growth)
+```
+
+A deposit raises `managed_portfolio_value` and `Σ cashflow` by the same
+amount → `growth` is unchanged → no artificial drawdown and no fake gain.
+The migration writes one `kind: "inception"` event equal to the managed
+equity at cutover, so `growth = 0` and `drawdown = 0` on day one.
+
+An unrecorded deposit/withdrawal (broker cash moved with no trade and no
+cash-flow event) is **warned** on the next sync — never silently absorbed
+as P&L.
+
+### Risk — `guardrails` runs on managed equity
+
+`risk_budget_per_trade = managed_equity × RISK_PER_TRADE` (2% / 1%,
+unchanged). Position sizing, the concentration cap, the total-open-risk
+ceiling, the daily/weekly loss baselines and the AMBER/ORANGE/RED drawdown
+ladder all key off `managed_equity(state)` and `_ladder_peak(state)` (=
+`Σ cashflow + peak_growth`). `TIER_*_CAPITAL` stay as policy thresholds,
+compared against the *dynamic* equity.
+
+### Migration (`scripts/migrate_capital_model.py`)
+
+Explicit, idempotent (`managed.model_version == 1` → skip), reversible
+(`.bak` + `--revert`), auditable (`memory/capital_model_migration.jsonl`).
+Reads the broker (funds/holdings/positions/quotes — **no orders**), builds
+`state["managed"]`, sets `capital` / `peak_capital` / `cash_available` to the
+new baseline, **drops `allocated_capital`**, and records the old
+`peak_capital` only in the audit log. `--simulate` writes nothing.
+
+### Backward compatibility
+
+A state with **no `managed` block** (fresh install, `test_guardrails.py`
+fixtures) still takes the legacy `allocated_capital + realised P&L` path in
+`engine/execute.py` and the legacy `capital` / `peak_capital` reads in
+`engine/guardrails.py`, byte-for-byte unchanged. The migrated live state
+uses the dynamic model exclusively.
 
 ## 4. Existing holdings — research-visible, non-tradeable (unchanged requirement)
 

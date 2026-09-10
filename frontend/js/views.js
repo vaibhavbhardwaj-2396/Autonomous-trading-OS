@@ -7,7 +7,7 @@
 import { apiGet } from "./api.js";
 import {
   esc, money, num, pnlClass, dt, badge, table, errorState,
-  brokerCard, accountStaleNotice,
+  brokerCard, accountStaleNotice, accountInfoNotes,
   accountTotalDisplay, unmanagedHoldingsDisplay,
 } from "./format.js";
 
@@ -133,8 +133,11 @@ function accountCardsHtml(acct, risk, regime) {
     { label: "Holdings Value", value: money(acct.holdings_market_value) },
     { label: "P&L Today", value: money(pnl), cls: pnlClass(pnl) },
     {
-      label: "Risk / Drawdown",
+      label: acct.peak_capital_is_legacy ? "Risk / Drawdown ⚠" : "Risk / Drawdown",
       value: risk ? badge(risk.drawdown_level, risk.drawdown_level) : "—",
+      title: acct.peak_capital_is_legacy
+        ? "measured against a legacy pre-migration peak_capital — internal risk state not yet re-baselined (docs/CAPITAL_MODEL.md)"
+        : "",
     },
     {
       label: "Regime",
@@ -149,13 +152,18 @@ function accountCardsHtml(acct, risk, regime) {
     .join("");
 }
 
-/** A full-width warning strip rendered above the account cards when the
- * broker figures are not a fresh sync — so a stale Kite-era snapshot is
- * never presented silently as current INDmoney truth. */
+/** Full-width strips above the account cards: a RED problem banner when the
+ * broker data is stale/incomplete or internally inconsistent, and separately
+ * a calm note for truthful context (absent allocated_capital key, the legacy
+ * pre-migration peak_capital) that is NOT a problem. */
 function staleNoticeHtml(acct) {
+  let html = "";
   const notice = accountStaleNotice(acct);
-  if (!notice) return "";
-  return `<div class="error-state" style="grid-column:1/-1">${esc(notice)}</div>`;
+  if (notice) html += `<div class="error-state" style="grid-column:1/-1">${esc(notice)}</div>`;
+  for (const note of accountInfoNotes(acct)) {
+    html += `<div class="empty-state" style="grid-column:1/-1;text-align:left">${esc(note)}</div>`;
+  }
+  return html;
 }
 
 // --------------------------------------------------------------------------
@@ -263,7 +271,14 @@ function tradingCardsHtml(acct, risk) {
   if (risk) {
     // Field names here are engine.guardrails.status_summary()'s own, verbatim
     // (see /risk) — no second risk model is computed by this dashboard.
-    cards.push({ label: "Drawdown Level", value: badge(risk.drawdown_level, risk.drawdown_level) });
+    cards.push({
+      label: (acct && acct.peak_capital_is_legacy) ? "Drawdown Level ⚠" : "Drawdown Level",
+      value: badge(risk.drawdown_level, risk.drawdown_level),
+      title: (acct && acct.peak_capital_is_legacy)
+        ? `measured against a legacy peak_capital (~${money(acct.peak_capital)}) from before the `
+          + `INDmoney migration — internal risk state not yet re-baselined (docs/CAPITAL_MODEL.md)`
+        : "",
+    });
     cards.push({ label: "Capital Tier", value: esc(risk.tier ?? "—") });
     cards.push({
       label: "Risk / Trade",

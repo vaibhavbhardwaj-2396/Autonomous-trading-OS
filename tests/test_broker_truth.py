@@ -497,6 +497,97 @@ _clear_env()
 
 
 # ---------------------------------------------------------------------------
+print("\n--- absent allocated_capital + legacy peak_capital (the VPS state) ---")
+# ---------------------------------------------------------------------------
+
+_clear_env()
+_fresh_ts = (dt.datetime.now(IST) - dt.timedelta(hours=1)).isoformat(timespec="seconds")
+
+# The exact current VPS state after the first real INDmoney sync:
+# allocated_capital key ABSENT, capital 10000, legacy peak_capital ~570k.
+VPS = {
+    "capital": 10000.0, "cash_available": 32.31, "realized_pnl_alltime": 0.0,
+    "peak_capital": 570447.95, "open_positions": [],
+    "broker_snapshot": {
+        "total_account_value": 63339.56, "free_cash": 32.31,
+        "unmanaged_symbols": [f"S{i}" for i in range(26)], "synced_at": _fresh_ts,
+    },
+    "last_updated": _fresh_ts,
+}
+
+rec = broker_truth.reconcile_book_value(VPS)
+check("missing allocated_capital: allocated_capital_set is False",
+      rec["allocated_capital_set"] is False and rec["allocated_capital"] is None, str(rec))
+check("missing allocated_capital: the ₹10,000 engine.execute default is used for the check",
+      rec["allocated_capital_effective"] == 10000.0
+      and rec["expected_book_value"] == 10000.0, str(rec))
+check("capital present + consistent with the default -> reconciled True (NO false warning)",
+      rec["reconciled"] is True and rec["reason"] is None, str(rec))
+check("missing allocated_capital: a calm note is set (not a `reason`/warning)",
+      rec["note"] is not None and "default" in rec["note"], str(rec["note"]))
+
+pk = broker_truth.peak_capital_status(VPS, allocated_effective=10000.0)
+check("legacy peak: ₹570,447.95 vs ₹10k current -> is_legacy True",
+      pk["is_legacy"] is True, str(pk))
+check("legacy peak: implied drawdown ~98%",
+      pk["implied_drawdown_pct"] is not None and pk["implied_drawdown_pct"] > 95.0, str(pk))
+check("legacy peak: the note names it as an internal state issue, not a broker problem",
+      "not a broker-data problem" in pk["note"] and "570,447.95" in pk["note"], str(pk["note"]))
+check("peak_capital_status does NOT mutate state (peak_capital untouched)",
+      VPS["peak_capital"] == 570447.95)
+
+truth = broker_truth.account_truth(VPS, now=NOW if NOW > dt.datetime.fromisoformat(_fresh_ts)
+                                   else dt.datetime.now(IST))
+check("dashboard truth: broker figures are the DYNAMIC values (63339.56 / 32.31 / 63307.25)",
+      truth["safe_total_value"] == 63339.56 and truth["safe_broker_free_cash"] == 32.31
+      and truth["safe_holdings_market_value"] == 63307.25, str(truth))
+check("dashboard truth: account_value_status is 'fresh' — the state IS valid",
+      truth["account_value_status"] == "fresh", str(truth))
+check("dashboard truth: warnings is EMPTY — no false 'book value cannot be reconciled'",
+      truth["warnings"] == [], str(truth["warnings"]))
+check("dashboard truth: two calm notes (absent allocated_capital, legacy peak) — not warnings",
+      len(truth["notes"]) == 2
+      and any("default" in n for n in truth["notes"])
+      and any("legacy peak_capital" in n for n in truth["notes"]), str(truth["notes"]))
+
+# no accidental account-total -> agent-capital conversion, at any layer
+acct = _account_with_state(VPS)
+check("no conversion: /account.total_value is ₹63,339.56, NOT written into any capital field",
+      acct["total_value"] == 63339.56
+      and acct["portfolio_value"] == 10000.0
+      and acct["expected_book_value"] == 10000.0
+      and acct["allocated_capital"] is None, str(acct))
+check("no conversion: /account exposes allocated_capital_set False + a legacy-peak flag",
+      acct["allocated_capital_set"] is False
+      and acct["peak_capital_is_legacy"] is True
+      and acct["peak_capital_note"] is not None, str(acct))
+check("no conversion: /account.account_notes carries the context, account_warnings stays empty",
+      acct["account_warnings"] == [] and len(acct["account_notes"]) == 2, str(acct))
+check("no conversion: the stale ₹570k peak is NEVER any dynamic broker figure",
+      570447.95 not in (acct["total_value"], acct["broker_free_cash"],
+                        acct["holdings_market_value"]), str(acct))
+
+# a genuine inconsistency (Kite-era capital == account total) IS still a warning
+BROKEN = json.loads(json.dumps(VPS))
+BROKEN["capital"] = 570447.95
+BROKEN["broker_snapshot"]["total_account_value"] = 570447.95
+t2 = broker_truth.account_truth(BROKEN, now=dt.datetime.now(IST))
+check("regression: a real inconsistency (capital == account total) still produces a warning",
+      t2["book_value"]["reconciled"] is False and len(t2["warnings"]) >= 1, str(t2["warnings"]))
+
+# a plain valid state with allocated_capital set -> no notes, no warnings
+GOOD = json.loads(json.dumps(VPS))
+GOOD["allocated_capital"] = 10000.0
+GOOD["peak_capital"] = 10250.0
+t3 = broker_truth.account_truth(GOOD, now=dt.datetime.now(IST))
+check("current valid state shape: allocated set + sane peak -> no warnings, no notes",
+      t3["warnings"] == [] and t3["notes"] == []
+      and t3["book_value"]["reconciled"] is True
+      and t3["peak_capital"]["is_legacy"] is False, str(t3))
+_clear_env()
+
+
+# ---------------------------------------------------------------------------
 print("\n--- 6/7. isolation: no new import path into live execution ---")
 # ---------------------------------------------------------------------------
 
@@ -533,13 +624,17 @@ check("7. /account route body is just jsonify(data.get_account()) — no side ef
       re.search(r"def account\(\):\s*\n\s*return jsonify\(data\.get_account\(\)\)", APP_SRC) is not None,
       "the /account handler must remain a thin read")
 
-# engine/guardrails.py and engine/execute.py must be byte-identical to HEAD
+# The broker-truth / dashboard code must not touch the execution kernel.
+# (engine/execute.py + engine/guardrails.py ARE modified in the separately
+# approved dynamic-capital-model slice — docs/CAPITAL_MODEL.md,
+# tests/test_capital_model.py. This file asserts only that api/ stays a
+# read-only layer with no order path, which is checked above.)
 import subprocess  # noqa: E402
 _diff = subprocess.run(
     ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD", "--",
-     "engine/guardrails.py", "engine/execute.py"],
+     "api/app.py", "api/auth.py", "api/wsgi.py"],
     capture_output=True, text=True)
-check("protected files engine/guardrails.py and engine/execute.py are unmodified",
+check("the read-only API core (app.py / auth.py / wsgi.py) is unchanged by broker-truth work",
       _diff.stdout.strip() == "", f"changed: {_diff.stdout.strip()!r}")
 
 

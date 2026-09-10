@@ -187,9 +187,11 @@ def roll_day_if_needed(state: Optional[dict] = None) -> dict:
             elif prev_pnl > 0:
                 state["consecutive_losing_days"] = 0
 
+        _managed_equity = (state.get("managed") or {}).get("portfolio_value")
         state["day"] = {
             "date": today,
             "starting_capital": state["capital"],
+            "starting_managed_equity": _managed_equity,
             "realized_pnl": 0.0,
             "trades_taken": 0,
             "process_grade": None,
@@ -197,21 +199,105 @@ def roll_day_if_needed(state: Optional[dict] = None) -> dict:
 
         week = state.setdefault("week", {})
         if now_ist().weekday() == 0 or not week.get("start_date"):
-            state["week"] = {"start_date": today, "starting_capital": state["capital"]}
+            state["week"] = {"start_date": today, "starting_capital": state["capital"],
+                             "starting_managed_equity": _managed_equity}
 
         save_state(state)
     return state
 
 
 def update_capital(capital: float, cash_available: float, state: Optional[dict] = None) -> dict:
-    """Update capital from the broker's actual numbers and ratchet peak capital.
-    Peak only ever goes up — that's what makes the drawdown ladder meaningful."""
+    """LEGACY (pre-dynamic-capital-model) path: update `capital` from a
+    caller-supplied figure and ratchet `peak_capital`. Still used for states
+    that have not been migrated to the dynamic broker-derived model (a
+    `state["managed"]` block — see update_managed_equity). engine.execute
+    calls this only when `state` has no `managed` block."""
     state = state or load_state()
     state["capital"] = round(float(capital), 2)
     state["cash_available"] = round(float(cash_available), 2)
     if state["capital"] > state.get("peak_capital", 0):
         state["peak_capital"] = state["capital"]
     state["drawdown_level"] = drawdown_level(state)
+    save_state(state)
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Dynamic broker-derived capital model (state["managed"])
+#
+#   managed equity = managed cash + Σ(managed position qty × current LTP)
+#
+# Every field here is recomputed from live broker data on each successful
+# sync (engine.execute.sync_from_broker). Nothing is a fixed rupee amount.
+# Deposits / withdrawals are recorded as explicit cash-flow events, never
+# inferred as strategy P&L — so `growth` (= managed equity − Σ cash-flows)
+# is the true cumulative strategy return and the drawdown built on it is
+# immune to the user adding or removing money. See docs/CAPITAL_MODEL.md.
+# ---------------------------------------------------------------------------
+
+MANAGED_MODEL_VERSION = 1
+
+
+def _cashflow_total(managed: dict) -> float:
+    return round(sum(float(e.get("amount", 0.0)) for e in managed.get("cashflow_events") or []), 2)
+
+
+def update_managed_equity(state: dict, *, portfolio_value: float, free_cash: float,
+                          positions_market_value: float, now: Optional[str] = None) -> dict:
+    """Write the freshly broker-derived managed-equity figures and ratchet
+    the cash-flow-adjusted peak. Called by engine.execute.sync_from_broker
+    for a migrated state, in place of update_capital().
+
+    `portfolio_value` = current managed cash + current market value of
+    managed positions (both from the live broker this sync). `growth` =
+    that minus the cumulative recorded cash-flows; the peak ratchets on
+    `growth`, so a deposit (which raises both portfolio_value and the
+    cash-flow total by the same amount) leaves `growth` — and therefore the
+    drawdown — unchanged.
+    """
+    now = now or now_ist().isoformat(timespec="seconds")
+    m = state.setdefault("managed", {})
+    m.setdefault("model_version", MANAGED_MODEL_VERSION)
+    m.setdefault("symbols", [])
+    m.setdefault("cashflow_events", [])
+    m.setdefault("peak_growth", 0.0)
+
+    m["portfolio_value"] = round(float(portfolio_value), 2)
+    m["free_cash"] = round(float(free_cash), 2)
+    m["positions_market_value"] = round(float(positions_market_value), 2)
+    m["valued_at"] = now
+
+    flow = _cashflow_total(m)
+    growth = round(m["portfolio_value"] - flow, 2)
+    m["growth"] = growth
+    if growth > float(m["peak_growth"]):
+        m["peak_growth"] = growth
+
+    # Legacy mirrors — display code (render_portfolio_md, briefing) and the
+    # fallback guardrail path still read these; they are never the source of
+    # truth once `managed` exists.
+    state["capital"] = m["portfolio_value"]
+    state["cash_available"] = m["free_cash"]
+    state["peak_capital"] = round(flow + float(m["peak_growth"]), 2)
+    state["drawdown_level"] = drawdown_level(state)
+    save_state(state)
+    return state
+
+
+def record_cashflow_event(state: dict, *, amount: float, reason: str, by: str,
+                          kind: str = "adjustment", now: Optional[str] = None) -> dict:
+    """Record an external capital movement into / out of the managed book —
+    a deposit (`amount` > 0) or withdrawal (`amount` < 0). This is a
+    GOVERNED action (a human, or a future portfolio-management layer), never
+    something a broker sync infers. It shifts the cash-flow total and the
+    peak by the same amount, so it creates no artificial drawdown or gain.
+    """
+    now = now or now_ist().isoformat(timespec="seconds")
+    m = state.setdefault("managed", {})
+    m.setdefault("cashflow_events", []).append({
+        "ts": now, "amount": round(float(amount), 2),
+        "kind": kind, "reason": reason, "by": by,
+    })
     save_state(state)
     return state
 
@@ -271,11 +357,14 @@ def set_pause(paused: bool, reason: str = "", awaiting_ack: bool = False,
 def render_portfolio_md(state: Optional[dict] = None) -> None:
     """Regenerate the human-readable mirror of state.json."""
     state = state or load_state()
-    cap, peak = state["capital"], state["peak_capital"]
+    managed = state.get("managed") or {}
+    cap = managed.get("portfolio_value") if managed.get("portfolio_value") is not None \
+        else state.get("capital", 0.0)
+    peak = state.get("peak_capital", cap)
     dd = drawdown_pct(state) * 100
     level = drawdown_level(state)
     day = state.get("day", {})
-    day_start = day.get("starting_capital") or cap
+    day_start = day.get("starting_managed_equity") or day.get("starting_capital") or cap
 
     emoji = {"NORMAL": "🟢", "AMBER": "🟡", "ORANGE": "🟠", "RED": "🔴"}[level]
 
@@ -311,11 +400,12 @@ last_updated: {now_ist().strftime('%Y-%m-%d %H:%M IST')}
 
 # Portfolio State
 
-## Capital (the agent's mandate only)
-- **Allocated capital: ₹{state.get('allocated_capital', 0):,.2f}** ← set by Vaibhav
-- Current book value: ₹{cap:,.2f}
-- Spendable cash: ₹{state.get('cash_available', 0):,.2f}
-- **Peak capital: ₹{peak:,.2f}**
+## Managed portfolio (dynamic, broker-derived)
+- **Managed equity: ₹{cap:,.2f}** ← current managed cash + market value of managed positions (refreshed every broker sync)
+- Managed cash (broker free cash): ₹{managed.get('free_cash', state.get('cash_available', 0)):,.2f}
+- Managed positions value: ₹{managed.get('positions_market_value', 0):,.2f}
+- Strategy P&L since inception (growth): ₹{managed.get('growth', 0):,.2f}
+- **Peak equity for drawdown (cash-flow adjusted): ₹{peak:,.2f}**
 - Realized P&L (all-time): ₹{state.get('realized_pnl_alltime', 0):,.2f}
 - Total costs paid (all-time): ₹{state.get('total_costs_alltime', 0):,.2f}
 {unmanaged_md}

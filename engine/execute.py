@@ -38,25 +38,34 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 # ---------------------------------------------------------------------------
 
 def sync_from_broker() -> dict:
-    """Reconcile the agent's book against the broker.
+    """Reconcile the agent's book against the broker, on the DYNAMIC
+    broker-derived capital model (docs/CAPITAL_MODEL.md).
 
-    CRITICAL DESIGN POINT: the agent's capital is its ALLOCATION, not the account balance.
+    Two figures, both recomputed from live broker data every sync — nothing
+    is a stored/legacy/fixed rupee amount:
 
-    This account is Vaibhav's personal one and contains long-term holdings that are not
-    the agent's to manage. An earlier version computed capital as cash + holdings + open
-    positions, which on a ₹5.7 lakh account with 21 holdings would have told the agent it
-    managed 57x its actual mandate — unlocking instrument tiers it has no business in and
-    sizing every trade against someone's retirement holdings.
+      CURRENT ACCOUNT VALUE  = broker free cash
+                             + Σ(broker holding/position qty × current LTP)
+      MANAGED EQUITY         = managed cash + Σ(managed position qty × current LTP)
+        managed cash         = the broker free cash (all of it — no ring-fenced grant)
+        managed positions    = the agent's own open positions + any holdings a
+                               governed process PROMOTED into state["managed"]["symbols"]
+                               (a sync never promotes)
 
-    So:
-      agent capital     = allocated_capital + realized P&L from the agent's own trades
-      agent spendable   = min(agent's notional free cash, actual broker free cash)
-      unmanaged symbols = everything at the broker the agent did not open — recorded so
-                          guardrails can refuse to trade them, never counted as capital
+    unmanaged symbols = everything at the broker the agent did not open — recorded
+                        so guardrails refuse to trade them; still counted in ACCOUNT
+                        VALUE and visible to research, never in MANAGED EQUITY.
 
-    A genuine mismatch is only one direction: a position the agent THINKS it holds that
-    is absent at the broker. The reverse (broker holdings the agent doesn't track) is
-    simply Vaibhav's own portfolio and is expected.
+    Risk sizing and the drawdown ladder run on MANAGED EQUITY. Deposits and
+    withdrawals are recorded as external cash-flow events
+    (engine.journal.record_cashflow_event), never inferred as strategy P&L, so
+    the drawdown is immune to the user moving money in or out.
+
+    A pre-migration state (no state["managed"] block) still takes the LEGACY
+    path (allocated_capital + realised P&L), unchanged — see the `else` branch.
+
+    A genuine mismatch is only one direction: a position the agent THINKS it holds
+    that is absent at the broker.
     """
     broker = get_broker()
     try:
@@ -67,35 +76,99 @@ def sync_from_broker() -> dict:
         return {"ok": False, "broker": broker.name, "error": f"{type(e).__name__}: {e}",
                 "action": "CIRCUIT BREAKER — cannot reach broker, do not trade this run"}
 
-    account_total = (
-        broker_free_cash
-        + sum(h.last_price * h.quantity for h in holdings)
-        + sum(p.last_price * abs(p.quantity) for p in positions)
-    )
+    # --- CURRENT ACCOUNT VALUE — always broker-derived, never a stored figure ------
+    #   = current broker cash + Σ(current broker holding/position qty × current LTP)
+    # holdings()/positions() are LTP-priced via the broker's confirmed quote
+    # endpoint (engine.broker_indstocks._attach_live_prices); no stored/legacy
+    # price is used. An unpriced line contributes 0 and is never guessed.
+    holdings_mkt = sum(h.last_price * h.quantity for h in holdings if h.last_price > 0)
+    positions_mkt = sum(p.last_price * abs(p.quantity) for p in positions if p.last_price > 0)
+    account_total = broker_free_cash + holdings_mkt + positions_mkt
 
-    broker_symbols = {h.symbol for h in holdings} | {p.symbol for p in positions}
+    by_sym = {h.symbol: h for h in holdings}
+    by_sym.update({p.symbol: p for p in positions})
+    broker_symbols = set(by_sym)
 
     state = jr.roll_day_if_needed()
     agent_symbols = {p["symbol"] for p in state.get("open_positions", [])}
     unmanaged = sorted(broker_symbols - agent_symbols)
-
-    # --- The agent's own book -------------------------------------------------------
-    allocated = float(state.get("allocated_capital", 10000.0))
-    agent_capital = allocated + float(state.get("realized_pnl_alltime", 0.0))
-    deployed = sum(p["entry"] * p["quantity"] for p in state.get("open_positions", []))
-    agent_notional_cash = agent_capital - deployed
-
-    # The agent cannot spend money that isn't actually in the account, however healthy
-    # its own book looks on paper.
-    spendable = min(agent_notional_cash, broker_free_cash)
+    now_iso = jr.now_ist().isoformat(timespec="seconds")
 
     state["broker_snapshot"] = {
         "total_account_value": round(account_total, 2),
         "free_cash": round(broker_free_cash, 2),
         "unmanaged_symbols": unmanaged,
-        "synced_at": jr.now_ist().isoformat(timespec="seconds"),
+        "synced_at": now_iso,
     }
-    state = jr.update_capital(agent_capital, max(spendable, 0.0), state)
+
+    mgr = state.get("managed")
+    warnings: list[str] = []
+
+    if mgr is not None:
+        # === DYNAMIC BROKER-DERIVED MODEL (migrated state) =======================
+        #   MANAGED EQUITY = current managed cash + Σ(managed position qty × LTP)
+        # Managed cash is the whole of the broker free cash — there is NO
+        # ring-fenced rupee grant. Managed positions = the agent's own open
+        # positions plus any holdings a governed process has PROMOTED into
+        # state["managed"]["symbols"] (empty by default; a sync never promotes).
+        managed_syms = agent_symbols | {s.upper() for s in mgr.get("symbols", [])}
+        managed_pos_mkt = 0.0
+        managed_unpriced: list[str] = []
+        for s in sorted(managed_syms):
+            b = by_sym.get(s)
+            if b is None:
+                continue  # tracked/promoted but absent at broker -> a mismatch (below)
+            if b.last_price > 0:
+                managed_pos_mkt += b.last_price * abs(b.quantity)
+            else:
+                managed_unpriced.append(s)
+
+        managed_cash = broker_free_cash
+        managed_equity = managed_cash + managed_pos_mkt
+        spendable = broker_free_cash              # every free rupee is the agent's to deploy
+
+        prev_free_cash = mgr.get("free_cash")
+        prev_valued_at = mgr.get("valued_at")
+
+        state = jr.update_managed_equity(
+            state, portfolio_value=managed_equity, free_cash=managed_cash,
+            positions_market_value=managed_pos_mkt, now=now_iso)
+
+        if managed_unpriced:
+            warnings.append(
+                f"managed position(s) had no live price this sync and are excluded from "
+                f"managed equity until priced: {', '.join(managed_unpriced)}"
+            )
+        # An unexplained managed-cash move is almost always an unrecorded deposit
+        # or withdrawal. WARN, never auto-adjust: a real deposit/withdrawal must be
+        # recorded with engine.journal.record_cashflow_event so it counts as an
+        # external cash flow, not strategy P&L.
+        if prev_free_cash is not None:
+            delta = round(managed_cash - float(prev_free_cash), 2)
+            recorded_since = [e for e in (mgr.get("cashflow_events") or [])
+                              if prev_valued_at and str(e.get("ts", "")) > str(prev_valued_at)]
+            if abs(delta) > 1.0 and not recorded_since:
+                warnings.append(
+                    f"managed cash changed by ₹{delta:,.2f} since the last sync with no "
+                    f"recorded cash-flow event — if you deposited or withdrew money, record "
+                    f"it so it is not treated as strategy P&L."
+                )
+
+        # legacy response keys (engine.briefing / scripts read these; not modified)
+        allocated = round(managed_cash, 2)
+        agent_capital = round(managed_equity, 2)
+        agent_notional_cash = managed_cash
+    else:
+        # === LEGACY MODEL (unmigrated state) — behaviour unchanged ===============
+        allocated = float(state.get("allocated_capital", 10000.0))
+        agent_capital = allocated + float(state.get("realized_pnl_alltime", 0.0))
+        deployed = sum(p["entry"] * p["quantity"] for p in state.get("open_positions", []))
+        agent_notional_cash = agent_capital - deployed
+        spendable = min(agent_notional_cash, broker_free_cash)
+        managed_equity = agent_capital
+        managed_cash = max(spendable, 0.0)
+        managed_pos_mkt = 0.0
+        state = jr.update_capital(agent_capital, max(spendable, 0.0), state)
 
     # --- Real mismatch: agent thinks it holds something the broker doesn't show -----
     mismatches = []
@@ -105,14 +178,12 @@ def sync_from_broker() -> dict:
             f"agent tracks positions absent at broker: {missing} — reconcile before trading"
         )
 
-    warnings = []
     if spendable <= 0:
         warnings.append(
             f"No spendable cash: broker free cash is ₹{broker_free_cash:,.2f}. The agent "
-            f"cannot open any position until cash is available in the account, regardless "
-            f"of its ₹{agent_capital:,.2f} allocation."
+            f"cannot open any position until cash is available in the account."
         )
-    elif spendable < agent_notional_cash:
+    elif mgr is None and spendable < agent_notional_cash:
         warnings.append(
             f"Agent's book says ₹{agent_notional_cash:,.2f} free but the account only has "
             f"₹{broker_free_cash:,.2f} — sizing is capped by the real cash."
@@ -129,6 +200,10 @@ def sync_from_broker() -> dict:
         "agent_positions": sorted(agent_symbols),
         "broker_free_cash": round(broker_free_cash, 2),
         "account_total_value": round(account_total, 2),
+        "managed_portfolio_value": round(managed_equity, 2),
+        "managed_free_cash": round(managed_cash, 2),
+        "managed_positions_market_value": round(managed_pos_mkt, 2),
+        "drawdown_pct": round(gr.drawdown_pct(state), 4),
         "unmanaged_symbols": unmanaged,
         "unmanaged_count": len(unmanaged),
         "mismatches": mismatches,

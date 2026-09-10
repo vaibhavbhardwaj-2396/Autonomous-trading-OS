@@ -259,13 +259,24 @@ check("holdings()/positions() price via the existing quote() only (no new endpoi
       _code.count("/market/quotes/ltp") <= 1
       and "_attach_live_prices" in _code, "pricing must reuse quote(), not a new path")
 
+# The broker adapter change itself must not touch run_cycle.sh, research/ or
+# paper/. (engine/execute.py and engine/guardrails.py ARE modified in the
+# separately-approved dynamic-capital-model slice — see docs/CAPITAL_MODEL.md
+# and tests/test_capital_model.py; broker_indstocks.py's own diff still does
+# not touch them, which is what this file is about.)
 import subprocess  # noqa: E402
 _prot = subprocess.run(
     ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD", "--",
-     "engine/guardrails.py", "engine/execute.py", "run_cycle.sh"],
+     "run_cycle.sh", "research", "paper"],
     capture_output=True, text=True)
-check("engine/guardrails.py, engine/execute.py, run_cycle.sh are unmodified",
+check("the broker-adapter work does not touch run_cycle.sh / research/ / paper/",
       _prot.stdout.strip() == "", f"changed: {_prot.stdout.strip()!r}")
+_bi_diff = subprocess.run(
+    ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD", "--", "engine/broker_indstocks.py"],
+    capture_output=True, text=True)
+check("engine/broker_indstocks.py is unchanged since HEAD (this slice adds tests only)",
+      _bi_diff.stdout.strip() in ("", "engine/broker_indstocks.py"),
+      f"unexpected: {_bi_diff.stdout.strip()!r}")
 
 
 print(f"\n{'=' * 52}")

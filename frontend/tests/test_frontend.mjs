@@ -106,6 +106,36 @@ check("accountStaleNotice() surfaces the API warning text for a stale account",
   fmt.accountStaleNotice(STALE_ACCT).includes("stale")
   && fmt.accountStaleNotice(STALE_ACCT).length > 0);
 
+// --- absent allocated_capital + legacy peak_capital: calm notes, not warnings --
+const VPS_ACCT = {
+  account_value_status: "fresh",
+  total_value: 63339.56, broker_free_cash: 32.31, holdings_market_value: 63307.25,
+  broker: { label: "INDmoney / INDstocks" }, broker_synced_at: "2026-09-11T14:30:00+05:30",
+  allocated_capital: null, allocated_capital_set: false,
+  peak_capital: 570447.95, peak_capital_is_legacy: true,
+  account_warnings: [],
+  account_notes: [
+    "allocated_capital is not set in state — the dashboard and engine.execute both use the ₹10,000 default; `capital` (₹10,000) is consistent with that, so nothing is unreconciled.",
+    "drawdown / risk state is measured against a legacy peak_capital of ₹570,447.95, ratcheted before the INDmoney migration. See docs/CAPITAL_MODEL.md.",
+  ],
+};
+
+check("accountStaleNotice() is EMPTY for the VPS state — the absent key is not a problem",
+  fmt.accountStaleNotice(VPS_ACCT) === "");
+check("accountInfoNotes() returns the two calm context notes for the VPS state",
+  fmt.accountInfoNotes(VPS_ACCT).length === 2
+  && fmt.accountInfoNotes(VPS_ACCT).some((n) => n.includes("default"))
+  && fmt.accountInfoNotes(VPS_ACCT).some((n) => n.includes("legacy peak_capital")));
+check("accountInfoNotes() is [] when there are none / payload lacks the field",
+  fmt.accountInfoNotes({ account_notes: [] }).length === 0
+  && fmt.accountInfoNotes({}).length === 0 && fmt.accountInfoNotes(undefined).length === 0);
+check("the VPS state's account total is the DYNAMIC ₹63,339.56, not the ₹10k / ₹570k figures",
+  fmt.accountTotalDisplay(VPS_ACCT).value === fmt.money(63339.56)
+  && fmt.accountTotalDisplay(VPS_ACCT).unavailable === false);
+check("views.js annotates the drawdown card when peak_capital_is_legacy",
+  /peak_capital_is_legacy/.test(stripComments(readFileSync(join(HERE, "../js/views.js"), "utf8")))
+  && stripComments(readFileSync(join(HERE, "../js/views.js"), "utf8")).includes("Risk / Drawdown ⚠"));
+
 // --- account total / unmanaged holdings / sync timestamp --------------------
 const INCOMPLETE_ACCT = {
   account_value_status: "incomplete", total_value: null, broker_free_cash: 32.31,

@@ -80,6 +80,23 @@ DEFAULT_SNAPSHOT_MAX_AGE_HOURS = 24.0
 # rounding never trips it; a real portfolio clears it by orders of magnitude.
 DEFAULT_HOLDINGS_VALUE_FLOOR = 1.0
 
+# The value engine.execute.sync_from_broker ALREADY applies when
+# memory/state.json has no `allocated_capital` key:
+#   allocated = float(state.get("allocated_capital", 10000.0))
+# The dashboard mirrors that same default so a state file that simply never
+# had the key set is not reported as "book value cannot be reconciled" — the
+# live engine treats it as ₹10,000 and computes a consistent `capital`, so
+# there is nothing unreconciled. NOT a second source of truth: it is the same
+# literal default, cited here, not re-decided.
+DEFAULT_ALLOCATED_CAPITAL = 10_000.0
+
+# `peak_capital` in memory/state.json only ever ratchets UP (engine.journal.
+# update_capital). If it is a large multiple of every current plausible
+# figure (`capital`, the effective allocation), it is a legacy artifact from
+# before the broker migration — when the sync briefly valued the whole
+# brokerage account as agent capital and ratcheted the peak to it.
+LEGACY_PEAK_RATIO = 5.0
+
 # Human-facing labels. The dashboard shows the label; code keys off the id.
 _BROKER_LABELS = {
     "indstocks": "INDmoney / INDstocks",
@@ -273,33 +290,54 @@ def reconcile_book_value(state: dict) -> dict:
     stale `state.json` still carries that number, this returns
     `reconciled=False` and the dashboard must flag it rather than show it.
 
+    `allocated_capital` is written by NOTHING in the codebase — it is only
+    ever seeded (`memory/state.json.template`) or hand-set, and
+    `engine.execute` reads it with a ₹10,000 default. So a state file that
+    simply never had the key is NOT unreconciled: the engine already treats
+    it as ₹10,000 and `capital` is computed consistently from that. This
+    function mirrors that same default (`DEFAULT_ALLOCATED_CAPITAL`) instead
+    of reporting a false "cannot verify book value". `allocated_capital_set`
+    records whether the key was actually present.
+
     Tolerance is deliberately loose (25% or ₹500): between broker syncs a
     closed-but-not-yet-resynced trade legitimately drifts `capital` from
     `allocated + realised P&L` by that trade's P&L. This check is a
     "something is badly wrong" detector, not a to-the-rupee reconciliation.
     """
-    allocated = _as_float(state.get("allocated_capital"))
+    allocated_raw = _as_float(state.get("allocated_capital"))
+    allocated_set = allocated_raw is not None
+    allocated = allocated_raw if allocated_set else DEFAULT_ALLOCATED_CAPITAL
     realized = _as_float(state.get("realized_pnl_alltime")) or 0.0
     capital = _as_float(state.get("capital"))
     snap = state.get("broker_snapshot") or {}
     total_account_value = _as_float(snap.get("total_account_value"))
 
-    expected = None if allocated is None else round(allocated + realized, 2)
+    expected = round(allocated + realized, 2)
 
     out = {
         "capital": capital,
-        "allocated_capital": allocated,
+        "allocated_capital": allocated_raw,              # what is actually in state (may be None)
+        "allocated_capital_effective": allocated,        # what engine.execute uses
+        "allocated_capital_set": allocated_set,
         "realized_pnl_alltime": realized,
         "expected_book_value": expected,
         "reconciled": True,
         "looks_like_account_total": False,
         "reason": None,
+        "note": None,
     }
 
-    if expected is None or capital is None:
+    if capital is None:
         out["reconciled"] = False
-        out["reason"] = "allocated_capital or capital is missing from state — cannot verify book value"
+        out["reason"] = "capital is missing from state — cannot verify the internal book value"
         return out
+
+    if not allocated_set:
+        out["note"] = (
+            f"allocated_capital is not set in state — the dashboard and engine.execute "
+            f"both use the ₹{DEFAULT_ALLOCATED_CAPITAL:,.0f} default; `capital` (₹{capital:,.0f}) "
+            f"is consistent with that, so nothing is unreconciled"
+        )
 
     tolerance = max(500.0, 0.25 * abs(expected))
     if abs(capital - expected) > tolerance:
@@ -318,10 +356,56 @@ def reconcile_book_value(state: dict) -> dict:
         out["reconciled"] = False
         out["reason"] = (
             f"capital (₹{capital:,.0f}) matches the whole brokerage account total "
-            f"(₹{total_account_value:,.0f}) — allocated_capital is ₹{allocated:,.0f}; "
-            f"the agent's mandate must never be the account balance"
+            f"(₹{total_account_value:,.0f}) — effective allocated_capital is "
+            f"₹{allocated:,.0f}; the agent's mandate must never be the account balance"
         )
 
+    return out
+
+
+def peak_capital_status(state: dict, *, allocated_effective: float = DEFAULT_ALLOCATED_CAPITAL) -> dict:
+    """Is `state["peak_capital"]` a plausible current figure, or a legacy
+    ratchet artifact?
+
+    `engine.journal.update_capital` only ever raises `peak_capital`
+    (`if capital > peak: peak = capital`) — it never lowers it. Before the
+    broker migration, `sync_from_broker` briefly computed `capital` as the
+    whole ~₹5.7L brokerage account, so `peak_capital` ratcheted to ~₹570k
+    and STAYED there after `capital` dropped back to the ₹10k mandate. The
+    drawdown ladder (`engine.guardrails.drawdown_level`, which the live
+    engine reads) then measures a ~98% drawdown against that dead peak.
+
+    This function does NOT touch `peak_capital` (that would require changing
+    the frozen kernel — see docs/CAPITAL_MODEL.md). It only lets the
+    dashboard SAY that the drawdown figure is measured against a legacy
+    peak, so the red state is explained rather than mysterious.
+
+        {
+          "peak_capital":         <float | None>,
+          "is_legacy":            bool,
+          "implied_drawdown_pct": <float | None>,   # (peak - capital) / peak
+          "note":                 <str | None>,
+        }
+    """
+    peak = _as_float(state.get("peak_capital"))
+    capital = _as_float(state.get("capital"))
+    out = {"peak_capital": peak, "is_legacy": False, "implied_drawdown_pct": None, "note": None}
+    if peak is None or peak <= 0:
+        return out
+
+    if capital is not None and capital > 0:
+        out["implied_drawdown_pct"] = round(max(0.0, (peak - capital) / peak) * 100.0, 2)
+
+    baseline = max(v for v in (capital, allocated_effective, 1.0) if v is not None and v > 0)
+    if peak > baseline * LEGACY_PEAK_RATIO:
+        out["is_legacy"] = True
+        out["note"] = (
+            f"drawdown / risk state is measured against a legacy peak_capital of "
+            f"₹{peak:,.2f}, ratcheted before the INDmoney migration (when the sync "
+            f"briefly valued the whole brokerage account as agent capital). The internal "
+            f"safety state has not been re-baselined — this is an internal note, not a "
+            f"broker-data problem. See docs/CAPITAL_MODEL.md."
+        )
     return out
 
 
@@ -428,7 +512,9 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
           "safe_holdings_market_value": <float | None>,  # total - free cash, ONLY if verified
           "safe_unmanaged_value": <float | None>,    # unmanaged holdings' value, ONLY if verified and agent holds nothing
           "unmanaged_holdings_count": int,
-          "warnings":          [<str>, ...],     # human-readable, for a dashboard banner
+          "peak_capital":       <peak_capital_status() dict>,
+          "warnings":          [<str>, ...],     # PROBLEMS to flag (red)
+          "notes":             [<str>, ...],     # truthful context, not problems (calm)
         }
     """
     broker = active_broker()
@@ -436,6 +522,8 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
                                  active_broker_id=broker["id"])
     book_value = reconcile_book_value(state)
     holdings = holdings_valuation(state)
+    peak = peak_capital_status(
+        state, allocated_effective=book_value["allocated_capital_effective"])
 
     snap = state.get("broker_snapshot") or {}
     fresh = snapshot["status"] == "fresh"
@@ -470,7 +558,10 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
     else:
         account_value_status = "fresh"
 
+    # warnings  = something the dashboard should flag as a PROBLEM (red)
+    # notes     = truthful context, not a problem (calm / informational)
     warnings: list[str] = []
+    notes: list[str] = []
     if not fresh:
         warnings.append(
             f"Broker account data is {snapshot['status'].replace('_', ' ')} "
@@ -482,14 +573,22 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
             f"Broker sync is current, but the account total could not be verified: "
             f"{holdings['reason']}. Free cash is shown; the account total is not."
         )
+    # Only a GENUINE inconsistency (capital drifted from / poisoned relative to
+    # allocated + realised P&L) is a warning. A simply-absent allocated_capital
+    # key is not — engine.execute defaults it and `capital` is consistent.
     if not book_value["reconciled"]:
-        warnings.append(f"Book value not reconciled: {book_value['reason']}.")
+        warnings.append(f"Internal book value not reconciled: {book_value['reason']}.")
+    elif book_value["note"]:
+        notes.append(book_value["note"] + ".")
+    if peak["is_legacy"]:
+        notes.append(peak["note"])
 
     return {
         "broker": broker,
         "snapshot": snapshot,
         "book_value": book_value,
         "holdings": holdings,
+        "peak_capital": peak,
         "account_value_status": account_value_status,
         "safe_total_value": safe_total,
         "safe_broker_free_cash": safe_free_cash,
@@ -497,4 +596,5 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
         "safe_unmanaged_value": safe_unmanaged_value,
         "unmanaged_holdings_count": holdings["unmanaged_holdings_count"],
         "warnings": warnings,
+        "notes": notes,
     }

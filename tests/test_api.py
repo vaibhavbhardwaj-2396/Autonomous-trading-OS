@@ -377,6 +377,42 @@ check("F3: a warning explains the total could not be verified",
       any("could not be verified" in w for w in acct_co["account_warnings"]),
       str(acct_co["account_warnings"]))
 
+# F4: the exact current VPS state — allocated_capital key ABSENT, capital present,
+# legacy peak_capital ~570k. The dashboard must be TRUTHFUL, not alarmed.
+_vps = json.loads(json.dumps(_base_state))
+_vps.pop("allocated_capital", None)                 # key genuinely absent
+_vps["capital"] = 10000.0
+_vps["peak_capital"] = 570447.95
+_vps["realized_pnl_alltime"] = 0.0
+_vps["cash_available"] = 32.31
+_vps["open_positions"] = []
+_vps["broker_snapshot"] = dict(_base_state["broker_snapshot"],
+                               total_account_value=63339.56, free_cash=32.31,
+                               unmanaged_symbols=[f"S{i}" for i in range(26)])
+_vps_path = TMP / "state_vps.json"
+_vps_path.write_text(json.dumps(_vps))
+gr.STATE_FILE = _vps_path
+try:
+    acct_v = api_data.get_account()
+finally:
+    gr.STATE_FILE = _orig_state_file
+
+check("F4: absent allocated_capital + consistent capital -> NO false book-value warning",
+      acct_v["account_warnings"] == [] and acct_v["book_value_reconciled"] is True, str(acct_v))
+check("F4: allocated_capital_set is False; a calm note (not a warning) is carried",
+      acct_v["allocated_capital_set"] is False and len(acct_v["account_notes"]) == 2, str(acct_v))
+check("F4: legacy peak_capital (~570k) is flagged, not shown as an account figure",
+      acct_v["peak_capital_is_legacy"] is True
+      and acct_v["peak_capital_note"] is not None
+      and 570447.95 not in (acct_v["total_value"], acct_v["broker_free_cash"],
+                            acct_v["holdings_market_value"]), str(acct_v))
+check("F4: the dynamic broker account is truthful (63339.56 / 32.31 / 63307.25)",
+      acct_v["total_value"] == 63339.56 and acct_v["broker_free_cash"] == 32.31
+      and acct_v["holdings_market_value"] == 63307.25
+      and acct_v["account_value_status"] == "fresh", str(acct_v))
+check("F4: no account-total -> agent-capital conversion (portfolio_value stays ₹10k)",
+      acct_v["portfolio_value"] == 10000.0 and acct_v["expected_book_value"] == 10000.0, str(acct_v))
+
 check("F: /positions (populated) returns the one open position with the right fields",
       len(pos2["positions"]) == 1 and pos2["positions"][0]["symbol"] == "INFY"
       and pos2["positions"][0]["side"] == "BUY" and pos2["positions"][0]["quantity"] == 10,
