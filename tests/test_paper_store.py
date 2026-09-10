@@ -51,6 +51,14 @@ with PaperTestEnv(initial_capital=50_000.0) as env:
     check("opening the store again does not re-initialize the account (singleton row)",
           account2["created_at"] == account["created_at"])
 
+    journal_mode = env.store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+    check("the database is NOT in WAL mode (WAL requires write access to its "
+          "-wal/-shm sidecar files even to service a plain SELECT, which "
+          "breaks PaperStore.open_readonly() under a locked-down, non-root "
+          "service account with no write grant on paper/ at all — see "
+          "paper/schema.sql's own comment on this)",
+          journal_mode.lower() != "wal")
+
 
 # ---------------------------------------------------------------------------
 print("\n--- lot open/close atomicity ---")

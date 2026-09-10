@@ -10,7 +10,23 @@
 -- plays for live trading (its own history lives in the append-only tables
 -- that reference it, never in the mutable row itself).
 
-PRAGMA journal_mode = WAL;
+-- NOT WAL. WAL mode needs its -wal/-shm sidecar files opened read-write to
+-- service ANY query, including a plain SELECT from a mode=ro connection —
+-- this is documented SQLite behavior, not a bug ("attempt to write a
+-- readonly database" is the exact error a read-only connection gets from a
+-- WAL-mode file in a directory it cannot write to). That is fundamentally
+-- incompatible with PaperStore.open_readonly() ever running under the
+-- locked-down, non-root `tradingapi` service account api/paper_data.py is
+-- designed for (see that module's and open_readonly()'s own docstrings) —
+-- unlike research/schema.sql's WAL choice, which is fine because
+-- research/ is deliberately in trading-api.service's ReadWritePaths
+-- (Store.open()'s own idempotent meta upsert already needs write access
+-- there). Paper was designed to need NO write grant at all, so it gets the
+-- default rollback-journal mode instead: a reader only ever needs a shared
+-- POSIX lock on the main .db file itself (works fine on a read-only fd),
+-- and only a writer's own crash recovery ever touches a sibling -journal
+-- file — never a concern for a connection that only ever SELECTs.
+PRAGMA journal_mode = DELETE;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS meta (
