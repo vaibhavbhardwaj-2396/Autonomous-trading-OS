@@ -1,0 +1,51 @@
+# ============================================================================
+#  Living Quant — RESEARCH crontab block  (canonical source; docs/RESEARCH_DEPLOY.md
+#  and docs/RESEARCH_WORKER.md describe each line)
+#
+#  Install:  crontab -e   on the VPS, paste this block in its OWN section,
+#            well clear of run_cycle.sh's live trading cycles.
+#  This file is NOT auto-installed. It is version-controlled so the intended
+#  schedule has one reviewable source of truth and a diffable history.
+#
+#  All research lines: research only — place no orders, read no broker, never
+#  import engine.execute / engine.guardrails / engine.broker*, never lock or
+#  promote a hypothesis, never write memory/state.json. Safe to overlap the
+#  live trading day because the research/live separation is at the Python
+#  import boundary, not a scheduling convention (tests/test_kernel_isolation.py,
+#  tests/test_research_engine_boundary.py, tests/test_research_worker.py §J).
+#
+#  Times are IST — set the VPS timezone to Asia/Kolkata first (docs/VPS_DEPLOY.md).
+# ============================================================================
+
+# ---- Recorder — perishable market-data capture (docs/RESEARCH_DEPLOY.md §3).
+# ---- Its own log; a recorder crash cannot abort a trading cycle and vice-versa.
+*/30 9-16 * * 1-5  cd /root/trading-agent && venv/bin/python -m research.recorder --cycle news       --quiet-on-success >> logs/recorder.log 2>&1
+15   10   * * 1-5  cd /root/trading-agent && venv/bin/python -m research.recorder --cycle intraday   --quiet-on-success >> logs/recorder.log 2>&1
+30   12   * * 1-5  cd /root/trading-agent && venv/bin/python -m research.recorder --cycle intraday   --quiet-on-success >> logs/recorder.log 2>&1
+30   14   * * 1-5  cd /root/trading-agent && venv/bin/python -m research.recorder --cycle intraday   --quiet-on-success >> logs/recorder.log 2>&1
+45   15   * * 1-5  cd /root/trading-agent && venv/bin/python -m research.recorder --cycle intraday   --quiet-on-success >> logs/recorder.log 2>&1
+30   18   * * 1-5  cd /root/trading-agent && venv/bin/python -m research.recorder --cycle evening    --quiet-on-success >> logs/recorder.log 2>&1
+
+# ---- Continuous research worker (research/brain/worker.py, docs/RESEARCH_WORKER.md).
+# ---- One BOUNDED heartbeat per tick, then exit — cron is the heartbeat, the
+# ---- module is the brain. Defaults ARE the required bounds: max_discovery=1,
+# ---- max_experiments=1, max_runtime=300s, concurrency=1 (enforced), cooldown=1800s,
+# ---- discovery on. Overlapping ticks are made safe by research/.worker.lock
+# ---- (a second invocation exits 0, does nothing). Runs THROUGH market hours by
+# ---- design — research and trading are separate processes, never gated on each
+# ---- other. Quiet on a successful no-op cycle; a component error exits 1 and is
+# ---- logged to research/worker_runs.jsonl (and Telegram if notable).
+*/10 6-23 * * *   cd /root/trading-agent && venv/bin/python -m research.brain.worker --quiet-on-success >> logs/research_worker.log 2>&1
+
+# ---- Deeper overnight batch — same worker, larger bounds, once nightly after
+# ---- the recorder's 18:30 evening capture. Subsumes the old standalone
+# ---- `research.overnight` 01:00 job (identical build_digest + investigator.
+# ---- investigate + _existing_duplicate discovery path, PLUS experiments).
+30   23   * * *   cd /root/trading-agent && venv/bin/python -m research.brain.worker --max-discovery-attempts 3 --max-experiments 3 --max-runtime-seconds 900 --quiet-on-success >> logs/research_worker.log 2>&1
+
+# ---- RETIRED — do NOT add this line. The 23:30 deeper worker batch above does
+# ---- everything it did (discovery via the SAME investigator.investigate +
+# ---- research.overnight._existing_duplicate path) and adds experiments.
+# ---- research/overnight.py the module is kept (worker.py imports its
+# ---- _existing_duplicate; still hand-invocable: `python -m research.overnight`).
+# 0    1    * * *    cd /root/trading-agent && venv/bin/python -m research.overnight --quiet-on-success >> logs/overnight_research.log 2>&1

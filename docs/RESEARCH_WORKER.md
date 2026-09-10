@@ -64,28 +64,38 @@ running" no-op and a legitimate "no work" heartbeat), `1` if a component
 errored this cycle (the error is also in the telemetry row and, if notable,
 on Telegram).
 
-## Recommended VPS cron (NOT installed automatically)
+## VPS cron — `deploy/research.cron` (NOT installed automatically)
 
-`crontab -e`, in its own block, well clear of `run_cycle.sh`'s live cycles:
+The canonical schedule lives in **`deploy/research.cron`** (version-controlled,
+one reviewable source of truth). To deploy: `crontab -e` on the VPS and paste
+that block in its own section, well clear of `run_cycle.sh`'s live cycles.
+
+The two worker lines it adds:
 
 ```cron
-# ---- Continuous Research Worker v0 (research only — proposal-only, never
-# ---- locks a hypothesis, never trades, never touches a broker or live state).
-# ---- Safe during market hours: research/live separation is at the import
-# ---- boundary. Overlapping ticks are made safe by research/.worker.lock.
+# continuous bounded heartbeat — defaults ARE the required bounds
+# (discovery 1, experiments 1, runtime 300s, concurrency 1, cooldown 1800s)
 */10 6-23 * * *   cd /root/trading-agent && venv/bin/python -m research.brain.worker --quiet-on-success >> logs/research_worker.log 2>&1
 
-# ---- one deeper batch late evening, after the recorder's 18:30 evening cycle
+# deeper batch once nightly, after the recorder's 18:30 evening cycle
 30   23   * * *   cd /root/trading-agent && venv/bin/python -m research.brain.worker --max-discovery-attempts 3 --max-experiments 3 --max-runtime-seconds 900 --quiet-on-success >> logs/research_worker.log 2>&1
 ```
 
-If you adopt this, you can **retire the standalone
-`research.overnight` 01:00 line** (`docs/RESEARCH_DEPLOY.md` §3a) — the worker
-covers discovery and adds experiments. `research/overnight.py` is kept in the
-tree either way (still directly invocable); this slice does not remove it.
-Both create DRAFTs through the *same* `investigator.investigate` +
-duplicate-detection path, so running both is safe (the research Store's own
-idempotency + the shared fingerprint check dedupe), just redundant.
+The heartbeat window `6-23` runs **straight through market hours** — research
+and trading are separate processes and neither is ever gated on the other.
+
+### The old `research.overnight` 01:00 cron is RETIRED
+
+`deploy/research.cron` deliberately omits the standalone
+`0 1 * * * research.overnight` line (`docs/RESEARCH_DEPLOY.md` §3a). The
+`30 23` deeper worker batch fully subsumes it: it runs discovery through the
+**same** `build_digest` → `investigator.investigate` →
+`research.overnight._existing_duplicate` path (the worker imports that duplicate
+check verbatim from `research/overnight.py`), with the same default attempt cap
+of 3, **plus** it runs experiments — which `research.overnight` never did.
+`research/overnight.py` the module stays in the tree (the worker depends on it,
+and `python -m research.overnight` still runs by hand); only its cron line is
+removed so the same DRAFTs are not generated twice a night.
 
 ## Resource limits (config, not scattered constants)
 
@@ -148,6 +158,20 @@ errors                   [str] — a component failing is recorded, never raised
 limits                   the effective WorkerLimits for this run
 notified                 whether a Telegram message went out
 ```
+
+## Status — `--status` (read-only)
+
+```bash
+venv/bin/python -m research.brain.worker --status        # human summary
+venv/bin/python -m research.brain.worker --status --json  # machine-readable
+```
+
+Reads `research/worker_runs.jsonl` + `research/.worker_state.json` and prints:
+last heartbeat time and runtime, what the last cycle attempted
+(`work_selected`), experiments run, drafts created, `no_work_reason`, runtime
+budget remaining, whether discovery is in cooldown (and until when), recent
+errors, and the last N cycle labels. Opens no Store, takes no lock, does no
+work — safe to run any time, including while a heartbeat is in flight.
 
 ## Telegram — bounded
 

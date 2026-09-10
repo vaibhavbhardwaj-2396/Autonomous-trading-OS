@@ -340,6 +340,54 @@ for pattern in ("deploy/api.env", "frontend/config.js", "memory/state.json", ".e
     check(f"D: .gitignore excludes {pattern}", pattern in _gitignore_text)
 
 
+# ===========================================================================
+print("\n--- E: deploy/research.cron — continuous research worker schedule ---")
+# ===========================================================================
+
+_cron_path = REPO_ROOT / "deploy" / "research.cron"
+check("E: deploy/research.cron exists (the canonical research schedule)", _cron_path.is_file())
+_cron_text = _cron_path.read_text() if _cron_path.is_file() else ""
+# only the schedule lines — a leading "#" (with optional indent) is a comment.
+# whitespace between cron fields is cosmetic (columns are aligned) -> collapse it
+_cron_active = [re.sub(r"\s+", " ", ln.strip()) for ln in _cron_text.splitlines()
+                if ln.strip() and not ln.lstrip().startswith("#")]
+
+check("E: a continuous bounded heartbeat is scheduled every 10 min across 06–23h",
+      any(ln.startswith("*/10 6-23 * * * ") and "research.brain.worker" in ln
+          and "--quiet-on-success" in ln for ln in _cron_active),
+      "\n".join(_cron_active))
+check("E: the heartbeat window 6-23 spans the trading day (research runs through market hours)",
+      all(int(a) <= 9 and int(b) >= 16
+          for ln in _cron_active if ln.startswith("*/10 ")
+          for a, b in [ln.split()[1].split("-")]),
+      "the worker must not be scheduled to avoid market hours")
+check("E: a deeper nightly batch is scheduled at 23:30 with the 3 / 3 / 900 bounds",
+      any(ln.startswith("30 23 * * * ") and "research.brain.worker" in ln
+          and "--max-discovery-attempts 3" in ln and "--max-experiments 3" in ln
+          and "--max-runtime-seconds 900" in ln for ln in _cron_active),
+      "\n".join(_cron_active))
+check("E: the redundant standalone `research.overnight` cron line is NOT active "
+      "(subsumed by the 23:30 worker batch)",
+      not any("research.overnight" in ln for ln in _cron_active),
+      [ln for ln in _cron_active if "research.overnight" in ln])
+check("E: research.cron schedules research ONLY — no run_cycle.sh / engine.execute / "
+      "paper / broker line",
+      not any(tok in ln for ln in _cron_active
+              for tok in ("run_cycle.sh", "engine.execute", "engine.briefing",
+                          "paper.runner", "broker")),
+      "\n".join(_cron_active))
+check("E: every active line uses the repo's cd + venv convention",
+      bool(_cron_active) and all(
+          " cd /root/trading-agent && venv/bin/python -m " in ln for ln in _cron_active),
+      "\n".join(_cron_active))
+check("E: docs point at deploy/research.cron as the canonical schedule",
+      "deploy/research.cron" in (REPO_ROOT / "docs" / "RESEARCH_WORKER.md").read_text())
+check("E: docs/RESEARCH_DEPLOY.md marks the 01:00 research.overnight cron as retired",
+      re.search(r"research\.overnight.*(retired|RETIRED|superseded|no longer)",
+                (REPO_ROOT / "docs" / "RESEARCH_DEPLOY.md").read_text(), re.IGNORECASE
+                | re.DOTALL) is not None)
+
+
 print(f"\n{'=' * 52}")
 print(f"  {PASSED} passed, {FAILED} failed")
 print(f"{'=' * 52}\n")

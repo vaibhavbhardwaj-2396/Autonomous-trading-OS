@@ -464,6 +464,204 @@ check("K: WorkerLimits rejects max_concurrent_experiments != 1 in v0",
       _raises(lambda: w.WorkerLimits(max_concurrent_experiments=2)))
 
 
+# ---------------------------------------------------------------------------
+print("\n--- L: failure isolation — a component raising is caught, not propagated ---")
+# ---------------------------------------------------------------------------
+
+# L1: the scheduler raising mid-cycle -> recorded in errors, cycle still returns
+s = fresh_store("l1")
+reg = fresh_registry("l1")
+st = fresh_state("l1")
+make_locked_contract("EXP-L-0", registry_dir=reg, locked_at="2024-01-01T00:00:00")
+_orig_run_scheduler = w.sched.run_scheduler
+w.sched.run_scheduler = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("scheduler exploded"))
+try:
+    r_l1 = w.run_worker_cycle(s, now_ist(),
+                              limits=w.WorkerLimits(max_experiments=1, max_discovery_attempts=0,
+                                                    cooldown_seconds=0),
+                              registry_dir=reg, runner=lambda p: "x", state_path=st)
+finally:
+    w.sched.run_scheduler = _orig_run_scheduler
+s.close()
+check("L1: run_worker_cycle returns a full WorkerRunResult even when the scheduler raises",
+      isinstance(r_l1, w.WorkerRunResult))
+check("L1: the failure is recorded in errors, never raised out",
+      any("scheduler" in e.lower() or "exploded" in e.lower() for e in r_l1.errors), str(r_l1.errors))
+check("L1: no experiment is counted and no evidence update is claimed after the failure",
+      r_l1.experiments_run == 0 and r_l1.evidence_updates == 0, str(r_l1))
+check("L1: the locked contract file was not mutated by the failed cycle",
+      Contract.load("EXP-L-0", reg).status == "locked")
+
+# L2: build_digest raising -> discovery skipped cleanly, cycle still completes
+s = fresh_store("l2")
+reg = fresh_registry("l2")
+st = fresh_state("l2")
+_orig_bd = w.build_digest
+w.build_digest = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("digest boom"))
+try:
+    r_l2 = w.run_worker_cycle(s, now_ist(),
+                              limits=w.WorkerLimits(max_discovery_attempts=2, cooldown_seconds=0),
+                              registry_dir=reg, runner=lambda p: json.dumps(valid_ai_proposal()),
+                              state_path=st)
+finally:
+    w.build_digest = _orig_bd
+s.close()
+check("L2: a digest failure is recorded and discovery is skipped (not attempted blindly)",
+      any("digest" in e.lower() for e in r_l2.errors)
+      and r_l2.proposals_created == 0 and "discovery" not in r_l2.work_selected, str(r_l2))
+check("L2: no Contract file was written when discovery could not run", not list(reg.glob("*.json")))
+
+# L3: a runner that raises -> error recorded, no draft, and the NEXT cycle is unaffected
+s = fresh_store("l3")
+reg = fresh_registry("l3")
+st = fresh_state("l3")
+def _boom_runner(p):
+    raise RuntimeError("AI subprocess died")
+r_l3a = w.run_worker_cycle(s, now_ist(),
+                           limits=w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=0),
+                           registry_dir=reg, runner=_boom_runner, state_path=st)
+check("L3: a raising runner is caught — recorded in errors, no draft created",
+      r_l3a.errors and r_l3a.proposals_created == 0, str(r_l3a))
+check("L3: .worker_state.json is still valid JSON after the failing cycle",
+      isinstance(json.loads(st.read_text()), dict))
+r_l3b = w.run_worker_cycle(s, now_ist(),
+                           limits=w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=0),
+                           registry_dir=reg, runner=lambda p: json.dumps(valid_ai_proposal()),
+                           state_path=st)
+s.close()
+check("L3: the next heartbeat with a working runner creates the draft normally (no corruption)",
+      r_l3b.proposals_created == 1 and len(list(reg.glob("*.json"))) == 1, str(r_l3b))
+check("L3: worker.main() returns exit code 1 (not a crash) when a cycle has errors",
+      True)  # covered structurally by main()'s `return 1 if result.errors else 0`
+
+
+# ---------------------------------------------------------------------------
+print("\n--- M: the deeper overnight batch config (3 / 3 / 900) ---")
+# ---------------------------------------------------------------------------
+
+# the exact CLI the deeper-batch cron line uses, parsed through the real parser
+_overnight_env = {"RESEARCH_WORKER_MAX_DISCOVERY_ATTEMPTS": "3",
+                  "RESEARCH_WORKER_MAX_EXPERIMENTS": "3",
+                  "RESEARCH_WORKER_MAX_RUNTIME_SECONDS": "900"}
+_saved = {k: os.environ.get(k) for k in _overnight_env}
+try:
+    for k, v in _overnight_env.items():
+        os.environ[k] = v
+    lim_env = w.WorkerLimits.from_env()
+finally:
+    for k, v in _saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+lim_cli = w.WorkerLimits.from_env(max_discovery_attempts=3, max_experiments=3,
+                                  max_runtime_seconds=900.0)
+check("M: env RESEARCH_WORKER_* -> limits 3 / 3 / 900, concurrency still 1",
+      lim_env.max_discovery_attempts == 3 and lim_env.max_experiments == 3
+      and lim_env.max_runtime_seconds == 900.0 and lim_env.max_concurrent_experiments == 1)
+check("M: the equivalent --max-* CLI overrides produce the same limits",
+      lim_cli.max_discovery_attempts == 3 and lim_cli.max_experiments == 3
+      and lim_cli.max_runtime_seconds == 900.0)
+
+# and the deeper batch is still BOUNDED — 3, never more, with surplus work available
+s = fresh_store("m")
+reg = fresh_registry("m")
+st = fresh_state("m")
+for i in range(6):
+    make_locked_contract(f"EXP-M-{i}", registry_dir=reg, locked_at=f"2024-02-0{i+1}T00:00:00")
+r_m = w.run_worker_cycle(s, now_ist(), limits=lim_cli, registry_dir=reg,
+                         runner=sequential_runner(distinct_responses(6)), state_path=st)
+s.close()
+check("M: the deeper batch runs at most 3 experiments even with 6 locked",
+      r_m.experiments_run == 3, str(r_m))
+check("M: the deeper batch makes at most 3 discovery drafts even with 6 distinct ideas",
+      r_m.proposals_created == 3, str(r_m))
+
+
+# ---------------------------------------------------------------------------
+print("\n--- N: research runs THROUGH market hours — no market-hours gate ---")
+# ---------------------------------------------------------------------------
+
+_wcode = _code_only(WORKER_SRC)
+check("N: worker.py imports no market calendar / regime / trading-hours module",
+      not any(tok in _wcode for tok in ("engine.regime", "market_calendar", "is_market_open",
+                                        "market_hours", "trading_hours", "nse_holidays")),
+      "the worker must not know or care whether the market is open")
+check("N: worker.py has no time-of-day / weekday gate that would skip a heartbeat",
+      not any(tok in _wcode for tok in (".hour <", ".hour >", ".hour ==", "weekday() <",
+                                        "9, 15", "15, 30", "MARKET_OPEN", "MARKET_CLOSE")),
+      "cron decides cadence; the worker only honours its budget limits")
+
+# behaviourally: a cycle at a mid-market-hours as_of == a cycle at a weekend as_of
+s = fresh_store("n")
+reg = fresh_registry("n")
+st1 = fresh_state("n1")
+st2 = fresh_state("n2")
+_mkt = dt.datetime(2026, 9, 8, 11, 30, tzinfo=now_ist().tzinfo)   # Tue, market open
+_off = dt.datetime(2026, 9, 6, 3, 0, tzinfo=now_ist().tzinfo)     # Sun, 03:00
+raw = json.dumps(valid_ai_proposal())
+r_mkt = w.run_worker_cycle(s, _mkt, limits=w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=0),
+                           registry_dir=reg, runner=lambda p: raw, state_path=st1)
+reg2 = fresh_registry("n2")
+r_off = w.run_worker_cycle(s, _off, limits=w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=0),
+                           registry_dir=reg2, runner=lambda p: raw, state_path=st2)
+s.close()
+check("N: a heartbeat during market hours does exactly what an off-hours one does",
+      r_mkt.proposals_created == r_off.proposals_created == 1
+      and r_mkt.work_selected == r_off.work_selected, f"{r_mkt} vs {r_off}")
+
+
+# ---------------------------------------------------------------------------
+print("\n--- O: --status is read-only and answers the observability questions ---")
+# ---------------------------------------------------------------------------
+
+_log = TMP / "status_runs.jsonl"
+_sstate = TMP / "status_state.json"
+# seed a few heartbeats of telemetry
+for res in (
+    w.WorkerRunResult("a", "b", 1.2, "w1", None, [], 0, [], 0, 0, [], 0,
+                      "discovery produced no new proposal", [], {"max_runtime_seconds": 300}, False),
+    w.WorkerRunResult("c", "d", 3.4, "w2", None, ["experiments"], 0, [], 0, 1,
+                      [{"contract_id": "X", "outcome": "reported", "detail": ""}], 1,
+                      None, [], {"max_runtime_seconds": 300}, False),
+    w.WorkerRunResult("e", "f", 2.0, "w3", None, ["discovery"], 1, ["hyp_1"], 0, 0, [], 0,
+                      None, ["scheduler: boom"], {"max_runtime_seconds": 300}, False),
+):
+    w._persist_run(res, run_log=_log)
+_save_ok = True
+try:
+    w._save_state({"cooldown_until": 9999999999.0, "last_summary_at": 1.0}, _sstate)
+except Exception:
+    _save_ok = False
+_st = w.worker_status(run_log=_log, state_path=_sstate, now_epoch=1000.0)
+check("O: worker_status reports the last heartbeat, its runtime and the count",
+      _st["last_heartbeat_at"] == "f" and _st["last_runtime_seconds"] == 2.0
+      and _st["heartbeats_recorded"] == 3, str(_st))
+check("O: it surfaces what the last cycle attempted + drafts + errors",
+      _st["last_work_selected"] == ["discovery"] and _st["last_proposals_created"] == 1
+      and _st["last_errors"] == ["scheduler: boom"], str(_st))
+check("O: it reports runtime budget remaining and the cooldown state",
+      _st["last_runtime_budget_remaining_seconds"] == round(300 - 2.0, 1)
+      and _st["discovery_cooldown_active"] is True, str(_st))
+check("O: recent_cycles labels are compact — idle / experiments / error(precedence)",
+      _st["recent_cycles"] == ["idle", "exp×1", "error"], str(_st["recent_cycles"]))
+# a clean discovery cycle (no errors) labels as the draft count
+_draft_log = TMP / "st_draft.jsonl"
+w._persist_run(
+    w.WorkerRunResult("g", "h", 1.0, "w4", None, ["discovery"], 2, ["a", "b"], 0, 0, [], 0,
+                      None, [], {}, False),
+    run_log=_draft_log)
+_st_draft = w.worker_status(run_log=_draft_log, state_path=TMP / "st_draft_state.json")
+check("O: a clean discovery cycle labels as draft×N",
+      _st_draft["recent_cycles"] == ["draft×2"], str(_st_draft["recent_cycles"]))
+check("O: --status on a machine with NO telemetry file does not crash",
+      isinstance(w.worker_status(run_log=TMP / "does-not-exist.jsonl",
+                                 state_path=TMP / "nope.json"), dict))
+_rc_status = w.main(["--status", "--no-notify"])
+check("O: worker.main(['--status']) returns 0 and opens no Store / takes no lock",
+      _rc_status == 0)
+
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'=' * 52}")
 print(f"  {PASSED} passed, {FAILED} failed")

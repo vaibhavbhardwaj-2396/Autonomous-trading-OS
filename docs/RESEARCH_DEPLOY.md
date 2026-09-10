@@ -131,24 +131,32 @@ and sends a Telegram alert. One flaky feed is a warning; total silence is a page
 
 ## 3a. The overnight Research AI cadence
 
-### Its own cron. Never inside `run_cycle.sh`, and never in the recorder's cron block above.
+### Cron RETIRED — superseded by the continuous research worker
+
+The standalone `0 1 * * * research.overnight` cron line is **no longer
+scheduled**. The continuous research worker's deeper nightly batch
+(`30 23 * * *` in `deploy/research.cron`, `docs/RESEARCH_WORKER.md`) does
+everything it did — discovery through the **same** `build_digest` →
+`investigator.investigate` → `research.overnight._existing_duplicate` path,
+same default cap of 3 attempts — **plus** it runs the locked experiments the
+overnight job never touched. Scheduling both just generated the same DRAFTs
+twice a night.
+
+`research/overnight.py` the module is unchanged and stays in the tree: the
+worker imports its `_existing_duplicate` helper, and it is still directly
+runnable by hand:
 
 ```cron
-# ---- Living Quant overnight Research AI (PROPOSAL ONLY — creates DRAFT
-# ---- hypotheses for human review; never approves, locks, or trades)
-0    1    * * *    cd /root/trading-agent && venv/bin/python -m research.overnight --quiet-on-success >> logs/overnight_research.log 2>&1
+# (do NOT re-add this line — the 23:30 worker batch in deploy/research.cron covers it)
+# 0    1    * * *    cd /root/trading-agent && venv/bin/python -m research.overnight --quiet-on-success >> logs/overnight_research.log 2>&1
 ```
 
-01:00 IST sits after the last recorder entry (18:30 IST evening cycle above)
-and well before the next day's premarket live cycle (08:30 IST, see
-`docs/ENGINE_DEPLOY.md`), so the digest it reads is built from a fully
-recorded day and nothing it does can overlap a live trading run.
-
-Separate cron entry, separate log (`research/overnight_runs.jsonl`, plus the
-`logs/overnight_research.log` cron redirect above) — the same "own cron, own
-log" isolation the recorder uses, for the same reason: a bad overnight run
-must never be able to abort a trading cycle, and a bad trading day must never
-skip that night's research.
+The worker's nightly batch at 23:30 IST sits after the last recorder entry
+(18:30 IST evening cycle above) and well before the next day's premarket live
+cycle (08:30 IST, see `docs/ENGINE_DEPLOY.md`), so the digest it reads is
+built from a fully recorded day. It has its own cron line and its own log
+(`research/worker_runs.jsonl` + `logs/research_worker.log`) — the same "own
+cron, own log" isolation the recorder uses.
 
 ### What it does, and what it structurally cannot do
 

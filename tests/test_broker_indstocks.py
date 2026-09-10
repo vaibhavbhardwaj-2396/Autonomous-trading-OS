@@ -259,18 +259,23 @@ check("holdings()/positions() price via the existing quote() only (no new endpoi
       _code.count("/market/quotes/ltp") <= 1
       and "_attach_live_prices" in _code, "pricing must reuse quote(), not a new path")
 
-# The broker adapter change itself must not touch run_cycle.sh, research/ or
-# paper/. (engine/execute.py and engine/guardrails.py ARE modified in the
-# separately-approved dynamic-capital-model slice — see docs/CAPITAL_MODEL.md
-# and tests/test_capital_model.py; broker_indstocks.py's own diff still does
-# not touch them, which is what this file is about.)
+# The broker adapter is a self-contained engine/ module: it must never grow an
+# import into research/ or paper/, and the live trading wrapper run_cycle.sh
+# must not be dragged into a broker-adapter change. This is a STATIC property
+# of the committed adapter + the wrapper, checked directly — not a whole-
+# working-tree diff (other, unrelated slices legitimately change research/ and
+# paper/; the invariant here is only about broker_indstocks.py and run_cycle.sh).
 import subprocess  # noqa: E402
-_prot = subprocess.run(
-    ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD", "--",
-     "run_cycle.sh", "research", "paper"],
+for _mod in ("broker_indstocks.py", "broker.py", "broker_kite.py"):
+    _src = re.sub(r'"""[\s\S]*?"""', "", (ROOT / "engine" / _mod).read_text())
+    _imps = re.findall(r"^\s*(?:from|import)\s+([.\w]+)", _src, re.MULTILINE)
+    check(f"engine/{_mod} imports nothing from research/ or paper/",
+          not any(m.split(".")[0] in ("research", "paper") for m in _imps), str(_imps))
+_rcs = subprocess.run(
+    ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD", "--", "run_cycle.sh"],
     capture_output=True, text=True)
-check("the broker-adapter work does not touch run_cycle.sh / research/ / paper/",
-      _prot.stdout.strip() == "", f"changed: {_prot.stdout.strip()!r}")
+check("the broker-adapter work does not touch run_cycle.sh (the live trading wrapper)",
+      _rcs.stdout.strip() == "", f"changed: {_rcs.stdout.strip()!r}")
 _bi_diff = subprocess.run(
     ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD", "--", "engine/broker_indstocks.py"],
     capture_output=True, text=True)

@@ -513,6 +513,102 @@ def _fmt_interval(seconds: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Status — a lightweight read-only view of the worker's own telemetry. No
+# Store, no lock, no side effect: it only reads worker_runs.jsonl and the
+# cooldown bookmark. Answers docs/RESEARCH_WORKER.md's observability
+# questions (when did the last heartbeat run, what did it attempt, did
+# discovery / an experiment run, what stopped it, was there an error)
+# without a dashboard.
+# ---------------------------------------------------------------------------
+
+def worker_status(*, run_log: Path = RUN_LOG, state_path: Path = STATE_PATH,
+                  tail: int = 5, now_epoch: Optional[float] = None) -> dict:
+    now_epoch = now_epoch if now_epoch is not None else time.time()
+    rows: list = []
+    try:
+        for line in run_log.read_text().splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        rows = []
+
+    state = _load_state(state_path)
+    cooldown_until = float(state.get("cooldown_until") or 0.0)
+    last = rows[-1] if rows else None
+
+    def _cycle_label(r: dict) -> str:
+        if r.get("errors"):
+            return "error"
+        ws = r.get("work_selected") or []
+        if not ws:
+            return "idle"
+        bits = []
+        if "experiments" in ws:
+            bits.append(f"exp×{r.get('experiments_run', 0)}")
+        if "discovery" in ws:
+            bits.append(f"draft×{r.get('proposals_created', 0)}"
+                        if r.get("proposals_created") else "disc")
+        return "+".join(bits) or "idle"
+
+    limits = (last or {}).get("limits") or {}
+    max_rt = float(limits.get("max_runtime_seconds") or 0.0)
+    last_rt = float((last or {}).get("runtime_seconds") or 0.0)
+
+    return {
+        "telemetry_file": str(run_log),
+        "heartbeats_recorded": len(rows),
+        "last_heartbeat_at": (last or {}).get("finished_at"),
+        "last_runtime_seconds": last_rt,
+        "last_work_selected": (last or {}).get("work_selected") or [],
+        "last_experiments_run": (last or {}).get("experiments_run"),
+        "last_proposals_created": (last or {}).get("proposals_created"),
+        "last_duplicate_rejections": (last or {}).get("duplicate_rejections"),
+        "last_no_work_reason": (last or {}).get("no_work_reason"),
+        "last_errors": (last or {}).get("errors") or [],
+        "last_runtime_budget_remaining_seconds": (round(max_rt - last_rt, 1)
+                                                  if max_rt else None),
+        "recent_cycles": [_cycle_label(r) for r in rows[-tail:]],
+        "recent_errors": [e for r in rows[-tail:] for e in (r.get("errors") or [])],
+        "discovery_cooldown_active": now_epoch < cooldown_until,
+        "discovery_cooldown_until": (dt.datetime.fromtimestamp(cooldown_until).isoformat()
+                                     if cooldown_until else None),
+        "last_summary_at": state.get("last_summary_at"),
+        "effective_limits_last_run": limits,
+    }
+
+
+def _print_status(st: dict) -> None:
+    print("Research worker status")
+    hb = st["last_heartbeat_at"] or "never"
+    print(f"  last heartbeat        : {hb}  (runtime {st['last_runtime_seconds']}s, "
+          f"{st['heartbeats_recorded']} recorded)")
+    print(f"  last cycle            : work_selected={st['last_work_selected'] or '[]'}  "
+          f"experiments_run={st['last_experiments_run']}  "
+          f"proposals_created={st['last_proposals_created']}  "
+          f"duplicates={st['last_duplicate_rejections']}")
+    if st["last_no_work_reason"]:
+        print(f"  last no_work_reason   : {st['last_no_work_reason']}")
+    rem = st["last_runtime_budget_remaining_seconds"]
+    if rem is not None:
+        print(f"  runtime budget left   : {rem}s of "
+              f"{st['effective_limits_last_run'].get('max_runtime_seconds')}s")
+    if st["discovery_cooldown_active"]:
+        print(f"  discovery             : IN COOLDOWN until {st['discovery_cooldown_until']}")
+    else:
+        print(f"  discovery             : active (no cooldown)")
+    print(f"  recent cycles         : {st['recent_cycles'] or '[]'}")
+    if st["recent_errors"]:
+        print(f"  recent errors         : {st['recent_errors']}")
+    else:
+        print(f"  recent errors         : none")
+    print(f"  telemetry             : {st['telemetry_file']}")
+
+
+# ---------------------------------------------------------------------------
 # CLI — one heartbeat, then exit. No daemon mode, by design.
 # ---------------------------------------------------------------------------
 
@@ -534,7 +630,18 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--quiet-on-success", action="store_true",
                     help="only print when something went wrong (for cron)")
+    ap.add_argument("--status", action="store_true",
+                    help="print a read-only summary of recent heartbeats "
+                         "(from research/worker_runs.jsonl) and exit — no work is done")
     args = ap.parse_args(argv)
+
+    if args.status:
+        st = worker_status()
+        if args.json:
+            print(json.dumps(st, indent=2, default=str))
+        else:
+            _print_status(st)
+        return 0
 
     overrides = {
         "max_discovery_attempts": args.max_discovery_attempts,
