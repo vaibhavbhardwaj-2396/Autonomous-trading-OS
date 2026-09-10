@@ -8,6 +8,7 @@ import { apiGet } from "./api.js";
 import {
   esc, money, num, pnlClass, dt, badge, table, errorState,
   brokerCard, portfolioValueDisplay, accountStaleNotice,
+  accountTotalDisplay, unmanagedHoldingsDisplay,
 } from "./format.js";
 
 function el(id) {
@@ -118,10 +119,13 @@ function accountCardsHtml(acct, risk, regime) {
   const pnl = acct.pnl_today;
   const pv = portfolioValueDisplay(acct);
   const bc = brokerCard(acct);
+  const at = accountTotalDisplay(acct);
   const cards = [
     { label: "Broker", value: bc.text, cls: bc.cls },
-    { label: pv.warn ? "Portfolio Value ⚠" : "Portfolio Value", value: pv.value, title: pv.title },
-    { label: "Cash Available", value: money(acct.cash) },
+    { label: "Account Total", value: at.value, cls: at.unavailable ? "bad" : "",
+      title: at.unavailable ? "verified broker account value is unavailable — not shown as cash" : "" },
+    { label: pv.warn ? "Agent Book Value ⚠" : "Agent Book Value", value: pv.value, title: pv.title },
+    { label: "Agent Spendable Cash", value: money(acct.agent_spendable_cash ?? acct.cash) },
     { label: "P&L Today", value: money(pnl), cls: pnlClass(pnl) },
     {
       label: "Risk / Drawdown",
@@ -235,9 +239,17 @@ function tradingCardsHtml(acct, risk) {
   if (acct) {
     const pv = portfolioValueDisplay(acct);
     const bc = brokerCard(acct);
+    const at = accountTotalDisplay(acct);
+    const uh = unmanagedHoldingsDisplay(acct);
     cards.push({ label: "Broker", value: bc.text, cls: bc.cls });
-    cards.push({ label: pv.warn ? "Portfolio Value ⚠" : "Portfolio Value", value: pv.value, title: pv.title });
-    cards.push({ label: "Cash Available", value: money(acct.cash) });
+    cards.push({ label: "Account Total", value: at.value, cls: at.unavailable ? "bad" : "",
+      title: at.unavailable ? "verified broker account value is unavailable — not shown as cash" : "" });
+    cards.push({ label: "Broker Free Cash", value: money(acct.broker_free_cash) });
+    cards.push({ label: "Unmanaged Holdings", value: uh.text,
+      title: "your own INDmoney holdings — visible for reconciliation, never agent capital or tradeable" });
+    cards.push({ label: pv.warn ? "Agent Book Value ⚠" : "Agent Book Value", value: pv.value, title: pv.title });
+    cards.push({ label: "Agent Allocated Capital", value: money(acct.allocated_capital) });
+    cards.push({ label: "Agent Spendable Cash", value: money(acct.agent_spendable_cash ?? acct.cash) });
     cards.push({ label: "P&L Today", value: money(acct.pnl_today), cls: pnlClass(acct.pnl_today) });
   }
   if (risk) {

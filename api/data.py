@@ -173,6 +173,13 @@ def get_account() -> dict:
     `allocated_capital` is passed through untouched: it is the agent's
     mandate, set by Vaibhav, and is deliberately independent of the
     brokerage account total. Nothing here ever rewrites it.
+
+    `total_value` is `null` unless the sync is fresh AND the broker holdings
+    were actually valued (not cash-only) — see broker_truth.holdings_valuation
+    and docs/BROKER_TRUTH.md. `broker_free_cash` (a single directly-confirmed
+    field) is shown whenever the sync is fresh, even when the total is not.
+    `agent_spendable_cash` and `allocated_capital` are the agent's own
+    mandate figures and are always separate from the broker-account fields.
     """
     try:
         state = gr.load_state()
@@ -185,8 +192,9 @@ def get_account() -> dict:
 
     return {
         "cash": state.get("cash_available"),
+        "agent_spendable_cash": state.get("cash_available"),
         "portfolio_value": state.get("capital"),
-        # broker-aware: a real number only when truth["snapshot"]["status"] == "fresh"
+        # broker-aware: a number only when the sync is fresh AND holdings were valued
         "total_value": truth["safe_total_value"],
         "broker_free_cash": truth["safe_broker_free_cash"],
         "pnl_today": day.get("realized_pnl"),
@@ -202,6 +210,10 @@ def get_account() -> dict:
         "expected_book_value": truth["book_value"]["expected_book_value"],
         "book_value_reconciled": truth["book_value"]["reconciled"],
         "book_value_note": truth["book_value"]["reason"],
+        "unmanaged_holdings": {
+            "count": truth["unmanaged_holdings_count"],
+            "value": truth["safe_unmanaged_value"],
+        },
         "account_warnings": truth["warnings"],
     }
 

@@ -108,13 +108,42 @@ export function portfolioValueDisplay(acct) {
 }
 
 /** The one-line notice to show above the account cards when data is stale,
- * or "" when everything is fresh. */
+ * incomplete, or has a book-value warning — or "" when everything is fresh
+ * and verified. Includes the broker sync timestamp. */
 export function accountStaleNotice(acct) {
   if (!acct) return "";
   const warnings = Array.isArray(acct.account_warnings) ? acct.account_warnings : [];
-  if (warnings.length) return warnings.join(" ");
+  const stamp = syncedAtLabel(acct);
+  if (warnings.length) return `${warnings.join(" ")} (${stamp})`;
   if (accountIsStale(acct)) {
-    return `Broker account data is ${String(acct.account_value_status).replace(/_/g, " ")} — showing the agent's last known book value, not a live balance.`;
+    return `Broker account data is ${String(acct.account_value_status).replace(/_/g, " ")} — showing the agent's last known book value, not a live balance. (${stamp})`;
   }
   return "";
+}
+
+/** "Account Total" card: the verified broker account value, or the literal
+ * word "Unavailable" — never cash mislabelled as a total. */
+export function accountTotalDisplay(acct) {
+  if (acct && acct.total_value !== null && acct.total_value !== undefined) {
+    return { value: money(acct.total_value), unavailable: false };
+  }
+  return { value: "Unavailable", unavailable: true };
+}
+
+/** "Unmanaged holdings" card: count, plus value only when the broker total
+ * was verified (otherwise the value is unknown, not zero). */
+export function unmanagedHoldingsDisplay(acct) {
+  const uh = (acct && acct.unmanaged_holdings) || {};
+  const count = uh.count || 0;
+  if (!count) return { text: "0", hasValue: false };
+  if (uh.value !== null && uh.value !== undefined) {
+    return { text: `${count} · ${money(uh.value)}`, hasValue: true };
+  }
+  return { text: `${count} · value unverified`, hasValue: false };
+}
+
+/** Short "synced <when>" / "never synced" label for the broker snapshot. */
+export function syncedAtLabel(acct) {
+  const ts = acct && acct.broker_synced_at;
+  return ts ? `synced ${dt(ts)}` : "never synced";
 }

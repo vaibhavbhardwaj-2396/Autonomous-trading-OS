@@ -106,6 +106,45 @@ check("accountStaleNotice() surfaces the API warning text for a stale account",
   fmt.accountStaleNotice(STALE_ACCT).includes("stale")
   && fmt.accountStaleNotice(STALE_ACCT).length > 0);
 
+// --- account total / unmanaged holdings / sync timestamp --------------------
+const INCOMPLETE_ACCT = {
+  account_value_status: "incomplete", total_value: null, broker_free_cash: 32.31,
+  broker: { label: "INDmoney / INDstocks" }, broker_synced_at: "2026-09-10T15:00:00+05:30",
+  unmanaged_holdings: { count: 26, value: null },
+  account_warnings: ["Broker sync is current, but the account total could not be verified: 26 broker holding(s) present but the holdings valued at ~₹0. Free cash is shown; the account total is not."],
+};
+const VERIFIED_ACCT = {
+  account_value_status: "fresh", total_value: 63032.31, broker_free_cash: 32.31,
+  broker: { label: "INDmoney / INDstocks" }, broker_synced_at: "2026-09-10T15:00:00+05:30",
+  unmanaged_holdings: { count: 26, value: 63000 }, account_warnings: [],
+};
+
+check("accountTotalDisplay(): a verified total renders as money, not 'Unavailable'",
+  fmt.accountTotalDisplay(VERIFIED_ACCT).value === fmt.money(63032.31)
+  && fmt.accountTotalDisplay(VERIFIED_ACCT).unavailable === false);
+check("accountTotalDisplay(): total_value null -> the literal word 'Unavailable' (never cash)",
+  fmt.accountTotalDisplay(INCOMPLETE_ACCT).value === "Unavailable"
+  && fmt.accountTotalDisplay(INCOMPLETE_ACCT).unavailable === true
+  && fmt.accountTotalDisplay(INCOMPLETE_ACCT).value !== fmt.money(32.31));
+check("accountTotalDisplay(): missing acct -> 'Unavailable', no crash",
+  fmt.accountTotalDisplay(undefined).value === "Unavailable");
+
+check("unmanagedHoldingsDisplay(): count + value when verified",
+  fmt.unmanagedHoldingsDisplay(VERIFIED_ACCT).text === `26 · ${fmt.money(63000)}`
+  && fmt.unmanagedHoldingsDisplay(VERIFIED_ACCT).hasValue === true);
+check("unmanagedHoldingsDisplay(): count + 'value unverified' when not verified",
+  fmt.unmanagedHoldingsDisplay(INCOMPLETE_ACCT).text === "26 · value unverified"
+  && fmt.unmanagedHoldingsDisplay(INCOMPLETE_ACCT).hasValue === false);
+check("unmanagedHoldingsDisplay(): '0' when there are none",
+  fmt.unmanagedHoldingsDisplay({ unmanaged_holdings: { count: 0 } }).text === "0");
+
+check("accountStaleNotice(): an 'incomplete' account shows the verify warning + sync stamp",
+  fmt.accountStaleNotice(INCOMPLETE_ACCT).includes("could not be verified")
+  && fmt.accountStaleNotice(INCOMPLETE_ACCT).includes("synced"));
+check("syncedAtLabel(): 'synced <when>' when a timestamp exists, 'never synced' otherwise",
+  fmt.syncedAtLabel(VERIFIED_ACCT).startsWith("synced ")
+  && fmt.syncedAtLabel({}) === "never synced");
+
 // ---------------------------------------------------------------------------
 // api.js — apiGet()'s response classification under a mocked fetch
 // ---------------------------------------------------------------------------

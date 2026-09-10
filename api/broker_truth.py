@@ -49,6 +49,9 @@ same convention as api/config.py)
                                             broker_snapshot synced at or before it
                                             is treated as pre-migration Kite-era
                                             and always "stale", regardless of age
+    DASHBOARD_HOLDINGS_VALUE_FLOOR           holdings present but valued at or below
+                                            this many rupees => the account total is
+                                            withheld as cash-only (default: 1.0)
 """
 
 from __future__ import annotations
@@ -68,8 +71,14 @@ DEFAULT_BROKER_ID = "indstocks"
 ENV_BROKER = "BROKER"
 ENV_SNAPSHOT_MAX_AGE_HOURS = "DASHBOARD_BROKER_SNAPSHOT_MAX_AGE_HOURS"
 ENV_BROKER_CUTOVER = "DASHBOARD_BROKER_CUTOVER"
+ENV_HOLDINGS_VALUE_FLOOR = "DASHBOARD_HOLDINGS_VALUE_FLOOR"
 
 DEFAULT_SNAPSHOT_MAX_AGE_HOURS = 24.0
+# A broker_snapshot with holdings present but a holdings valuation at or
+# below this many rupees is treated as "the holdings were not priced" — the
+# account total is then cash-only and is withheld (fail closed). ~₹1 so
+# rounding never trips it; a real portfolio clears it by orders of magnitude.
+DEFAULT_HOLDINGS_VALUE_FLOOR = 1.0
 
 # Human-facing labels. The dashboard shows the label; code keys off the id.
 _BROKER_LABELS = {
@@ -317,6 +326,89 @@ def reconcile_book_value(state: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Holdings valuation — was the account total actually computed, or is it
+# cash-only? (fail closed)
+# ---------------------------------------------------------------------------
+
+def _holdings_value_floor() -> float:
+    raw = (os.environ.get(ENV_HOLDINGS_VALUE_FLOOR) or "").strip()
+    if not raw:
+        return DEFAULT_HOLDINGS_VALUE_FLOOR
+    try:
+        val = float(raw)
+        return val if val >= 0 else DEFAULT_HOLDINGS_VALUE_FLOOR
+    except ValueError:
+        return DEFAULT_HOLDINGS_VALUE_FLOOR
+
+
+def holdings_valuation(state: dict) -> dict:
+    """Is `broker_snapshot.total_account_value` a real account total, or did
+    the holdings valuation collapse to ~₹0?
+
+    `engine.execute.sync_from_broker` computes:
+
+        total_account_value = broker_free_cash
+                              + Σ(holding.last_price · qty)          # holdings
+                              + Σ(position.last_price · |qty|)       # positions
+
+    so `holdings_value = total_account_value − broker_free_cash`. If broker
+    holdings exist (unmanaged_symbols, and/or the agent's own positions) but
+    that difference is at or below `DASHBOARD_HOLDINGS_VALUE_FLOOR` (~₹1),
+    every holding was priced at 0 — the "total" is cash-only and MUST NOT be
+    presented as an account total (fail closed — the ₹32.31-with-26-holdings
+    case). Returns:
+
+        {
+          "holdings_count": int,            # unmanaged holdings + agent positions
+          "unmanaged_holdings_count": int,
+          "holdings_value": float | None,   # total − free cash, when both known
+          "complete": bool,                 # False -> the total is not verifiable
+          "reason": str | None,
+        }
+
+    LIMITATION: this can only catch a *fully* unpriced valuation (holdings
+    ≈ ₹0). A *partial* one (say 20 of 26 holdings priced) still yields a
+    plausible-looking `holdings_value` and is not detectable from the
+    persisted snapshot alone — closing that gap needs per-holding valuation
+    recorded in the snapshot, which is an `engine.execute` change.
+    """
+    snap = state.get("broker_snapshot") or {}
+    total = _as_float(snap.get("total_account_value"))
+    free_cash = _as_float(snap.get("free_cash"))
+    n_unmanaged = len(snap.get("unmanaged_symbols") or [])
+    n_agent_positions = len(state.get("open_positions") or [])
+    n_holdings = n_unmanaged + n_agent_positions
+
+    holdings_value = None
+    if total is not None and free_cash is not None:
+        holdings_value = round(total - free_cash, 2)
+
+    out = {
+        "holdings_count": n_holdings,
+        "unmanaged_holdings_count": n_unmanaged,
+        "holdings_value": holdings_value,
+        "complete": True,
+        "reason": None,
+    }
+    if n_holdings <= 0:
+        return out  # no holdings — total is just cash, and that's genuinely complete
+
+    floor = _holdings_value_floor()
+    if holdings_value is None:
+        out["complete"] = False
+        out["reason"] = (f"{n_holdings} broker holding(s) present but total_account_value "
+                         f"or free_cash is missing from broker_snapshot")
+    elif holdings_value <= floor:
+        out["complete"] = False
+        out["reason"] = (
+            f"{n_holdings} broker holding(s) present but the holdings valued at ~₹0 "
+            f"(total ₹{total:,.2f} ≈ free cash ₹{free_cash:,.2f}) — the account total is "
+            f"cash-only and cannot be verified"
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # One call the API layer uses
 # ---------------------------------------------------------------------------
 
@@ -329,9 +421,12 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
           "broker":            {"id", "label", "from_config"},
           "snapshot":          <classify_snapshot() dict>,
           "book_value":        <reconcile_book_value() dict>,
-          "account_value_status": "fresh" | "stale" | "never_synced" | "unknown",
-          "safe_total_value":  <float | None>,   # broker account total, ONLY if fresh
-          "safe_broker_free_cash": <float | None>,
+          "holdings":          <holdings_valuation() dict>,
+          "account_value_status": "fresh" | "incomplete" | "stale" | "never_synced" | "unknown",
+          "safe_total_value":  <float | None>,   # account total, ONLY if fresh AND holdings verified
+          "safe_broker_free_cash": <float | None>,   # ONLY if fresh (a directly-confirmed field)
+          "safe_unmanaged_value": <float | None>,    # value of unmanaged holdings, ONLY if verified
+          "unmanaged_holdings_count": int,
           "warnings":          [<str>, ...],     # human-readable, for a dashboard banner
         }
     """
@@ -339,11 +434,29 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
     snapshot = classify_snapshot(state.get("broker_snapshot"), now=now,
                                  active_broker_id=broker["id"])
     book_value = reconcile_book_value(state)
+    holdings = holdings_valuation(state)
 
     snap = state.get("broker_snapshot") or {}
     fresh = snapshot["status"] == "fresh"
-    safe_total = _as_float(snap.get("total_account_value")) if fresh else None
+    # A verifiable account total needs BOTH a fresh sync AND a holdings
+    # valuation that actually happened.
+    total_verified = fresh and holdings["complete"]
+    safe_total = _as_float(snap.get("total_account_value")) if total_verified else None
+    # free cash is a single directly-confirmed field (funds() -> eq_cnc) —
+    # trustworthy whenever the sync itself is fresh, even if holdings pricing
+    # failed.
     safe_free_cash = _as_float(snap.get("free_cash")) if fresh else None
+    safe_unmanaged_value = (holdings["holdings_value"]
+                            if (total_verified and holdings["holdings_value"] is not None
+                                and holdings["unmanaged_holdings_count"] > 0)
+                            else None)
+
+    if not fresh:
+        account_value_status = snapshot["status"]
+    elif not holdings["complete"]:
+        account_value_status = "incomplete"
+    else:
+        account_value_status = "fresh"
 
     warnings: list[str] = []
     if not fresh:
@@ -352,6 +465,11 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
             f"({snapshot['reason']}). Showing the agent's last known book value, not a "
             f"live {broker['label']} balance."
         )
+    elif not holdings["complete"]:
+        warnings.append(
+            f"Broker sync is current, but the account total could not be verified: "
+            f"{holdings['reason']}. Free cash is shown; the account total is not."
+        )
     if not book_value["reconciled"]:
         warnings.append(f"Book value not reconciled: {book_value['reason']}.")
 
@@ -359,8 +477,11 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
         "broker": broker,
         "snapshot": snapshot,
         "book_value": book_value,
-        "account_value_status": snapshot["status"],
+        "holdings": holdings,
+        "account_value_status": account_value_status,
         "safe_total_value": safe_total,
         "safe_broker_free_cash": safe_free_cash,
+        "safe_unmanaged_value": safe_unmanaged_value,
+        "unmanaged_holdings_count": holdings["unmanaged_holdings_count"],
         "warnings": warnings,
     }

@@ -337,6 +337,39 @@ check("F2: expected_book_value is allocated + realised P&L (₹21,500), not the 
       and len(acct_stale["account_warnings"]) >= 1, str(acct_stale))
 check("F2: allocated_capital is still the mandate (₹20,000), never the account total",
       acct_stale["allocated_capital"] == 20000.0, str(acct_stale))
+
+# F3: a FRESH sync whose account total collapsed to cash-only (holdings priced
+# at 0 — the observed first-INDmoney-sync case: ₹32.31 with 26 holdings).
+_cashonly = json.loads(json.dumps(_base_state))
+_cashonly["broker_snapshot"]["total_account_value"] = 32.31
+_cashonly["broker_snapshot"]["free_cash"] = 32.31
+_cashonly["broker_snapshot"]["unmanaged_symbols"] = [f"SYM{i}" for i in range(26)]
+_cashonly["cash_available"] = 32.31
+_cashonly["open_positions"] = []
+_cashonly_path = TMP / "state_cashonly.json"
+_cashonly_path.write_text(json.dumps(_cashonly))
+gr.STATE_FILE = _cashonly_path
+try:
+    acct_co = api_data.get_account()
+finally:
+    gr.STATE_FILE = _orig_state_file
+
+check("F3: cash-only total on a fresh sync -> total_value None (dashboard: 'Unavailable', not ₹32.31)",
+      acct_co["total_value"] is None, str(acct_co))
+check("F3: account_value_status is 'incomplete' (sync fresh, total not verifiable)",
+      acct_co["account_value_status"] == "incomplete", str(acct_co))
+check("F3: broker_free_cash IS still shown (₹32.31 — a directly-confirmed field)",
+      acct_co["broker_free_cash"] == 32.31, str(acct_co))
+check("F3: unmanaged_holdings exposes count 26 but value None (can't verify)",
+      acct_co["unmanaged_holdings"]["count"] == 26
+      and acct_co["unmanaged_holdings"]["value"] is None, str(acct_co["unmanaged_holdings"]))
+check("F3: agent_spendable_cash and allocated_capital are separate agent fields, untouched",
+      acct_co["agent_spendable_cash"] == 32.31 and acct_co["allocated_capital"] == 20000.0,
+      str(acct_co))
+check("F3: a warning explains the total could not be verified",
+      any("could not be verified" in w for w in acct_co["account_warnings"]),
+      str(acct_co["account_warnings"]))
+
 check("F: /positions (populated) returns the one open position with the right fields",
       len(pos2["positions"]) == 1 and pos2["positions"][0]["symbol"] == "INFY"
       and pos2["positions"][0]["side"] == "BUY" and pos2["positions"][0]["quantity"] == 10,

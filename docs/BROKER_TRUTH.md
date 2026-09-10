@@ -143,6 +143,84 @@ network, no broker import, no engine.execute import.
   realized_pnl_alltime` (25% / ₹500 tolerance for unsynced-close drift), or has
   it been poisoned with an account-total figure? Returns `reconciled` +
   `looks_like_account_total` + `expected_book_value`.
+- **`holdings_valuation()`** — did `broker_snapshot.total_account_value`
+  actually value the holdings, or collapse to cash-only? See §8 below.
+
+## 8. The ₹32.31 problem — holdings valued at zero
+
+**Observed on the first successful INDmoney sync:** `account_total_value: 32.31`
+with 26 unmanaged holdings and `broker_free_cash: 32.31`. The user has ≈ ₹63k of
+holdings in the INDmoney app. `account_total_value` = the cash, nothing else.
+
+**Data path (audited):**
+
+| Step | Where | What |
+|---|---|---|
+| free cash | `INDstocksBroker.funds()` | `GET /funds` → `data.detailed_avl_balance.eq_cnc` (confirmed 2026-09-02) → `32.31` ✓ |
+| holdings | `INDstocksBroker.holdings()` | `GET /portfolio/holdings` → rows of `symbol` / `total_qty` / `avg_price` — **no price field** (confirmed against docs 2026-09-02) → `Position(last_price=0.0)` |
+| positions | `INDstocksBroker.positions()` | `GET /portfolio/positions` → `symbol` / `net_qty` / `avg_price` / `product` / `segment` — **no price field** → `Position(last_price=0.0)` |
+| **account_total_value** | **`engine/execute.py:sync_from_broker` (FROZEN)** | `broker_free_cash + Σ(h.last_price·qty) + Σ(p.last_price·|qty|)` = `32.31 + Σ(0·qty) + 0` = **`32.31`** |
+| unmanaged_symbols | `engine/execute.py` (frozen) | `{h.symbol for h in holdings} ∪ {p.symbol …} − agent positions` → all 26 (correct, unchanged) |
+
+**Why ₹32.31:** `engine/execute.py`'s account-total formula was written for
+**Kite**, whose `holdings()` response *does* carry `last_price` (see
+`engine/broker_kite.py:37`). INDstocks' `/portfolio/holdings` does not, so
+`INDstocksBroker.holdings()` returned `last_price=0.0` for every holding and the
+frozen formula valued them all at ₹0.
+
+**Fix (in `engine/broker_indstocks.py` — `execute.py` is untouched):**
+`holdings()` and `positions()` now attach a live `last_price` to each row via
+the **confirmed** `/market/quotes/ltp` endpoint (`self.quote()` — response shape
+`{"data": {"NSE_<sid>": {"live_price": N}}}`, confirmed 2026-09-07), in one
+batched call. A symbol that can't be resolved or quoted keeps `last_price=0.0`
+(never a fabricated price). The frozen `account_total` formula then produces a
+real number whenever the quotes resolve.
+
+**Fail closed (`holdings_valuation()` in `api/broker_truth.py`):** the dashboard
+reads only `broker_snapshot`, so it computes
+`holdings_value = total_account_value − free_cash`. If holdings exist
+(`unmanaged_symbols`, and/or agent positions) but `holdings_value ≤ ₹1`
+(`DASHBOARD_HOLDINGS_VALUE_FLOOR`), the total is cash-only →
+`account_value_status: "incomplete"`, `total_value: null` (dashboard shows
+**"Unavailable"**), `broker_free_cash` still shown (a single confirmed field),
+a warning is emitted. This catches the exact ₹32.31 case.
+
+**Known limitation:** `holdings_valuation()` can only detect a *fully* unpriced
+valuation (holdings ≈ ₹0). A *partial* one (e.g. 20 of 26 holdings priced) still
+looks plausible and is not detectable from the persisted snapshot. Closing that
+needs per-holding valuation recorded in `broker_snapshot` — an `engine.execute`
+change, which requires explicit approval.
+
+### Capture the real response shapes before relying on this in production
+
+The `/portfolio/holdings` and `/portfolio/positions` raw responses have **never
+been captured** — the current field list is from the official docs, and
+`scripts/indstocks_probe.py` still points at the *old* `/holdings` path. Run
+this on the VPS with a valid token and paste the (redacted) output so we can
+(a) confirm whether the holdings response already carries a market-value or LTP
+field (which would make the quote round-trip unnecessary), and (b) confirm the
+`/portfolio/positions` shape:
+
+```bash
+cd /root/trading-agent && venv/bin/python - <<'PY'
+import json, sys
+sys.path.insert(0, ".")
+from engine.broker_indstocks import INDstocksBroker
+b = INDstocksBroker()
+for path in ("/portfolio/holdings", "/portfolio/positions", "/funds"):
+    try:
+        raw = b._get(path)
+        # print KEY NAMES and value TYPES only — no balances, no holdings contents
+        def shape(v, d=0):
+            if d > 3: return "..."
+            if isinstance(v, dict): return {k: shape(x, d+1) for k, x in list(v.items())[:30]}
+            if isinstance(v, list): return [shape(v[0], d+1), f"...{len(v)} items"] if v else []
+            return type(v).__name__
+        print(path, "→", json.dumps(shape(raw), indent=1))
+    except Exception as e:
+        print(path, "ERR", type(e).__name__, e)
+PY
+```
 
 ### `/account` response — additive, back-compatible
 
@@ -150,11 +228,13 @@ Everything the v1 contract had is still there. New / changed:
 
 | Field | Meaning |
 |---|---|
-| `total_value` | the brokerage account total **only when `account_value_status == "fresh"`**, else `null` |
-| `broker_free_cash` | same gating |
+| `total_value` | the brokerage account total **only when the sync is fresh AND the holdings were actually valued** (`account_value_status == "fresh"`), else `null` |
+| `broker_free_cash` | shown whenever the sync is fresh (a single directly-confirmed field — `funds()` → `eq_cnc`) |
+| `agent_spendable_cash` | `= cash_available` — the agent's own spendable figure, always separate from the broker fields |
+| `unmanaged_holdings` | `{count, value}` — `value` is `null` unless the total was verified |
 | `broker` | `{"id","label","from_config"}` — the active broker |
 | `broker_snapshot` | `{status, stale, synced_at, age_hours, reason, source, broker}` |
-| `account_value_status` | `fresh` / `stale` / `never_synced` / `unknown` |
+| `account_value_status` | `fresh` / `incomplete` / `stale` / `never_synced` / `unknown` (`incomplete` = fresh sync but the account total is not verifiable) |
 | `expected_book_value` | `allocated_capital + realized_pnl_alltime` |
 | `book_value_reconciled` | `false` when `capital` has drifted from / been poisoned relative to the above |
 | `book_value_note` | why, when not reconciled |
@@ -162,14 +242,23 @@ Everything the v1 contract had is still there. New / changed:
 
 `allocated_capital` is passed straight through, untouched, always. Nothing in
 this change can rewrite it, and it is never derived from `total_value`.
+`unmanaged_symbols` (in `broker_snapshot`, written by the frozen sync) are
+preserved verbatim — visible for reconciliation, never agent capital or
+tradeable.
 
 ### Dashboard (`frontend/`)
 
 - A **"Broker"** card on Overview and Trading showing `INDmoney / INDstocks`
   (green when fresh, red + status when not).
-- "Portfolio Value" falls back to `expected_book_value` (with a ⚠) when
+- **"Account Total"** card: the verified value, or the literal word
+  **"Unavailable"** — cash is never shown mislabelled as an account total.
+- **"Broker Free Cash"** / **"Agent Allocated Capital"** / **"Agent Spendable
+  Cash"** as distinct cards (Trading tab); **"Unmanaged Holdings"** shows the
+  count, plus a value only when verified (else "value unverified").
+- "Agent Book Value" falls back to `expected_book_value` (with a ⚠) when
   `book_value_reconciled` is false — so a poisoned `capital` is never shown.
-- A full-width notice above the cards whenever `account_value_status != "fresh"`.
+- A full-width notice above the cards, carrying the broker sync timestamp,
+  whenever the data is stale, incomplete, or the book value is unreconciled.
 
 ## 7. Operational follow-up (NOT done by this change)
 

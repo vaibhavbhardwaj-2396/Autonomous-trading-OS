@@ -47,6 +47,25 @@ TOKEN_TTL_SECONDS = 24 * 3600
 REQUEST_TIMEOUT = 20
 
 
+def _to_float(value, default: float = 0.0) -> float:
+    """Coerce a response field to float, falling back to `default` for
+    None/""/non-numeric — one malformed row must not crash a whole sync
+    (engine.execute.sync_from_broker would turn any exception here into a
+    do-not-trade circuit breaker). Only the confirmed numeric fields are
+    parsed this way; nothing is invented."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 class INDstocksBroker(Broker):
     name = "indstocks"
 
@@ -173,47 +192,91 @@ class INDstocksBroker(Broker):
                 return float(d[k] or 0.0)
         raise ValueError(f"funds(): no recognised balance field in response: {sorted(d.keys())}")
 
+    def _attach_live_prices(self, positions: list[Position]) -> list[Position]:
+        """Attach a live `last_price` to each Position via the CONFIRMED
+        `/market/quotes/ltp` endpoint (self.quote() — response shape verified
+        2026-09-07: {"data": {"NSE_<sid>": {"live_price": N}}}).
+
+        Why this is needed: `/portfolio/holdings` and `/portfolio/positions`
+        do NOT return a price (confirmed against api-docs.indstocks.com on
+        2026-09-02), but the Broker contract `engine.execute.sync_from_broker`
+        relies on — and `engine/broker_kite.py` already satisfies — is
+        *priced* holdings: it does `sum(h.last_price * h.quantity)` to value
+        the account. Without this step every INDstocks holding is valued at
+        ₹0 and `broker_snapshot.total_account_value` collapses to just the
+        cash (this is exactly why the first successful sync reported
+        ₹32.31 with 26 holdings present).
+
+        A symbol that cannot be resolved to a security_id, or that the quote
+        endpoint does not return, keeps `last_price = 0.0` — never a
+        fabricated price (same discipline `quote()` itself already keeps). A
+        `0.0` here means "unpriced", not "worthless": a caller computing a
+        *total* must treat it that way — see `api/broker_truth.py`'s
+        fail-closed guard, which withholds the account total when the
+        holdings valuation came back at ~₹0.
+
+        One batched GET (not one call per symbol). `quote()` and
+        `security_id()` both swallow their own network errors, so this never
+        raises — a quote outage degrades to unpriced holdings, never a failed
+        sync.
+        """
+        if not positions:
+            return positions
+        try:
+            prices = self.quote(sorted({p.symbol for p in positions if p.symbol}))
+        except Exception:
+            prices = {}
+        for p in positions:
+            px = prices.get(p.symbol)
+            if px is not None and px > 0:
+                p.last_price = float(px)
+        return positions
+
     def holdings(self) -> list[Position]:
-        """Confirmed against the official docs (api-docs.indstocks.com/portfolio_funds)
-        on 2026-09-02 — the real path is /portfolio/holdings, not /holdings, and the
-        response has no ltp/last_price field at all (holdings ≠ a live quote). last_price
-        is left 0.0 here rather than faked; call quote() separately if a live price
-        against a holding is needed.
+        """Delivery holdings in demat. Confirmed against
+        api-docs.indstocks.com/portfolio_funds on 2026-09-02 — the real path
+        is `/portfolio/holdings` (not `/holdings`) and each row carries
+        `symbol` / `total_qty` / `avg_price` but NO price field. `last_price`
+        is filled in afterwards from the confirmed quote endpoint
+        (see _attach_live_prices) so the account valuation in
+        `engine.execute.sync_from_broker` is real, not cash-only.
         """
         data = self._get("/portfolio/holdings")
         out = []
         for h in (data.get("data") or []):
-            qty = int(h.get("total_qty") or 0)
+            qty = _to_int(h.get("total_qty"))
             if qty <= 0:
                 continue
             out.append(Position(
                 symbol=str(h.get("symbol") or "").upper(),
                 quantity=qty,
-                average_price=float(h.get("avg_price") or 0),
+                average_price=_to_float(h.get("avg_price")),
                 last_price=0.0,
                 product="CNC",
             ))
-        return out
+        return self._attach_live_prices(out)
 
     def positions(self) -> list[Position]:
-        """Confirmed against the official docs on 2026-09-02 — real path is
-        /portfolio/positions, not /positions, and there is no ltp/last_price field here
-        either (same as holdings — a position list is not a live quote)."""
+        """Open intraday / derivative positions. Confirmed against the
+        official docs on 2026-09-02 — real path is `/portfolio/positions`
+        (not `/positions`), rows carry `symbol` / `net_qty` / `avg_price` /
+        `product` / `segment` and no price field. `last_price` is filled in
+        from the confirmed quote endpoint (see _attach_live_prices)."""
         data = self._get("/portfolio/positions")
         out = []
         for p in (data.get("data") or []):
-            qty = int(p.get("net_qty") or 0)
+            qty = _to_int(p.get("net_qty"))
             if qty == 0:
                 continue
             out.append(Position(
                 symbol=str(p.get("symbol") or "").upper(),
                 quantity=qty,
-                average_price=float(p.get("avg_price") or 0),
+                average_price=_to_float(p.get("avg_price")),
                 last_price=0.0,
                 product=str(p.get("product") or ""),
                 segment=str(p.get("segment") or "EQUITY"),
             ))
-        return out
+        return self._attach_live_prices(out)
 
     def quote(self, symbols: list[str], exchange: str = "NSE") -> dict:
         """Confirmed against api-docs.indstocks.com/MarketQuote/ on 2026-09-07:

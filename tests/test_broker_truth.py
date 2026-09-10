@@ -237,6 +237,106 @@ check("5. fresh sync: allocated_capital (₹10k) is untouched and separate from 
 
 
 # ---------------------------------------------------------------------------
+print("\n--- holdings_valuation(): fail closed when the total is cash-only ---")
+# ---------------------------------------------------------------------------
+
+_clear_env()
+
+# The exact observed first-successful-sync state: 26 unmanaged holdings,
+# total_account_value == free_cash == 32.31 (every holding priced at 0).
+OBSERVED = {
+    "allocated_capital": 10000.0, "capital": 10000.0, "cash_available": 32.31,
+    "realized_pnl_alltime": 0.0, "peak_capital": 10000.0, "open_positions": [],
+    "broker_snapshot": {
+        "total_account_value": 32.31, "free_cash": 32.31,
+        "unmanaged_symbols": [f"SYM{i}" for i in range(26)],
+        "synced_at": "2026-09-10T11:00:00+05:30",
+    },
+    "last_updated": "2026-09-10T15:00:00+05:30",
+}
+hv = broker_truth.holdings_valuation(OBSERVED)
+check("cash-only: 26 holdings but holdings_value ~₹0 -> complete=False",
+      hv["complete"] is False and hv["holdings_value"] == 0.0, str(hv))
+check("cash-only: holdings_count and unmanaged_holdings_count are both 26",
+      hv["holdings_count"] == 26 and hv["unmanaged_holdings_count"] == 26, str(hv))
+check("cash-only: the reason names the cash-only condition explicitly",
+      "cash-only" in hv["reason"], str(hv["reason"]))
+
+truth = broker_truth.account_truth(OBSERVED, now=NOW)
+check("cash-only: account_value_status is 'incomplete' (sync is fresh, total isn't)",
+      truth["account_value_status"] == "incomplete", str(truth))
+check("cash-only: safe_total_value is None -> dashboard shows 'Unavailable', never ₹32.31",
+      truth["safe_total_value"] is None, str(truth))
+check("cash-only: safe_broker_free_cash IS shown (₹32.31 — a directly-confirmed field)",
+      truth["safe_broker_free_cash"] == 32.31, str(truth))
+check("cash-only: unmanaged holdings count is exposed (26) but value is not (None)",
+      truth["unmanaged_holdings_count"] == 26 and truth["safe_unmanaged_value"] is None, str(truth))
+check("cash-only: a warning explains the total could not be verified",
+      any("could not be verified" in w for w in truth["warnings"]), str(truth["warnings"]))
+check("cash-only: allocated_capital stays the ₹10k mandate, independent and untouched",
+      truth["book_value"]["allocated_capital"] == 10000.0
+      and truth["book_value"]["reconciled"] is True, str(truth["book_value"]))
+
+# holdings present AND priced -> the total IS verified and shown
+PRICED = {
+    "allocated_capital": 10000.0, "capital": 10000.0, "cash_available": 32.31,
+    "realized_pnl_alltime": 0.0, "peak_capital": 10000.0, "open_positions": [],
+    "broker_snapshot": {
+        "total_account_value": 63032.31, "free_cash": 32.31,
+        "unmanaged_symbols": [f"SYM{i}" for i in range(26)],
+        "synced_at": "2026-09-10T11:00:00+05:30",
+    },
+    "last_updated": "2026-09-10T15:00:00+05:30",
+}
+truth = broker_truth.account_truth(PRICED, now=NOW)
+check("holdings priced: total ₹63,032.31 > cash -> account_value_status 'fresh', total shown",
+      truth["account_value_status"] == "fresh" and truth["safe_total_value"] == 63032.31, str(truth))
+check("holdings priced: unmanaged holdings VALUE is now exposed (₹63,000)",
+      truth["safe_unmanaged_value"] == 63000.0, str(truth))
+check("holdings priced: allocated_capital (₹10k) still independent of the ₹63k total",
+      truth["book_value"]["allocated_capital"] == 10000.0
+      and truth["safe_total_value"] != truth["book_value"]["allocated_capital"], str(truth))
+
+# malformed snapshot: total present, free_cash missing, holdings present -> fail closed
+MALFORMED = {
+    "allocated_capital": 10000.0, "capital": 10000.0, "open_positions": [],
+    "broker_snapshot": {
+        "total_account_value": 50000.0, "free_cash": None,
+        "unmanaged_symbols": ["SYM0", "SYM1"], "synced_at": "2026-09-10T11:00:00+05:30",
+    },
+}
+truth = broker_truth.account_truth(MALFORMED, now=NOW)
+check("malformed: holdings present but free_cash missing -> total withheld, warning",
+      truth["safe_total_value"] is None and truth["account_value_status"] == "incomplete"
+      and len(truth["warnings"]) >= 1, str(truth))
+
+# no holdings at all: total == cash is legitimately complete
+NO_HOLDINGS = {
+    "allocated_capital": 10000.0, "capital": 10000.0, "open_positions": [],
+    "broker_snapshot": {
+        "total_account_value": 500.0, "free_cash": 500.0,
+        "unmanaged_symbols": [], "synced_at": "2026-09-10T11:00:00+05:30",
+    },
+}
+truth = broker_truth.account_truth(NO_HOLDINGS, now=NOW)
+check("no holdings: total == cash is complete (nothing to value) -> total shown",
+      truth["account_value_status"] == "fresh" and truth["safe_total_value"] == 500.0, str(truth))
+
+# stale + cash-only: staleness wins, no silent fallback to the Kite-era total
+STALE_CASHONLY = dict(OBSERVED)
+STALE_CASHONLY = json.loads(json.dumps(OBSERVED))
+STALE_CASHONLY["broker_snapshot"]["synced_at"] = "2026-06-01T00:00:00+05:30"
+truth = broker_truth.account_truth(STALE_CASHONLY, now=NOW)
+check("stale + cash-only: status is 'stale' (freshness checked first), total still None",
+      truth["account_value_status"] == "stale" and truth["safe_total_value"] is None, str(truth))
+check("stale + cash-only: no silent fallback to any stale/Kite figure",
+      not any(str(32.31) in str(v) for k, v in truth.items()
+              if k in ("safe_total_value", "safe_unmanaged_value")), str(truth))
+
+_clear_env()
+
+
+# ---------------------------------------------------------------------------
 print("\n--- api/data.py get_account() end to end ---")
 # ---------------------------------------------------------------------------
 
