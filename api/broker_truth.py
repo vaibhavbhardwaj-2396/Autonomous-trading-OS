@@ -425,7 +425,8 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
           "account_value_status": "fresh" | "incomplete" | "stale" | "never_synced" | "unknown",
           "safe_total_value":  <float | None>,   # account total, ONLY if fresh AND holdings verified
           "safe_broker_free_cash": <float | None>,   # ONLY if fresh (a directly-confirmed field)
-          "safe_unmanaged_value": <float | None>,    # value of unmanaged holdings, ONLY if verified
+          "safe_holdings_market_value": <float | None>,  # total - free cash, ONLY if verified
+          "safe_unmanaged_value": <float | None>,    # unmanaged holdings' value, ONLY if verified and agent holds nothing
           "unmanaged_holdings_count": int,
           "warnings":          [<str>, ...],     # human-readable, for a dashboard banner
         }
@@ -446,9 +447,20 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
     # trustworthy whenever the sync itself is fresh, even if holdings pricing
     # failed.
     safe_free_cash = _as_float(snap.get("free_cash")) if fresh else None
-    safe_unmanaged_value = (holdings["holdings_value"]
-                            if (total_verified and holdings["holdings_value"] is not None
-                                and holdings["unmanaged_holdings_count"] > 0)
+    # market value of ALL broker holdings (agent's own + unmanaged) =
+    # total_account_value - free_cash, only when the total is verified.
+    safe_holdings_market_value = (holdings["holdings_value"]
+                                  if (total_verified and holdings["holdings_value"] is not None
+                                      and holdings["holdings_count"] > 0)
+                                  else None)
+    # value attributable to UNMANAGED holdings specifically — only reportable
+    # when the agent holds no positions of its own (otherwise the persisted
+    # snapshot carries no per-position marks to split the two apart).
+    n_agent_positions = len(state.get("open_positions") or [])
+    safe_unmanaged_value = (safe_holdings_market_value
+                            if (safe_holdings_market_value is not None
+                                and holdings["unmanaged_holdings_count"] > 0
+                                and n_agent_positions == 0)
                             else None)
 
     if not fresh:
@@ -481,6 +493,7 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
         "account_value_status": account_value_status,
         "safe_total_value": safe_total,
         "safe_broker_free_cash": safe_free_cash,
+        "safe_holdings_market_value": safe_holdings_market_value,
         "safe_unmanaged_value": safe_unmanaged_value,
         "unmanaged_holdings_count": holdings["unmanaged_holdings_count"],
         "warnings": warnings,

@@ -7,7 +7,7 @@
 import { apiGet } from "./api.js";
 import {
   esc, money, num, pnlClass, dt, badge, table, errorState,
-  brokerCard, portfolioValueDisplay, accountStaleNotice,
+  brokerCard, accountStaleNotice,
   accountTotalDisplay, unmanagedHoldingsDisplay,
 } from "./format.js";
 
@@ -115,17 +115,22 @@ export async function renderOverview() {
   return results;
 }
 
+// The user-facing account model is the DYNAMIC broker account — Account
+// Total / Broker Free Cash / Holdings Value / Unmanaged Holdings / Today
+// P&L / Risk. The fixed ₹10k "Agent Book Value" / "Allocated Capital"
+// scaffold is NOT shown here (it is not the user's portfolio); it appears
+// only as a small, clearly-labelled "Autonomous Mandate" note on the
+// Trading tab. See docs/CAPITAL_MODEL.md.
 function accountCardsHtml(acct, risk, regime) {
   const pnl = acct.pnl_today;
-  const pv = portfolioValueDisplay(acct);
   const bc = brokerCard(acct);
   const at = accountTotalDisplay(acct);
   const cards = [
     { label: "Broker", value: bc.text, cls: bc.cls },
     { label: "Account Total", value: at.value, cls: at.unavailable ? "bad" : "",
       title: at.unavailable ? "verified broker account value is unavailable — not shown as cash" : "" },
-    { label: pv.warn ? "Agent Book Value ⚠" : "Agent Book Value", value: pv.value, title: pv.title },
-    { label: "Agent Spendable Cash", value: money(acct.agent_spendable_cash ?? acct.cash) },
+    { label: "Broker Free Cash", value: money(acct.broker_free_cash) },
+    { label: "Holdings Value", value: money(acct.holdings_market_value) },
     { label: "P&L Today", value: money(pnl), cls: pnlClass(pnl) },
     {
       label: "Risk / Drawdown",
@@ -237,20 +242,23 @@ export async function renderTrading() {
 function tradingCardsHtml(acct, risk) {
   const cards = [];
   if (acct) {
-    const pv = portfolioValueDisplay(acct);
     const bc = brokerCard(acct);
     const at = accountTotalDisplay(acct);
     const uh = unmanagedHoldingsDisplay(acct);
+    // dynamic broker account
     cards.push({ label: "Broker", value: bc.text, cls: bc.cls });
     cards.push({ label: "Account Total", value: at.value, cls: at.unavailable ? "bad" : "",
       title: at.unavailable ? "verified broker account value is unavailable — not shown as cash" : "" });
     cards.push({ label: "Broker Free Cash", value: money(acct.broker_free_cash) });
+    cards.push({ label: "Holdings Value", value: money(acct.holdings_market_value) });
     cards.push({ label: "Unmanaged Holdings", value: uh.text,
       title: "your own INDmoney holdings — visible for reconciliation, never agent capital or tradeable" });
-    cards.push({ label: pv.warn ? "Agent Book Value ⚠" : "Agent Book Value", value: pv.value, title: pv.title });
-    cards.push({ label: "Agent Allocated Capital", value: money(acct.allocated_capital) });
-    cards.push({ label: "Agent Spendable Cash", value: money(acct.agent_spendable_cash ?? acct.cash) });
     cards.push({ label: "P&L Today", value: money(acct.pnl_today), cls: pnlClass(acct.pnl_today) });
+    // NOT the account value — the cap on what the autonomous agent may deploy
+    cards.push({ label: "Autonomous Mandate", value: money(acct.allocated_capital),
+      title: "the FIXED scaffold cap on capital the agent may deploy — not your account balance, "
+           + "not your portfolio value. Enforced by engine.execute/guardrails. A dynamic, "
+           + "broker-derived model replaces it in a later governed slice (docs/CAPITAL_MODEL.md)." });
   }
   if (risk) {
     // Field names here are engine.guardrails.status_summary()'s own, verbatim

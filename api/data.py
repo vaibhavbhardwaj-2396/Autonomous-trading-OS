@@ -174,12 +174,21 @@ def get_account() -> dict:
     mandate, set by Vaibhav, and is deliberately independent of the
     brokerage account total. Nothing here ever rewrites it.
 
-    `total_value` is `null` unless the sync is fresh AND the broker holdings
-    were actually valued (not cash-only) — see broker_truth.holdings_valuation
-    and docs/BROKER_TRUTH.md. `broker_free_cash` (a single directly-confirmed
-    field) is shown whenever the sync is fresh, even when the total is not.
-    `agent_spendable_cash` and `allocated_capital` are the agent's own
-    mandate figures and are always separate from the broker-account fields.
+    The user-facing account model is the **dynamic broker account**:
+    `total_value`, `broker_free_cash`, `holdings_market_value`,
+    `unmanaged_holdings`, `pnl_today` — all broker-derived, all `null` unless
+    a fresh successful sync backs them.
+
+    `allocated_capital` is NOT the user's portfolio capital. It is the fixed
+    scaffold cap on how much the autonomous agent may deploy — a genuine
+    execution-safety boundary today (`engine.execute.sync_from_broker` sets
+    `spendable = min(allocated_capital + realised P&L - deployed,
+    broker_free_cash)`; `engine.guardrails` sizes every trade off the
+    resulting `capital`). It is kept in this payload for that reason and for
+    the stale-state reconciliation check, but the dashboard presents it as
+    "autonomous mandate", clearly distinct from the account — never as the
+    account's value. See docs/CAPITAL_MODEL.md for the planned dynamic model.
+    Nothing here ever rewrites `allocated_capital`.
     """
     try:
         state = gr.load_state()
@@ -194,10 +203,13 @@ def get_account() -> dict:
         "cash": state.get("cash_available"),
         "agent_spendable_cash": state.get("cash_available"),
         "portfolio_value": state.get("capital"),
-        # broker-aware: a number only when the sync is fresh AND holdings were valued
+        # --- dynamic broker account (the user-facing model) ------------------
+        # each is a number only when the sync is fresh AND holdings were valued
         "total_value": truth["safe_total_value"],
         "broker_free_cash": truth["safe_broker_free_cash"],
+        "holdings_market_value": truth["safe_holdings_market_value"],
         "pnl_today": day.get("realized_pnl"),
+        # --- autonomous mandate (a scaffold cap, NOT the account value) ------
         "allocated_capital": state.get("allocated_capital"),
         "realized_pnl_alltime": state.get("realized_pnl_alltime"),
         "peak_capital": state.get("peak_capital"),

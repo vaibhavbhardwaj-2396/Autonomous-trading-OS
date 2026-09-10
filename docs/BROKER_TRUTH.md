@@ -279,3 +279,59 @@ the dashboard, one of:
 Set `DASHBOARD_BROKER_CUTOVER` in `deploy/api.env` to the INDstocks cutover
 timestamp regardless — it is the belt-and-braces guarantee against a Kite-era
 snapshot ever reading as fresh.
+
+## 9. "broker unknown · unknown" on the live dashboard — audit
+
+Observed: the VPS trading engine syncs successfully with `broker: indstocks`,
+but the live dashboard shows `broker unknown · unknown`.
+
+**That string is `frontend/js/format.js:brokerCard()`'s fallback for a
+`/account` payload with NO `broker` field AND no `account_value_status`.**
+Both were introduced together in `api/broker_truth.py` (the broker-truth
+commit). `active_broker()` **cannot return an empty label** — with no
+`BROKER` env var it defaults to `indstocks` → `"INDmoney / INDstocks"`
+(`tests/test_broker_truth.py` PART A proves this). So a current API can
+never produce "broker unknown".
+
+**Root cause: the deployed `trading-api.service` is running code older than
+the broker-truth commit.** Netlify auto-deploys the frontend on every push;
+the VPS API only updates on a manual `git pull` + `systemctl restart
+trading-api`, which had not been done. New frontend + old API → no `broker`
+field → "broker unknown".
+
+**The API service's environment** — `deploy/trading-api.service` has
+`EnvironmentFile=/root/trading-agent/deploy/api.env` and nothing else (it
+deliberately does **not** load the trading `.env`; the `tradingapi` user
+cannot even read `.env`, which is `chmod 640 root:root`). So the only
+config channel for the dashboard's broker identity is `deploy/api.env`.
+
+**Fix:**
+1. `deploy/api.env` must carry `BROKER=indstocks` (added to
+   `deploy/api.env.example`; `docs/DEPLOYMENT.md` §12 now sets it). Without
+   it the code still defaults to `indstocks` — but the label then reads
+   `from_config: false`.
+2. **Deploy the current API** to the VPS (separate operational step, not
+   this slice):
+   ```bash
+   cd /root/trading-agent && git pull
+   grep -q '^BROKER=' deploy/api.env || echo 'BROKER=indstocks' | sudo tee -a deploy/api.env
+   sudo systemctl restart trading-api
+   curl -s https://tradingbotapi.bhardwajvaibhav.com/account \
+     -H "Authorization: Bearer $(grep DASHBOARD_API_TOKEN deploy/api.env | cut -d= -f2)" \
+     | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('broker'),d.get('account_value_status'))"
+   ```
+
+No frontend broker label is hardcoded — the dashboard shows whatever
+`/account`'s `broker.label` says, and falls back to the honest "broker
+unknown" only when the API genuinely didn't send one (i.e. it is stale).
+
+## 10. The legacy ₹10,000 "agent capital" model — see docs/CAPITAL_MODEL.md
+
+The dashboard no longer presents `capital` / `allocated_capital` (a fixed
+₹10k scaffold) as the user's portfolio. `allocated_capital` is **kept** —
+it is a real execution-safety boundary today (`engine.execute` caps
+`spendable` at it; `engine.guardrails` sizes every trade off the resulting
+`capital`) — but it is shown only as a small, explained **"Autonomous
+Mandate"** card, never as an account value. The user-facing model is the
+dynamic broker account. Full audit and the planned dynamic model:
+**`docs/CAPITAL_MODEL.md`**.

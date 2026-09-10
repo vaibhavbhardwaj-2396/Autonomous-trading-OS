@@ -310,6 +310,13 @@ check("F: /account (fresh sync) is labelled INDmoney / INDstocks and marked fres
       acct2["broker"]["label"] == "INDmoney / INDstocks"
       and acct2["account_value_status"] == "fresh"
       and acct2["book_value_reconciled"] is True, str(acct2))
+check("F: /account exposes the dynamic broker model — total_value / broker_free_cash / "
+      "holdings_market_value are distinct, none equal to allocated_capital",
+      acct2["total_value"] == 500000.0 and acct2["broker_free_cash"] == 15000.0
+      and acct2["holdings_market_value"] == 485000.0
+      and acct2["allocated_capital"] == 20000.0
+      and acct2["allocated_capital"] not in (acct2["total_value"], acct2["broker_free_cash"],
+                                             acct2["holdings_market_value"]), str(acct2))
 
 # F2: a stale broker_snapshot (old synced_at) + a Kite-era `capital` that
 # equals the whole account total must NOT be presented as current INDmoney.

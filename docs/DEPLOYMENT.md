@@ -147,6 +147,13 @@ DASHBOARD_API_TOKEN=YOUR_API_TOKEN        # generate: python3 -c "import secrets
 DASHBOARD_CORS_ORIGINS=https://your-dashboard-site.netlify.app
 DASHBOARD_API_HOST=127.0.0.1
 DASHBOARD_API_PORT=8787
+
+# Broker identity for the dashboard. NOT a secret — just a label. MUST match
+# BROKER in the trading .env (engine/broker.py). trading-api.service reads
+# THIS file, not .env, so without this line the dashboard falls back to the
+# `indstocks` default. See docs/BROKER_TRUTH.md and deploy/api.env.example.
+BROKER=indstocks
+DASHBOARD_BROKER_CUTOVER=          # optional: ISO ts of the INDstocks cutover
 ```
 
 ```bash
@@ -156,6 +163,20 @@ chmod 640 deploy/api.env
 
 (`640` — the service reads it as group `tradingapi`; only root can write it. `docs/API.md`
 §8 has the exact Netlify environment variable this same token needs to match.)
+
+**After any code change to `api/`**, the running `trading-api.service` does **not**
+update itself — it must be redeployed (`git pull` + `sudo systemctl restart trading-api`,
+§30). A dashboard showing "broker unknown", a missing `broker`/`account_value_status`
+field, or otherwise-stale account behaviour almost always means the VPS API is running
+older code than the Netlify frontend (which auto-deploys on push). Verify:
+
+```bash
+curl -s https://tradingbotapi.bhardwajvaibhav.com/account \
+  -H "Authorization: Bearer $(grep DASHBOARD_API_TOKEN deploy/api.env | cut -d= -f2)" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('broker:', d.get('broker'), '| status:', d.get('account_value_status'))"
+# expect: broker: {'id': 'indstocks', 'label': 'INDmoney / INDstocks', ...}
+# if 'broker' is None -> the API is stale, git pull + restart on the VPS
+```
 
 ## 13. Filesystem permissions
 

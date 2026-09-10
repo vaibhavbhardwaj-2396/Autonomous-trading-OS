@@ -49,6 +49,17 @@ IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 NOW = dt.datetime(2026, 9, 10, 12, 0, 0, tzinfo=IST)
 
 
+def _code_only(src: str) -> str:
+    """Drop the module docstring, string literals and comments so a check
+    for a real import or call is not fooled by prose that mentions the name."""
+    src = re.sub(r'"""(?:.|\n)*?"""', "", src)
+    src = re.sub(r"'''(?:.|\n)*?'''", "", src)
+    src = re.sub(r'"[^"\n]*"', '""', src)
+    src = re.sub(r"'[^'\n]*'", "''", src)
+    src = re.sub(r"#.*", "", src)
+    return src
+
+
 def _clear_env():
     for k in ("BROKER", "DASHBOARD_BROKER_SNAPSHOT_MAX_AGE_HOURS", "DASHBOARD_BROKER_CUTOVER"):
         os.environ.pop(k, None)
@@ -391,19 +402,103 @@ check("5. allocated_capital and total_value are distinct fields with distinct va
 
 
 # ---------------------------------------------------------------------------
-print("\n--- 6/7. isolation: no new import path into live execution ---")
+print("\n--- PART A: active broker identity via configuration ---")
 # ---------------------------------------------------------------------------
 
-def _code_only(src: str) -> str:
-    """Drop the module docstring, string literals and comments so a check
-    for a real import or call is not fooled by prose that mentions the name."""
-    src = re.sub(r'"""(?:.|\n)*?"""', "", src)
-    src = re.sub(r"'''(?:.|\n)*?'''", "", src)
-    src = re.sub(r'"[^"\n]*"', '""', src)
-    src = re.sub(r"'[^'\n]*'", "''", src)
-    src = re.sub(r"#.*", "", src)
-    return src
+_clear_env()
+b = broker_truth.active_broker()
+check("A: with NO BROKER env, active_broker() still resolves to indstocks / INDmoney (never unknown)",
+      b["id"] == "indstocks" and b["label"] == "INDmoney / INDstocks"
+      and b["from_config"] is False, str(b))
+check("A: 'unknown' is never a possible active-broker id or label",
+      "unknown" not in (b["id"], b["label"].lower()), str(b))
 
+os.environ["BROKER"] = "indstocks"
+b = broker_truth.active_broker()
+check("A: BROKER=indstocks in the API process env -> label INDmoney / INDstocks, from_config True",
+      b["id"] == "indstocks" and b["label"] == "INDmoney / INDstocks" and b["from_config"] is True,
+      str(b))
+
+os.environ["BROKER"] = "  INDSTOCKS  "
+b = broker_truth.active_broker()
+check("A: BROKER is whitespace/case tolerant ('  INDSTOCKS  ' -> indstocks)",
+      b["id"] == "indstocks" and b["label"] == "INDmoney / INDstocks", str(b))
+_clear_env()
+
+# the API service's own env file (deploy/api.env) is the configuration path —
+# the example that ships MUST carry BROKER so the deployed service is explicit.
+API_ENV_EXAMPLE = (ROOT / "deploy" / "api.env.example").read_text()
+check("A: deploy/api.env.example carries BROKER=indstocks (the configured broker-identity path)",
+      re.search(r"^BROKER=indstocks\s*$", API_ENV_EXAMPLE, re.MULTILINE) is not None,
+      "the deployed trading-api.service reads deploy/api.env, not the trading .env")
+
+acct = _account_with_state(fresh_state)
+check("A: get_account() ALWAYS returns a non-empty broker label — a correctly deployed API "
+      "cannot produce 'broker unknown'",
+      isinstance(acct["broker"], dict) and acct["broker"]["label"]
+      and acct["broker"]["label"].lower() != "unknown", str(acct["broker"]))
+_clear_env()
+
+
+# ---------------------------------------------------------------------------
+print("\n--- PART B: dynamic broker account is not conflated with fixed capital ---")
+# ---------------------------------------------------------------------------
+
+_clear_env()
+DYNAMIC = {
+    "allocated_capital": 10000.0, "capital": 10000.0, "cash_available": 32.31,
+    "realized_pnl_alltime": 0.0, "peak_capital": 10000.0, "open_positions": [],
+    "broker_snapshot": {
+        "total_account_value": 63032.31, "free_cash": 32.31,
+        "unmanaged_symbols": [f"SYM{i}" for i in range(26)],
+        "synced_at": (dt.datetime.now(IST) - dt.timedelta(hours=1)).isoformat(timespec="seconds"),
+    },
+}
+acct = _account_with_state(DYNAMIC)
+check("B: total_value is the DYNAMIC broker figure (₹63,032.31), not the ₹10k scaffold",
+      acct["total_value"] == 63032.31 and acct["total_value"] != acct["allocated_capital"], str(acct))
+check("B: broker_free_cash and total_value are distinct (₹32.31 vs ₹63,032.31)",
+      acct["broker_free_cash"] == 32.31 and acct["total_value"] != acct["broker_free_cash"], str(acct))
+check("B: holdings_market_value is exposed and dynamic (total − free cash ≈ ₹63,000)",
+      abs(acct["holdings_market_value"] - 63000.0) < 0.5, str(acct.get("holdings_market_value")))
+check("B: allocated_capital (₹10k) is still present but is NOT any of the dynamic broker figures",
+      acct["allocated_capital"] == 10000.0
+      and acct["allocated_capital"] not in (acct["total_value"], acct["broker_free_cash"],
+                                            acct["holdings_market_value"]), str(acct))
+check("B: a fund top-up changes total_value but never allocated_capital",
+      _account_with_state(dict(DYNAMIC, broker_snapshot=dict(
+          DYNAMIC["broker_snapshot"], total_account_value=90000.0)))["allocated_capital"] == 10000.0)
+_clear_env()
+
+
+# ---------------------------------------------------------------------------
+print("\n--- PART D: unmanaged holdings — visible, never tradeable ---")
+# ---------------------------------------------------------------------------
+
+_clear_env()
+acct = _account_with_state(DYNAMIC)
+check("D: all 26 unmanaged holdings are visible in the read-only /account payload",
+      acct["unmanaged_holdings"]["count"] == 26, str(acct["unmanaged_holdings"]))
+check("D: broker_snapshot.unmanaged_symbols is preserved verbatim for reconciliation",
+      len(acct["broker_snapshot"].get("synced_at") or "") > 0
+      and acct["account_value_status"] == "fresh", str(acct["broker_snapshot"]))
+
+# non-tradeable: no api/ code can place an order; guardrails refuse unmanaged symbols
+GUARDRAILS_SRC = (ROOT / "engine" / "guardrails.py").read_text()
+check("D: engine/guardrails.py refuses orders in unmanaged broker_snapshot symbols (the enforcement)",
+      "unmanaged_symbols" in GUARDRAILS_SRC and "unmanaged" in GUARDRAILS_SRC, "the live safety boundary")
+for mod in ("data.py", "broker_truth.py", "app.py"):
+    src = _code_only((ROOT / "api" / mod).read_text())
+    check(f"D: api/{mod} has no order-placement / sell path for any holding",
+          not any(t in src for t in ("propose_trade", ".place(", "place_order", "get_broker(",
+                                     "close_position", "sell")),
+          "the dashboard/API must never modify a holding")
+_clear_env()
+
+
+# ---------------------------------------------------------------------------
+print("\n--- 6/7. isolation: no new import path into live execution ---")
+# ---------------------------------------------------------------------------
 
 BROKER_TRUTH_SRC = (ROOT / "api" / "broker_truth.py").read_text()
 _bt_imports = re.findall(r"^\s*(?:from|import)\s+([.\w]+)", _code_only(BROKER_TRUTH_SRC), re.MULTILINE)

@@ -92,20 +92,10 @@ export function brokerCard(acct) {
   };
 }
 
-/** What to render for "Portfolio Value". When the stored `capital` figure
- * has not been reconciled to allocated_capital + realised P&L (the symptom
- * of a stale pre-migration snapshot), fall back to the reconciled
- * `expected_book_value` and mark it. */
-export function portfolioValueDisplay(acct) {
-  if (acct && acct.book_value_reconciled === false && acct.expected_book_value != null) {
-    return {
-      value: money(acct.expected_book_value),
-      warn: true,
-      title: acct.book_value_note || "capital not reconciled to allocated_capital + realised P&L",
-    };
-  }
-  return { value: money(acct ? acct.portfolio_value : null), warn: false, title: "" };
-}
+// (portfolioValueDisplay removed — the "Agent Book Value" / fixed-capital
+// card it fed is no longer shown. `book_value_reconciled` / `book_value_note`
+// remain in the /account payload for the stale-state check, but the dynamic
+// broker account is what the dashboard presents. See docs/CAPITAL_MODEL.md.)
 
 /** The one-line notice to show above the account cards when data is stale,
  * incomplete, or has a book-value warning — or "" when everything is fresh

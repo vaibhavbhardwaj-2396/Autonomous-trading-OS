@@ -12,6 +12,11 @@
 // docs/API.md — there is no headless DOM here to drive them against.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 let passed = 0;
 let failed = 0;
@@ -92,13 +97,8 @@ check("brokerCard() is 'good' only when fresh, 'bad' when stale, and annotates t
 check("brokerCard() degrades to 'broker unknown' with no crash on an empty payload",
   fmt.brokerCard({}).label === "broker unknown" && fmt.brokerCard(undefined).label === "broker unknown");
 
-check("portfolioValueDisplay() shows the raw portfolio_value when the book value is reconciled",
-  fmt.portfolioValueDisplay(FRESH_ACCT).value === fmt.money(10250)
-  && fmt.portfolioValueDisplay(FRESH_ACCT).warn === false);
-check("portfolioValueDisplay() falls back to expected_book_value (not the stale ₹5.7L) when NOT reconciled",
-  fmt.portfolioValueDisplay(STALE_ACCT).value === fmt.money(10000)
-  && fmt.portfolioValueDisplay(STALE_ACCT).warn === true
-  && fmt.portfolioValueDisplay(STALE_ACCT).value !== fmt.money(570000));
+check("portfolioValueDisplay was removed — no fixed-capital 'book value' helper remains",
+  fmt.portfolioValueDisplay === undefined);
 
 check("accountStaleNotice() is empty for a fresh account",
   fmt.accountStaleNotice(FRESH_ACCT) === "");
@@ -144,6 +144,32 @@ check("accountStaleNotice(): an 'incomplete' account shows the verify warning + 
 check("syncedAtLabel(): 'synced <when>' when a timestamp exists, 'never synced' otherwise",
   fmt.syncedAtLabel(VERIFIED_ACCT).startsWith("synced ")
   && fmt.syncedAtLabel({}) === "never synced");
+
+// --- PART B: no misleading fixed-₹10k account-capital card (views.js source) --
+// strip // line comments and /* */ block comments so a check for real CODE
+// is not fooled by an explanatory comment that names the removed concept.
+function stripComments(s) {
+  return s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+const VIEWS_SRC = stripComments(readFileSync(join(HERE, "../js/views.js"), "utf8"));
+const FORMAT_SRC = stripComments(readFileSync(join(HERE, "../js/format.js"), "utf8"));
+
+check("views.js no longer renders an 'Agent Book Value' card",
+  !VIEWS_SRC.includes("Agent Book Value"));
+check("views.js no longer renders an 'Agent Allocated Capital' card",
+  !VIEWS_SRC.includes("Agent Allocated Capital"));
+check("views.js no longer renders an 'Agent Spendable Cash' card",
+  !VIEWS_SRC.includes("Agent Spendable Cash"));
+check("views.js presents the dynamic broker account model (Account Total / Broker Free Cash / Holdings Value)",
+  VIEWS_SRC.includes('"Account Total"') && VIEWS_SRC.includes('"Broker Free Cash"')
+  && VIEWS_SRC.includes('"Holdings Value"'));
+check("allocated_capital appears ONLY as a clearly-labelled 'Autonomous Mandate', explained as not the account value",
+  VIEWS_SRC.includes('"Autonomous Mandate"')
+  && VIEWS_SRC.includes("not your account balance"));
+check("format.js no longer exports the fixed-capital portfolioValueDisplay helper",
+  !FORMAT_SRC.includes("export function portfolioValueDisplay"));
+check("no hardcoded broker label string in frontend CODE (INDmoney/INDstocks only from the API payload)",
+  !VIEWS_SRC.includes('"INDmoney / INDstocks"') && !FORMAT_SRC.includes('"INDmoney / INDstocks"'));
 
 // ---------------------------------------------------------------------------
 // api.js — apiGet()'s response classification under a mocked fetch
