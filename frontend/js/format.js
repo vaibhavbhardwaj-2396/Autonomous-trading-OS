@@ -64,3 +64,57 @@ export function table(container, columns, rows, emptyMessage) {
 export function errorState(container, message) {
   container.innerHTML = `<div class="error-state">${esc(message)}</div>`;
 }
+
+// --------------------------------------------------------------------------
+// Broker truth / account freshness — pure helpers over the /account payload
+// (see api/broker_truth.py). None of these compute a figure; they only
+// decide how to LABEL one so a stale Kite-era snapshot can never be shown
+// as a current INDmoney balance.
+// --------------------------------------------------------------------------
+
+/** True when the broker account figures backing /account are NOT a fresh
+ * successful sync (stale, never synced, unknown, or a different broker era). */
+export function accountIsStale(acct) {
+  return !!acct && acct.account_value_status !== undefined && acct.account_value_status !== "fresh";
+}
+
+/** {label, cls, status} for a "Broker" card. label is the active broker
+ * ("INDmoney / INDstocks"); cls is "good" only when the account data is
+ * fresh, "bad" otherwise. */
+export function brokerCard(acct) {
+  const label = (acct && acct.broker && acct.broker.label) || "broker unknown";
+  const status = (acct && acct.account_value_status) || "unknown";
+  return {
+    label,
+    status,
+    cls: status === "fresh" ? "good" : "bad",
+    text: status === "fresh" ? label : `${label} · ${String(status).replace(/_/g, " ")}`,
+  };
+}
+
+/** What to render for "Portfolio Value". When the stored `capital` figure
+ * has not been reconciled to allocated_capital + realised P&L (the symptom
+ * of a stale pre-migration snapshot), fall back to the reconciled
+ * `expected_book_value` and mark it. */
+export function portfolioValueDisplay(acct) {
+  if (acct && acct.book_value_reconciled === false && acct.expected_book_value != null) {
+    return {
+      value: money(acct.expected_book_value),
+      warn: true,
+      title: acct.book_value_note || "capital not reconciled to allocated_capital + realised P&L",
+    };
+  }
+  return { value: money(acct ? acct.portfolio_value : null), warn: false, title: "" };
+}
+
+/** The one-line notice to show above the account cards when data is stale,
+ * or "" when everything is fresh. */
+export function accountStaleNotice(acct) {
+  if (!acct) return "";
+  const warnings = Array.isArray(acct.account_warnings) ? acct.account_warnings : [];
+  if (warnings.length) return warnings.join(" ");
+  if (accountIsStale(acct)) {
+    return `Broker account data is ${String(acct.account_value_status).replace(/_/g, " ")} — showing the agent's last known book value, not a live balance.`;
+  }
+  return "";
+}

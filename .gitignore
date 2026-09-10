@@ -14,6 +14,14 @@ research/*.db
 research/*.db-wal
 research/*.db-shm
 
+# Research process run-logs and the continuous worker's runtime bookmarks /
+# lock — operational artifacts written on the VPS, never versioned code
+# (same class as the .db files above).
+research/*_runs.jsonl
+research/.worker.lock
+research/.worker_state.json
+research/.worker_state.json.tmp
+
 # Dashboard frontend config — per-deployment API base URL/token, never
 # committed (same convention as .env). Copy frontend/config.example.js.
 frontend/config.js

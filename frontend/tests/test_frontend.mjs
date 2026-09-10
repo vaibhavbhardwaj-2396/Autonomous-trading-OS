@@ -65,6 +65,47 @@ check("esc() renders null/undefined as empty string, not the literal word", fmt.
 // test (docs/API.md) instead, which is the more meaningful check for actual
 // rendered HTML.
 
+// --- broker truth / account freshness (PART A) --------------------------------
+const FRESH_ACCT = {
+  portfolio_value: 10250, expected_book_value: 10250, book_value_reconciled: true,
+  account_value_status: "fresh", broker: { id: "indstocks", label: "INDmoney / INDstocks" },
+  account_warnings: [],
+};
+const STALE_ACCT = {
+  portfolio_value: 570000, expected_book_value: 10000, book_value_reconciled: false,
+  book_value_note: "capital matches the whole brokerage account total",
+  account_value_status: "stale", broker: { id: "indstocks", label: "INDmoney / INDstocks" },
+  account_warnings: ["Broker account data is stale (last successful broker sync is 900h old). Showing the agent's last known book value, not a live INDmoney / INDstocks balance."],
+};
+
+check("accountIsStale() is false for a fresh account, true for a stale one",
+  fmt.accountIsStale(FRESH_ACCT) === false && fmt.accountIsStale(STALE_ACCT) === true);
+check("accountIsStale() is false when the field is absent (old API payload, no false alarm)",
+  fmt.accountIsStale({}) === false);
+
+check("brokerCard() always reports the active broker label",
+  fmt.brokerCard(FRESH_ACCT).label === "INDmoney / INDstocks"
+  && fmt.brokerCard(STALE_ACCT).label === "INDmoney / INDstocks");
+check("brokerCard() is 'good' only when fresh, 'bad' when stale, and annotates the status",
+  fmt.brokerCard(FRESH_ACCT).cls === "good" && fmt.brokerCard(FRESH_ACCT).text === "INDmoney / INDstocks"
+  && fmt.brokerCard(STALE_ACCT).cls === "bad" && fmt.brokerCard(STALE_ACCT).text.includes("stale"));
+check("brokerCard() degrades to 'broker unknown' with no crash on an empty payload",
+  fmt.brokerCard({}).label === "broker unknown" && fmt.brokerCard(undefined).label === "broker unknown");
+
+check("portfolioValueDisplay() shows the raw portfolio_value when the book value is reconciled",
+  fmt.portfolioValueDisplay(FRESH_ACCT).value === fmt.money(10250)
+  && fmt.portfolioValueDisplay(FRESH_ACCT).warn === false);
+check("portfolioValueDisplay() falls back to expected_book_value (not the stale ₹5.7L) when NOT reconciled",
+  fmt.portfolioValueDisplay(STALE_ACCT).value === fmt.money(10000)
+  && fmt.portfolioValueDisplay(STALE_ACCT).warn === true
+  && fmt.portfolioValueDisplay(STALE_ACCT).value !== fmt.money(570000));
+
+check("accountStaleNotice() is empty for a fresh account",
+  fmt.accountStaleNotice(FRESH_ACCT) === "");
+check("accountStaleNotice() surfaces the API warning text for a stale account",
+  fmt.accountStaleNotice(STALE_ACCT).includes("stale")
+  && fmt.accountStaleNotice(STALE_ACCT).length > 0);
+
 // ---------------------------------------------------------------------------
 // api.js — apiGet()'s response classification under a mocked fetch
 // ---------------------------------------------------------------------------

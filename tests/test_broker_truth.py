@@ -1,0 +1,354 @@
+"""
+tests/test_broker_truth.py — regression tests for api/broker_truth.py and the
+broker-aware /account path (PART A: dashboard broker truth / source of truth).
+
+Proves, mechanically:
+  1. A Kite-era stale state cannot masquerade as current INDmoney data.
+  2. The active broker is INDstocks (default, and from config).
+  3. A failed / absent INDstocks sync produces an explicit unavailable/stale
+     condition — no stale figure is presented as current.
+  4. A successful, fresh INDstocks sync is represented as INDmoney data.
+  5. allocated_capital stays independent of the total brokerage account value
+     and is never overwritten by it.
+  6. api/broker_truth.py and api/data.py add no import path from research/paper
+     into live execution, and no broker/execute import at all.
+  7. No live order placement is reachable from the dashboard GET endpoints.
+
+Run with:  python -m tests.test_broker_truth
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
+
+PASSED, FAILED = 0, 0
+
+
+def check(name, condition, detail=""):
+    global PASSED, FAILED
+    if condition:
+        PASSED += 1
+        print(f"  ✓ {name}")
+    else:
+        FAILED += 1
+        print(f"  ✗ {name}")
+        if detail:
+            print(f"      {detail}")
+
+
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+NOW = dt.datetime(2026, 9, 10, 12, 0, 0, tzinfo=IST)
+
+
+def _clear_env():
+    for k in ("BROKER", "DASHBOARD_BROKER_SNAPSHOT_MAX_AGE_HOURS", "DASHBOARD_BROKER_CUTOVER"):
+        os.environ.pop(k, None)
+
+
+_clear_env()
+from api import broker_truth  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+print("\n--- active_broker(): the active broker is INDmoney / INDstocks ---")
+# ---------------------------------------------------------------------------
+
+_clear_env()
+b = broker_truth.active_broker()
+check("2. default active broker is indstocks (matches engine/broker.py default)",
+      b["id"] == "indstocks", str(b))
+check("2. default active broker label is 'INDmoney / INDstocks'",
+      b["label"] == "INDmoney / INDstocks", str(b))
+check("2. default is flagged as NOT from explicit config",
+      b["from_config"] is False, str(b))
+
+os.environ["BROKER"] = "indstocks"
+b = broker_truth.active_broker()
+check("2. BROKER=indstocks in env -> label 'INDmoney / INDstocks', from_config True",
+      b["id"] == "indstocks" and b["label"] == "INDmoney / INDstocks" and b["from_config"] is True,
+      str(b))
+
+os.environ["BROKER"] = "kite"
+b = broker_truth.active_broker()
+check("kite is still representable as a fallback ('Zerodha / Kite')",
+      b["id"] == "kite" and b["label"] == "Zerodha / Kite", str(b))
+_clear_env()
+
+
+# ---------------------------------------------------------------------------
+print("\n--- classify_snapshot(): stale / never-synced / fresh ---")
+# ---------------------------------------------------------------------------
+
+_clear_env()
+
+# 3. never synced -> explicit unavailable, not a silent zero/stale
+never = broker_truth.classify_snapshot({"total_account_value": None, "synced_at": None}, now=NOW)
+check("3. synced_at=None -> status 'never_synced', stale True",
+      never["status"] == "never_synced" and never["stale"] is True, str(never))
+check("3. never_synced carries a human reason and the source function name",
+      "no successful broker sync" in never["reason"]
+      and never["source"] == "engine.execute.sync_from_broker", str(never))
+
+# 3. failed sync leaves an OLD synced_at -> stale by age
+old = broker_truth.classify_snapshot(
+    {"total_account_value": 570000.0, "synced_at": "2026-08-01T09:00:00+05:30"}, now=NOW)
+check("3. a month-old broker_snapshot -> status 'stale', stale True",
+      old["status"] == "stale" and old["stale"] is True, str(old))
+check("3. stale reason mentions the age and the freshness ceiling",
+      "old" in old["reason"] and "stale" in old["reason"], str(old))
+
+# 4. fresh sync
+fresh = broker_truth.classify_snapshot(
+    {"total_account_value": 63000.0, "free_cash": 63000.0,
+     "synced_at": "2026-09-10T09:30:00+05:30"}, now=NOW)
+check("4. a 2.5h-old broker_snapshot -> status 'fresh', stale False, reason None",
+      fresh["status"] == "fresh" and fresh["stale"] is False and fresh["reason"] is None,
+      str(fresh))
+check("4. fresh snapshot is labelled with the active broker (INDmoney / INDstocks)",
+      fresh["broker"] == "INDmoney / INDstocks", str(fresh))
+
+# unreadable timestamp -> unknown, never fresh
+bad_ts = broker_truth.classify_snapshot({"synced_at": "yesterdayish"}, now=NOW)
+check("an unreadable synced_at -> status 'unknown', stale True (never 'fresh')",
+      bad_ts["status"] == "unknown" and bad_ts["stale"] is True, str(bad_ts))
+
+# future timestamp (clock skew) -> not fresh
+future = broker_truth.classify_snapshot({"synced_at": "2027-01-01T00:00:00+05:30"}, now=NOW)
+check("a future synced_at is not treated as fresh",
+      future["status"] != "fresh" and future["stale"] is True, str(future))
+
+# a snapshot that records a DIFFERENT broker than the active one -> stale
+_clear_env()
+os.environ["BROKER"] = "indstocks"
+diff = broker_truth.classify_snapshot(
+    {"broker": "kite", "synced_at": "2026-09-10T11:30:00+05:30"}, now=NOW)
+check("1/3. a snapshot written for 'kite' while active broker is indstocks -> stale",
+      diff["status"] == "stale" and "kite" in diff["reason"].lower(), str(diff))
+_clear_env()
+
+# explicit cutover: any snapshot at/before it is Kite-era stale regardless of age
+os.environ["DASHBOARD_BROKER_CUTOVER"] = "2026-09-07T00:00:00+05:30"
+recent_but_precutover = broker_truth.classify_snapshot(
+    {"synced_at": "2026-09-06T23:59:00+05:30"}, now=dt.datetime(2026, 9, 7, 1, 0, tzinfo=IST))
+check("1. a snapshot synced before the configured cutover -> stale even when only minutes old",
+      recent_but_precutover["status"] == "stale"
+      and "cutover" in recent_but_precutover["reason"].lower(), str(recent_but_precutover))
+_clear_env()
+
+# configurable freshness ceiling
+os.environ["DASHBOARD_BROKER_SNAPSHOT_MAX_AGE_HOURS"] = "1"
+tight = broker_truth.classify_snapshot({"synced_at": "2026-09-10T09:30:00+05:30"}, now=NOW)
+check("the freshness ceiling is configurable (1h -> a 2.5h-old snapshot is stale)",
+      tight["status"] == "stale", str(tight))
+_clear_env()
+
+
+# ---------------------------------------------------------------------------
+print("\n--- reconcile_book_value(): capital vs allocated_capital + realised P&L ---")
+# ---------------------------------------------------------------------------
+
+# 1. the exact Kite-era poisoning: capital == account total, ~57x the mandate
+kite_era = {
+    "allocated_capital": 10000.0,
+    "realized_pnl_alltime": 0.0,
+    "capital": 570000.0,
+    "broker_snapshot": {"total_account_value": 570000.0},
+}
+rec = broker_truth.reconcile_book_value(kite_era)
+check("1. Kite-era capital (₹5.7L on a ₹10k mandate) -> reconciled False",
+      rec["reconciled"] is False, str(rec))
+check("1. it is specifically flagged as looking like the whole account total",
+      rec["looks_like_account_total"] is True, str(rec))
+check("1. expected_book_value is allocated + realised P&L (₹10,000), not the stale capital",
+      rec["expected_book_value"] == 10000.0, str(rec))
+
+# 5. allocated_capital independent of total account value — a healthy book
+healthy = {
+    "allocated_capital": 20000.0,
+    "realized_pnl_alltime": 1500.0,
+    "capital": 21500.0,
+    "broker_snapshot": {"total_account_value": 500000.0},
+}
+rec = broker_truth.reconcile_book_value(healthy)
+check("5. capital == allocated + realised P&L -> reconciled True even when the account holds ₹5L",
+      rec["reconciled"] is True and rec["looks_like_account_total"] is False, str(rec))
+check("5. expected_book_value == 21500, allocated stays 20000 (independent of the ₹5L total)",
+      rec["expected_book_value"] == 21500.0 and rec["allocated_capital"] == 20000.0, str(rec))
+
+# a small post-close pre-resync drift is tolerated (not a false alarm)
+drift = {"allocated_capital": 20000.0, "realized_pnl_alltime": 900.0, "capital": 20000.0,
+         "broker_snapshot": {}}
+check("a small unsynced-close drift (capital lags book value by ₹900) is still reconciled",
+      broker_truth.reconcile_book_value(drift)["reconciled"] is True)
+
+
+# ---------------------------------------------------------------------------
+print("\n--- account_truth(): the one call api/data.py uses ---")
+# ---------------------------------------------------------------------------
+
+_clear_env()
+stale_state = {
+    "allocated_capital": 10000.0, "capital": 570000.0, "cash_available": 570000.0,
+    "realized_pnl_alltime": 0.0, "peak_capital": 570000.0,
+    "day": {"realized_pnl": 0.0},
+    "broker_snapshot": {"total_account_value": 570000.0, "free_cash": 570000.0,
+                        "unmanaged_symbols": ["RELIANCE", "TCS"],
+                        "synced_at": "2026-07-15T09:00:00+05:30"},
+    "last_updated": "2026-07-15T09:00:00+05:30",
+}
+truth = broker_truth.account_truth(stale_state, now=NOW)
+check("1. stale Kite-era state -> account_value_status 'stale'",
+      truth["account_value_status"] == "stale", str(truth["snapshot"]))
+check("1. stale state -> safe_total_value is None (the ₹5.7L is NOT presented)",
+      truth["safe_total_value"] is None and truth["safe_broker_free_cash"] is None, str(truth))
+check("1. stale state -> book value not reconciled and a warning is emitted",
+      truth["book_value"]["reconciled"] is False and len(truth["warnings"]) >= 1, str(truth))
+check("2. active broker still labelled INDmoney / INDstocks on stale state",
+      truth["broker"]["label"] == "INDmoney / INDstocks", str(truth["broker"]))
+
+fresh_state = {
+    "allocated_capital": 10000.0, "capital": 10250.0, "cash_available": 9800.0,
+    "realized_pnl_alltime": 250.0, "peak_capital": 10250.0,
+    "day": {"realized_pnl": 120.0},
+    "broker_snapshot": {"total_account_value": 63000.0, "free_cash": 41000.0,
+                        "unmanaged_symbols": ["RELIANCE"],
+                        "synced_at": "2026-09-10T09:45:00+05:30"},
+    "last_updated": "2026-09-10T09:45:00+05:30",
+}
+truth = broker_truth.account_truth(fresh_state, now=NOW)
+check("4. fresh INDstocks sync -> account_value_status 'fresh'",
+      truth["account_value_status"] == "fresh", str(truth["snapshot"]))
+check("4. fresh sync -> safe_total_value is the real INDmoney number (₹63,000)",
+      truth["safe_total_value"] == 63000.0 and truth["safe_broker_free_cash"] == 41000.0, str(truth))
+check("4. fresh sync -> no warnings, book value reconciled",
+      truth["warnings"] == [] and truth["book_value"]["reconciled"] is True, str(truth))
+check("5. fresh sync: allocated_capital (₹10k) is untouched and separate from the ₹63k total",
+      truth["book_value"]["allocated_capital"] == 10000.0
+      and truth["safe_total_value"] == 63000.0, str(truth))
+
+
+# ---------------------------------------------------------------------------
+print("\n--- api/data.py get_account() end to end ---")
+# ---------------------------------------------------------------------------
+
+_clear_env()
+from engine import guardrails as gr  # noqa: E402
+from api import data as api_data  # noqa: E402
+
+TMP = Path(tempfile.mkdtemp(prefix="lq-broker-truth-"))
+
+
+def _account_with_state(state: dict) -> dict:
+    p = TMP / f"state_{abs(hash(json.dumps(state, sort_keys=True))) & 0xffff}.json"
+    p.write_text(json.dumps(state))
+    orig = gr.STATE_FILE
+    gr.STATE_FILE = p
+    try:
+        return api_data.get_account()
+    finally:
+        gr.STATE_FILE = orig
+
+
+acct = _account_with_state(stale_state)
+check("1. get_account() on stale Kite-era state: total_value is None",
+      acct["total_value"] is None, str(acct))
+check("1. get_account(): account_value_status 'stale', book_value_reconciled False",
+      acct["account_value_status"] == "stale" and acct["book_value_reconciled"] is False, str(acct))
+check("1. get_account(): expected_book_value is ₹10,000, NOT the stale ₹5.7L capital",
+      acct["expected_book_value"] == 10000.0 and acct["portfolio_value"] == 570000.0, str(acct))
+check("1. get_account(): a non-empty account_warnings list is returned",
+      isinstance(acct["account_warnings"], list) and len(acct["account_warnings"]) >= 1, str(acct))
+check("2. get_account(): broker is labelled INDmoney / INDstocks",
+      acct["broker"]["label"] == "INDmoney / INDstocks", str(acct["broker"]))
+check("E (regression): get_account() still has the documented v1 fields",
+      {"cash", "portfolio_value", "total_value", "pnl_today", "as_of"} <= acct.keys(), str(acct.keys()))
+
+acct = _account_with_state(fresh_state)
+check("4. get_account() on a fresh INDstocks sync: total_value == ₹63,000",
+      acct["total_value"] == 63000.0, str(acct))
+check("4. get_account(): account_value_status 'fresh', book_value_reconciled True",
+      acct["account_value_status"] == "fresh" and acct["book_value_reconciled"] is True, str(acct))
+check("4. get_account(): account_warnings is empty on a fresh sync",
+      acct["account_warnings"] == [], str(acct))
+
+# 5. allocated_capital is never rewritten to the account total, at any layer
+big_account = dict(fresh_state)
+big_account["broker_snapshot"] = dict(fresh_state["broker_snapshot"], total_account_value=900000.0)
+acct = _account_with_state(big_account)
+check("5. a ₹9L account total never becomes allocated_capital (stays ₹10,000)",
+      acct["allocated_capital"] == 10000.0, str(acct))
+check("5. allocated_capital and total_value are distinct fields with distinct values",
+      acct["allocated_capital"] == 10000.0 and acct["total_value"] == 900000.0, str(acct))
+
+
+# ---------------------------------------------------------------------------
+print("\n--- 6/7. isolation: no new import path into live execution ---")
+# ---------------------------------------------------------------------------
+
+def _code_only(src: str) -> str:
+    """Drop the module docstring, string literals and comments so a check
+    for a real import or call is not fooled by prose that mentions the name."""
+    src = re.sub(r'"""(?:.|\n)*?"""', "", src)
+    src = re.sub(r"'''(?:.|\n)*?'''", "", src)
+    src = re.sub(r'"[^"\n]*"', '""', src)
+    src = re.sub(r"'[^'\n]*'", "''", src)
+    src = re.sub(r"#.*", "", src)
+    return src
+
+
+BROKER_TRUTH_SRC = (ROOT / "api" / "broker_truth.py").read_text()
+_bt_imports = re.findall(r"^\s*(?:from|import)\s+([.\w]+)", _code_only(BROKER_TRUTH_SRC), re.MULTILINE)
+check("6. api/broker_truth.py imports no engine.* at all",
+      not any(m.startswith("engine") for m in _bt_imports), str(_bt_imports))
+check("6. api/broker_truth.py imports nothing from research/ or paper/",
+      not any(m.split(".")[0] in ("research", "paper") for m in _bt_imports), str(_bt_imports))
+check("6. api/broker_truth.py imports only the standard library",
+      set(m.split(".")[0] for m in _bt_imports) <= {"__future__", "datetime", "os", "typing"},
+      str(_bt_imports))
+_bt_code = _code_only(BROKER_TRUTH_SRC)
+check("6. api/broker_truth.py has no broker/HTTP call in code (docstrings aside)",
+      not any(tok in _bt_code for tok in ("get_broker(", ".place(", "._post(", "requests.", "urllib")),
+      "broker-truth must be a pure classifier, never a broker client")
+
+DATA_SRC = (ROOT / "api" / "data.py").read_text()
+_data_imports = re.findall(r"^\s*(?:from|import)\s+([.\w]+)", _code_only(DATA_SRC), re.MULTILINE)
+check("6. api/data.py still imports no engine.broker* / engine.execute after the change",
+      not any(m.startswith("engine.broker") or m == "engine.execute" for m in _data_imports),
+      str(_data_imports))
+
+APP_SRC = (ROOT / "api" / "app.py").read_text()
+_route_methods = re.findall(r"@app\.route\([^)]*methods\s*=\s*\[([^\]]*)\]", APP_SRC)
+_all_methods = {m.strip().strip('"\'').upper() for group in _route_methods for m in group.split(",")}
+check("7. every api/app.py route is declared GET-only",
+      _all_methods == {"GET"}, f"declared methods across all routes: {_all_methods}")
+_app_code = _code_only(APP_SRC)
+check("7. api/app.py never calls propose_trade / place / a broker in code",
+      not any(tok in _app_code for tok in ("propose_trade", "get_broker(", ".place(", "run_paper_cycle")),
+      "dashboard endpoints must stay read-only")
+check("7. /account route body is just jsonify(data.get_account()) — no side effect",
+      re.search(r"def account\(\):\s*\n\s*return jsonify\(data\.get_account\(\)\)", APP_SRC) is not None,
+      "the /account handler must remain a thin read")
+
+# engine/guardrails.py and engine/execute.py must be byte-identical to HEAD
+import subprocess  # noqa: E402
+_diff = subprocess.run(
+    ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD", "--",
+     "engine/guardrails.py", "engine/execute.py"],
+    capture_output=True, text=True)
+check("protected files engine/guardrails.py and engine/execute.py are unmodified",
+      _diff.stdout.strip() == "", f"changed: {_diff.stdout.strip()!r}")
+
+
+print(f"\n{'=' * 52}")
+print(f"  {PASSED} passed, {FAILED} failed")
+print(f"{'=' * 52}\n")
+sys.exit(1 if FAILED else 0)

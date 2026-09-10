@@ -5,7 +5,10 @@
 // from rendering.
 
 import { apiGet } from "./api.js";
-import { esc, money, num, pnlClass, dt, badge, table, errorState } from "./format.js";
+import {
+  esc, money, num, pnlClass, dt, badge, table, errorState,
+  brokerCard, portfolioValueDisplay, accountStaleNotice,
+} from "./format.js";
 
 function el(id) {
   return document.getElementById(id);
@@ -113,8 +116,11 @@ export async function renderOverview() {
 
 function accountCardsHtml(acct, risk, regime) {
   const pnl = acct.pnl_today;
+  const pv = portfolioValueDisplay(acct);
+  const bc = brokerCard(acct);
   const cards = [
-    { label: "Portfolio Value", value: money(acct.portfolio_value) },
+    { label: "Broker", value: bc.text, cls: bc.cls },
+    { label: pv.warn ? "Portfolio Value ⚠" : "Portfolio Value", value: pv.value, title: pv.title },
     { label: "Cash Available", value: money(acct.cash) },
     { label: "P&L Today", value: money(pnl), cls: pnlClass(pnl) },
     {
@@ -126,12 +132,21 @@ function accountCardsHtml(acct, risk, regime) {
       value: regime && regime.available ? badge(regime.regime, "normal") : "unavailable",
     },
   ];
-  return cards
+  return staleNoticeHtml(acct) + cards
     .map(
-      (c) => `<div class="card"><div class="label">${esc(c.label)}</div>
+      (c) => `<div class="card"${c.title ? ` title="${esc(c.title)}"` : ""}><div class="label">${esc(c.label)}</div>
         <div class="value ${c.cls || ""}">${c.value}</div></div>`
     )
     .join("");
+}
+
+/** A full-width warning strip rendered above the account cards when the
+ * broker figures are not a fresh sync — so a stale Kite-era snapshot is
+ * never presented silently as current INDmoney truth. */
+function staleNoticeHtml(acct) {
+  const notice = accountStaleNotice(acct);
+  if (!notice) return "";
+  return `<div class="error-state" style="grid-column:1/-1">${esc(notice)}</div>`;
 }
 
 // --------------------------------------------------------------------------
@@ -218,7 +233,10 @@ export async function renderTrading() {
 function tradingCardsHtml(acct, risk) {
   const cards = [];
   if (acct) {
-    cards.push({ label: "Portfolio Value", value: money(acct.portfolio_value) });
+    const pv = portfolioValueDisplay(acct);
+    const bc = brokerCard(acct);
+    cards.push({ label: "Broker", value: bc.text, cls: bc.cls });
+    cards.push({ label: pv.warn ? "Portfolio Value ⚠" : "Portfolio Value", value: pv.value, title: pv.title });
     cards.push({ label: "Cash Available", value: money(acct.cash) });
     cards.push({ label: "P&L Today", value: money(acct.pnl_today), cls: pnlClass(acct.pnl_today) });
   }
@@ -245,9 +263,9 @@ function tradingCardsHtml(acct, risk) {
       cls: risk.can_open_new_positions ? "good" : "bad",
     });
   }
-  return cards
+  return (acct ? staleNoticeHtml(acct) : "") + cards
     .map(
-      (c) => `<div class="card"><div class="label">${esc(c.label)}</div>
+      (c) => `<div class="card"${c.title ? ` title="${esc(c.title)}"` : ""}><div class="label">${esc(c.label)}</div>
         <div class="value ${c.cls || ""}">${c.value}</div></div>`
     )
     .join("");

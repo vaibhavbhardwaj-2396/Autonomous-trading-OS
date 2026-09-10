@@ -37,6 +37,11 @@ strategy_backtest.run_backtest, strategies.registry.save_version, or any
 other function whose job is to change state. Every import below is a
 read-only entry point; grep this file for "import" and check each one
 against the modules it names if that ever needs re-verifying.
+
+    api.broker_truth   -> pure, stdlib-only broker-awareness classifier for
+                          get_account(); imports no engine.broker*, no
+                          engine.execute, no research/paper — see its own
+                          module docstring and tests/test_broker_truth.py.
 """
 
 from __future__ import annotations
@@ -53,6 +58,8 @@ from research import memory as rm
 from research.brain import draft_backlog, research_areas
 from research.brain import digest as digest_mod
 from strategies import registry as sreg
+
+from . import broker_truth
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -149,10 +156,24 @@ def _read_jsonl(path: Path) -> list[dict]:
 def get_account() -> dict:
     """cash / portfolio_value / total_value / pnl_today, from
     engine.guardrails.load_state() — the exact file engine.execute reads
-    and writes. `total_value` is the whole brokerage account (only known
-    once a sync has run; None until then) — `portfolio_value` is the
-    agent's own mandate only, matching CLAUDE.md's "book value = allocation
-    + own realised P&L" distinction."""
+    and writes. `total_value` is the whole brokerage account and is
+    **broker-aware**: it is only a number when there is an actual recent
+    successful `engine.execute.sync_from_broker()` result to back it, and
+    `None` otherwise (never synced, stale, or from a pre-migration Kite-era
+    snapshot — see api/broker_truth.py and docs/BROKER_TRUTH.md). This is
+    the fix for the dashboard having shown stale ~₹5.7L Kite-era figures as
+    current INDmoney truth.
+
+    `portfolio_value` is the agent's own mandate only, matching CLAUDE.md's
+    "book value = allocation + own realised P&L" distinction. It is
+    accompanied by `expected_book_value` (allocated_capital + realised P&L)
+    and `book_value_reconciled` so the dashboard can flag a `capital` figure
+    that has drifted from — or been poisoned with — an account-total value.
+
+    `allocated_capital` is passed through untouched: it is the agent's
+    mandate, set by Vaibhav, and is deliberately independent of the
+    brokerage account total. Nothing here ever rewrites it.
+    """
     try:
         state = gr.load_state()
     except Exception as e:
@@ -160,16 +181,28 @@ def get_account() -> dict:
 
     day = state.get("day", {}) or {}
     snap = state.get("broker_snapshot", {}) or {}
+    truth = broker_truth.account_truth(state)
+
     return {
         "cash": state.get("cash_available"),
         "portfolio_value": state.get("capital"),
-        "total_value": snap.get("total_account_value"),
+        # broker-aware: a real number only when truth["snapshot"]["status"] == "fresh"
+        "total_value": truth["safe_total_value"],
+        "broker_free_cash": truth["safe_broker_free_cash"],
         "pnl_today": day.get("realized_pnl"),
         "allocated_capital": state.get("allocated_capital"),
         "realized_pnl_alltime": state.get("realized_pnl_alltime"),
         "peak_capital": state.get("peak_capital"),
         "broker_synced_at": snap.get("synced_at"),
         "as_of": state.get("last_updated"),
+        # --- broker truth / freshness (see api/broker_truth.py) ---------------
+        "broker": truth["broker"],
+        "broker_snapshot": truth["snapshot"],
+        "account_value_status": truth["account_value_status"],
+        "expected_book_value": truth["book_value"]["expected_book_value"],
+        "book_value_reconciled": truth["book_value"]["reconciled"],
+        "book_value_note": truth["book_value"]["reason"],
+        "account_warnings": truth["warnings"],
     }
 
 

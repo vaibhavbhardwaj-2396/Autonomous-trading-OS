@@ -268,8 +268,12 @@ def at(y, m, d, hh=18, mm=30):
 
 # -- account / positions / risk: a populated memory/state.json equivalent --
 
-fake_state_path = TMP / "state.json"
-fake_state_path.write_text(json.dumps({
+# broker_snapshot.synced_at is computed fresh at test time so this fixture
+# exercises the "fresh successful sync" path of api/broker_truth.py (a hard-
+# coded old timestamp would now be classified "stale" and total_value withheld
+# — that behaviour is covered explicitly by F2 below).
+_fresh_sync = (dt.datetime.now(IST) - dt.timedelta(hours=1)).isoformat(timespec="seconds")
+_base_state = {
     "allocated_capital": 20000.0, "capital": 21500.0, "peak_capital": 22000.0,
     "cash_available": 15000.0, "realized_pnl_alltime": 1500.0, "total_costs_alltime": 80.0,
     "consecutive_losing_days": 0, "trading_paused": False, "pause_reason": None,
@@ -284,9 +288,11 @@ fake_state_path.write_text(json.dumps({
     }],
     "overlap_approved_symbols": [],
     "broker_snapshot": {"total_account_value": 500000.0, "free_cash": 15000.0,
-                        "unmanaged_symbols": ["RELIANCE"], "synced_at": "2026-09-09T09:00:00+05:30"},
-    "last_updated": "2026-09-09T09:20:00+05:30",
-}))
+                        "unmanaged_symbols": ["RELIANCE"], "synced_at": _fresh_sync},
+    "last_updated": _fresh_sync,
+}
+fake_state_path = TMP / "state.json"
+fake_state_path.write_text(json.dumps(_base_state))
 
 _orig_state_file = gr.STATE_FILE
 gr.STATE_FILE = fake_state_path
@@ -297,9 +303,40 @@ try:
 finally:
     gr.STATE_FILE = _orig_state_file
 
-check("F: /account (populated) reports the fixture's real numbers",
+check("F: /account (populated, fresh broker sync) reports the fixture's real numbers",
       acct2["cash"] == 15000.0 and acct2["portfolio_value"] == 21500.0
       and acct2["total_value"] == 500000.0 and acct2["pnl_today"] == 500.0, str(acct2))
+check("F: /account (fresh sync) is labelled INDmoney / INDstocks and marked fresh",
+      acct2["broker"]["label"] == "INDmoney / INDstocks"
+      and acct2["account_value_status"] == "fresh"
+      and acct2["book_value_reconciled"] is True, str(acct2))
+
+# F2: a stale broker_snapshot (old synced_at) + a Kite-era `capital` that
+# equals the whole account total must NOT be presented as current INDmoney.
+_stale_state = json.loads(json.dumps(_base_state))
+_stale_state["broker_snapshot"]["synced_at"] = "2026-06-01T09:00:00+05:30"
+_stale_state["last_updated"] = "2026-06-01T09:00:00+05:30"
+_stale_state["capital"] = 500000.0           # Kite-era poisoning: capital == account total
+_stale_state["broker_snapshot"]["total_account_value"] = 500000.0
+_stale_path = TMP / "state_stale.json"
+_stale_path.write_text(json.dumps(_stale_state))
+gr.STATE_FILE = _stale_path
+try:
+    acct_stale = api_data.get_account()
+finally:
+    gr.STATE_FILE = _orig_state_file
+
+check("F2: a stale/Kite-era state -> total_value is None (₹5L is NOT shown as current)",
+      acct_stale["total_value"] is None and acct_stale["broker_free_cash"] is None, str(acct_stale))
+check("F2: a stale/Kite-era state -> account_value_status 'stale', book_value_reconciled False",
+      acct_stale["account_value_status"] == "stale"
+      and acct_stale["book_value_reconciled"] is False, str(acct_stale))
+check("F2: expected_book_value is allocated + realised P&L (₹21,500), not the stale ₹5L capital",
+      acct_stale["expected_book_value"] == 21500.0
+      and acct_stale["portfolio_value"] == 500000.0
+      and len(acct_stale["account_warnings"]) >= 1, str(acct_stale))
+check("F2: allocated_capital is still the mandate (₹20,000), never the account total",
+      acct_stale["allocated_capital"] == 20000.0, str(acct_stale))
 check("F: /positions (populated) returns the one open position with the right fields",
       len(pos2["positions"]) == 1 and pos2["positions"][0]["symbol"] == "INFY"
       and pos2["positions"][0]["side"] == "BUY" and pos2["positions"][0]["quantity"] == 10,

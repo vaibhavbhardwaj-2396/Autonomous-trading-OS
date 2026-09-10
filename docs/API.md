@@ -154,7 +154,7 @@ All protected endpoints require the bearer token above. All are `GET` only.
 | Endpoint | Reads through | Notes |
 |---|---|---|
 | `GET /health` | — (public) | API liveness only, not broker/research health |
-| `GET /account` | `engine.guardrails.load_state()` | cash, portfolio_value, total_value, pnl_today |
+| `GET /account` | `engine.guardrails.load_state()` + `api.broker_truth` | cash, portfolio_value, **broker-aware** total_value, pnl_today; `broker` label, `account_value_status`, `book_value_reconciled` — see `docs/BROKER_TRUTH.md` |
 | `GET /positions` | `engine.guardrails.load_state()` | open positions; no live mark price (see below) |
 | `GET /orders` | `engine.journal.TRADES_JSONL` | ENTRY + REJECTED journal rows, `?limit=` |
 | `GET /trades` | `engine.journal.TRADES_JSONL` | EXIT journal rows, `?limit=` |
@@ -169,6 +169,19 @@ All protected endpoints require the bearer token above. All are `GET` only.
 Every response is deterministic JSON built from already-authoritative state; nothing here
 computes a statistic, a risk figure, or a verdict that doesn't already exist somewhere else
 in the codebase — see each function's docstring in `api/data.py`.
+
+### `/account` broker truth
+
+`/account` is **broker-aware** (`api/broker_truth.py`, full rationale in
+`docs/BROKER_TRUTH.md`). `total_value` / `broker_free_cash` are real numbers only when
+there is a fresh successful `engine.execute.sync_from_broker()` behind them, and `null`
+otherwise (never synced / stale / a pre-migration Kite-era snapshot). The response also
+carries `broker` (`{id, label}` — the active broker, "INDmoney / INDstocks"),
+`account_value_status`, `broker_snapshot` (freshness verdict), `expected_book_value`
+(`allocated_capital + realized_pnl_alltime`), `book_value_reconciled`, and
+`account_warnings`. `allocated_capital` is passed straight through and is never derived
+from the account total. Config: `BROKER`, `DASHBOARD_BROKER_SNAPSHOT_MAX_AGE_HOURS`,
+`DASHBOARD_BROKER_CUTOVER` in `deploy/api.env` (see `deploy/api.env.example`).
 
 ### Known v1 limitations (by design, not oversights)
 
