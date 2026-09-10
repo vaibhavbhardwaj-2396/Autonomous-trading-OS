@@ -132,6 +132,36 @@ check("accountInfoNotes() is [] when there are none / payload lacks the field",
 check("the VPS state's account total is the DYNAMIC ₹63,339.56, not the ₹10k / ₹570k figures",
   fmt.accountTotalDisplay(VPS_ACCT).value === fmt.money(63339.56)
   && fmt.accountTotalDisplay(VPS_ACCT).unavailable === false);
+
+// --- MIGRATED state (dynamic capital model): no allocated_capital, no fixed --
+// capital, and — critically — NO red "book value not reconciled" banner. The
+// API sends account_warnings: [] and account_notes: [] for this state; the
+// frontend must render no error strip and no info strip.
+const MIGRATED_ACCT = {
+  account_value_status: "fresh", capital_model: "managed",
+  total_value: 63339.56, broker_free_cash: 32.31, holdings_market_value: 63307.25,
+  managed_equity: 32.31, managed_free_cash: 32.31, managed_positions_market_value: 0,
+  portfolio_value: 32.31, expected_book_value: 32.31, book_value_reconciled: true,
+  book_value_note: null,
+  allocated_capital: null, allocated_capital_set: false,
+  peak_capital: 32.31, peak_capital_is_legacy: false, peak_capital_note: null,
+  broker: { label: "INDmoney / INDstocks" }, broker_synced_at: "2026-09-11T14:30:00+05:30",
+  unmanaged_holdings: { count: 26, value: 63307.25 },
+  account_warnings: [], account_notes: [],
+};
+check("MIGRATED state: accountIsStale() is false (status is fresh)",
+  fmt.accountIsStale(MIGRATED_ACCT) === false);
+check("MIGRATED state: accountStaleNotice() is EMPTY — no red 'book value not reconciled' banner",
+  fmt.accountStaleNotice(MIGRATED_ACCT) === "");
+check("MIGRATED state: accountInfoNotes() is empty — no calm strip either",
+  fmt.accountInfoNotes(MIGRATED_ACCT).length === 0);
+check("MIGRATED state: account total is the dynamic ₹63,339.56; the managed book "
+  + "(₹32.31) is a separate figure",
+  fmt.accountTotalDisplay(MIGRATED_ACCT).value === fmt.money(63339.56)
+  && fmt.accountTotalDisplay(MIGRATED_ACCT).unavailable === false
+  && MIGRATED_ACCT.managed_equity !== MIGRATED_ACCT.total_value);
+check("MIGRATED state: no legacy peak flag (drawdown card is NOT annotated)",
+  MIGRATED_ACCT.peak_capital_is_legacy === false);
 check("views.js annotates the drawdown card when peak_capital_is_legacy",
   /peak_capital_is_legacy/.test(stripComments(readFileSync(join(HERE, "../js/views.js"), "utf8")))
   && stripComments(readFileSync(join(HERE, "../js/views.js"), "utf8")).includes("Risk / Drawdown ⚠"));

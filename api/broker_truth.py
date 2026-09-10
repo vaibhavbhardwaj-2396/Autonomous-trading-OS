@@ -303,11 +303,70 @@ def reconcile_book_value(state: dict) -> dict:
     closed-but-not-yet-resynced trade legitimately drifts `capital` from
     `allocated + realised P&L` by that trade's P&L. This check is a
     "something is badly wrong" detector, not a to-the-rupee reconciliation.
+
+    DYNAMIC MODEL: a migrated state carries `state["managed"]`. The book
+    value is then the **broker-derived managed equity** —
+    `state["managed"]["portfolio_value"]`, which `engine.execute.
+    sync_from_broker` recomputes from the live broker on every successful
+    sync as
+
+        managed cash (broker free cash)  +  Σ(managed position qty × current LTP)
+
+    and writes via `engine.journal.update_managed_equity` (which also mirrors
+    it, unrounded and unchanged, to the legacy `state["capital"]` field).
+    `portfolio_value` is therefore NOT an independent stored capital figure —
+    it is the latest snapshot of that formula, with a freshness already
+    classified by `classify_snapshot()`. There is no fixed base, no
+    `allocated_capital`, and nothing broker-side left to reconcile: the model
+    is self-consistent by construction, so `reconciled` is always True here.
+    `allocated_capital` / a legacy `capital` figure are NOT read, NOT
+    required, and their absence is never a warning. `DEFAULT_ALLOCATED_CAPITAL`
+    is not consulted on this path.
+
+    The only thing this branch still *observes* is whether the legacy
+    `state["capital"]` mirror has fallen out of step with `portfolio_value`
+    (it should be byte-equal after any sync). A gap means something wrote
+    `capital` outside `update_managed_equity` — surfaced as a calm `note`,
+    never a red `reason`, because the dashboard reads `portfolio_value`
+    (the authority) regardless and the next sync re-aligns the mirror.
     """
+    realized = _as_float(state.get("realized_pnl_alltime")) or 0.0
+    m = state.get("managed") or {}
+    managed_equity = _as_float(m.get("portfolio_value"))
+
+    if managed_equity is not None:
+        # === DYNAMIC BROKER-DERIVED MODEL ================================
+        # The authority is managed_equity (= state["managed"]["portfolio_value"],
+        # the broker-recomputed `managed cash + managed positions market
+        # value`). Self-consistent by construction -> reconciled is True.
+        # `capital` here is only the legacy display mirror; a drift from the
+        # authority is a calm note, not a reconciliation failure.
+        capital = _as_float(state.get("capital"))
+        mirror_ok = (capital is None
+                     or abs(capital - managed_equity) <= max(1.0, 0.01 * abs(managed_equity)))
+        return {
+            "model": "managed",
+            "capital": capital,
+            "managed_equity": managed_equity,
+            "allocated_capital": None,
+            "allocated_capital_effective": managed_equity,   # peak_capital_status baseline
+            "allocated_capital_set": False,
+            "realized_pnl_alltime": realized,
+            "expected_book_value": managed_equity,
+            "reconciled": True,
+            "looks_like_account_total": False,
+            "reason": None,
+            "note": (None if mirror_ok else
+                     f"the legacy `capital` mirror (₹{capital:,.0f}) has drifted from "
+                     f"the authoritative managed equity (₹{managed_equity:,.0f}); the "
+                     f"dashboard uses managed equity and the next broker sync re-aligns "
+                     f"the mirror"),
+        }
+
+    # === LEGACY MODEL (unmigrated state) — unchanged ==========================
     allocated_raw = _as_float(state.get("allocated_capital"))
     allocated_set = allocated_raw is not None
     allocated = allocated_raw if allocated_set else DEFAULT_ALLOCATED_CAPITAL
-    realized = _as_float(state.get("realized_pnl_alltime")) or 0.0
     capital = _as_float(state.get("capital"))
     snap = state.get("broker_snapshot") or {}
     total_account_value = _as_float(snap.get("total_account_value"))
@@ -315,6 +374,7 @@ def reconcile_book_value(state: dict) -> dict:
     expected = round(allocated + realized, 2)
 
     out = {
+        "model": "legacy",
         "capital": capital,
         "allocated_capital": allocated_raw,              # what is actually in state (may be None)
         "allocated_capital_effective": allocated,        # what engine.execute uses
@@ -387,6 +447,19 @@ def peak_capital_status(state: dict, *, allocated_effective: float = DEFAULT_ALL
           "note":                 <str | None>,
         }
     """
+    m = state.get("managed") or {}
+    if m.get("peak_growth") is not None and m.get("portfolio_value") is not None:
+        # === DYNAMIC MODEL — the peak is Σ(cash-flow events) + peak strategy
+        # growth. The migration reset it to the current managed equity and
+        # engine.journal.update_managed_equity keeps it on the growth series;
+        # it is NEVER a legacy ratchet, so `is_legacy` is always False.
+        flow = sum(float(e.get("amount", 0.0)) for e in m.get("cashflow_events") or [])
+        peak = round(flow + float(m["peak_growth"]), 2)
+        pv = float(m["portfolio_value"])
+        dd = round(max(0.0, (peak - pv) / peak) * 100.0, 2) if peak > 0 else 0.0
+        return {"peak_capital": peak, "is_legacy": False,
+                "implied_drawdown_pct": dd, "note": None}
+
     peak = _as_float(state.get("peak_capital"))
     capital = _as_float(state.get("capital"))
     out = {"peak_capital": peak, "is_legacy": False, "implied_drawdown_pct": None, "note": None}
@@ -551,6 +624,15 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
                                 and n_agent_positions == 0)
                             else None)
 
+    # MANAGED EQUITY — the agent-managed book only (managed cash + market value
+    # of managed positions), written by the last sync into state["managed"].
+    # Distinct from account total (whole broker account); unmanaged holdings
+    # are NEVER in here. Gated on a fresh sync, same as broker_free_cash.
+    mgd = state.get("managed") or {}
+    safe_managed_equity = _as_float(mgd.get("portfolio_value")) if fresh else None
+    safe_managed_free_cash = _as_float(mgd.get("free_cash")) if fresh else None
+    safe_managed_positions_value = _as_float(mgd.get("positions_market_value")) if fresh else None
+
     if not fresh:
         account_value_status = snapshot["status"]
     elif not holdings["complete"]:
@@ -587,6 +669,7 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
         "broker": broker,
         "snapshot": snapshot,
         "book_value": book_value,
+        "capital_model": book_value["model"],            # "managed" | "legacy"
         "holdings": holdings,
         "peak_capital": peak,
         "account_value_status": account_value_status,
@@ -594,6 +677,9 @@ def account_truth(state: dict, *, now: Optional[dt.datetime] = None) -> dict:
         "safe_broker_free_cash": safe_free_cash,
         "safe_holdings_market_value": safe_holdings_market_value,
         "safe_unmanaged_value": safe_unmanaged_value,
+        "safe_managed_equity": safe_managed_equity,
+        "safe_managed_free_cash": safe_managed_free_cash,
+        "safe_managed_positions_market_value": safe_managed_positions_value,
         "unmanaged_holdings_count": holdings["unmanaged_holdings_count"],
         "warnings": warnings,
         "notes": notes,

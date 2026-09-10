@@ -588,6 +588,195 @@ _clear_env()
 
 
 # ---------------------------------------------------------------------------
+print("\n--- MIGRATED state (dynamic capital model): no allocated_capital, no "
+      "fixed capital, no false 'book value not reconciled' ---")
+# ---------------------------------------------------------------------------
+#
+# The exact shape of memory/state.json AFTER scripts/migrate_capital_model.py
+# has run on the VPS: a state["managed"] block is the source of truth,
+# `allocated_capital` is GONE, `capital` is only a display mirror of the
+# broker-derived managed equity (= broker free cash, because the agent holds
+# no positions of its own yet). 26 unmanaged holdings worth ~Rs 63k are in
+# the ACCOUNT total but must NEVER be in managed equity.
+#
+# Before this fix, reconcile_book_value() had no managed-model branch: it
+# compared the Rs 32.31 `capital` mirror against DEFAULT_ALLOCATED_CAPITAL
+# (Rs 10,000) + realised P&L and reported "book value not reconciled",
+# which the dashboard rendered as a red error. These checks prove the
+# managed model reconciles on its own terms.
+
+_clear_env()
+_mig_ts = (dt.datetime.now(IST) - dt.timedelta(hours=1)).isoformat(timespec="seconds")
+
+MIGRATED = {
+    "capital": 32.31,                      # legacy display mirror ONLY
+    "cash_available": 32.31,
+    "peak_capital": 32.31,                 # mirror: Sum(cashflow) + peak_growth
+    "realized_pnl_alltime": 0.0,
+    "open_positions": [],
+    "managed": {
+        "model_version": 1,
+        "symbols": [],                     # nothing promoted — a sync never promotes
+        "cashflow_events": [{"ts": _mig_ts, "amount": 32.31, "kind": "inception",
+                             "reason": "capital-model migration — inception baseline",
+                             "by": "migration"}],
+        "peak_growth": 0.0,
+        "growth": 0.0,
+        "portfolio_value": 32.31,          # managed equity = managed cash + managed positions
+        "free_cash": 32.31,
+        "positions_market_value": 0.0,
+        "valued_at": _mig_ts,
+        "migrated_at": _mig_ts,
+        "migration_mode": "live",
+    },
+    "day": {"realized_pnl": 0.0},
+    "broker_snapshot": {
+        "total_account_value": 63339.56, "free_cash": 32.31,
+        "unmanaged_symbols": [f"S{i}" for i in range(26)], "synced_at": _mig_ts,
+    },
+    "last_updated": _mig_ts,
+}
+check("migrated fixture genuinely has NO allocated_capital and NO legacy fixed capital",
+      "allocated_capital" not in MIGRATED, str(sorted(MIGRATED)))
+
+# (1) the migrated state does NOT produce the "book value not reconciled" warning
+rec = broker_truth.reconcile_book_value(MIGRATED)
+check("1. reconcile_book_value picks the 'managed' model for a migrated state",
+      rec["model"] == "managed", str(rec))
+check("1. migrated state reconciles: reconciled True, reason None (NO false warning)",
+      rec["reconciled"] is True and rec["reason"] is None, str(rec))
+check("1. it does NOT fall back to allocated_capital: allocated_capital None, "
+      "allocated_capital_set False",
+      rec["allocated_capital"] is None and rec["allocated_capital_set"] is False, str(rec))
+
+# (4/5) the managed branch NEVER reads allocated_capital and NEVER uses
+# DEFAULT_ALLOCATED_CAPITAL — a bogus allocated_capital left on a migrated
+# state is completely ignored, and managed equity that happens to equal
+# neither the default nor a round number still reconciles cleanly.
+_poisoned = json.loads(json.dumps(MIGRATED))
+_poisoned["allocated_capital"] = 999999.0            # stray legacy key — must be ignored
+for k in ("portfolio_value", "free_cash"):
+    _poisoned["managed"][k] = 41827.63
+_poisoned["capital"] = 41827.63
+_poisoned["managed"]["cashflow_events"] = [{"ts": _mig_ts, "amount": 41827.63,
+                                            "kind": "inception", "by": "migration"}]
+_rp = broker_truth.reconcile_book_value(_poisoned)
+check("4. managed branch ignores a stray allocated_capital key entirely "
+      "(allocated_capital None, effective == managed equity)",
+      _rp["allocated_capital"] is None
+      and _rp["allocated_capital_effective"] == 41827.63, str(_rp))
+check("5. managed branch never uses DEFAULT_ALLOCATED_CAPITAL: expected_book_value "
+      "is the odd managed-equity figure Rs 41,827.63, reconciled True",
+      _rp["expected_book_value"] == 41827.63 and _rp["reconciled"] is True
+      and _rp["model"] == "managed", str(_rp))
+
+# (3) managed-equity values pass reconciliation, on their own terms
+check("3. expected_book_value is the broker-derived managed equity (Rs 32.31), "
+      "not Rs 10,000 and not the Rs 63k account total",
+      rec["expected_book_value"] == 32.31 and rec["managed_equity"] == 32.31, str(rec))
+# managed equity is the sole authority — reconcile_book_value never compares
+# two stored values and calls the result a reconciliation. A `capital`-mirror
+# drift is a CALM NOTE, never a red 'not reconciled' warning.
+DRIFTED = json.loads(json.dumps(MIGRATED))
+DRIFTED["capital"] = 40000.0
+_rd = broker_truth.reconcile_book_value(DRIFTED)
+check("3. managed model is self-consistent by construction -> reconciled True, reason None, "
+      "even when the legacy `capital` mirror has drifted",
+      _rd["reconciled"] is True and _rd["reason"] is None, str(_rd))
+check("3. a large `capital`-mirror drift is surfaced as a calm note (not silent, not red)",
+      _rd["note"] is not None and "authoritative managed equity" in _rd["note"], str(_rd))
+_td = broker_truth.account_truth(DRIFTED, now=dt.datetime.now(IST))
+check("3. that drift note lands in notes[], NEVER in warnings[]",
+      _td["warnings"] == [] and any("mirror" in n for n in _td["notes"]), str(_td))
+
+pk = broker_truth.peak_capital_status(MIGRATED)
+check("3. peak is on the growth series (Sum cashflow + peak_growth), never a legacy "
+      "ratchet -> is_legacy False, implied drawdown 0%",
+      pk["is_legacy"] is False and pk["implied_drawdown_pct"] == 0.0 and pk["note"] is None,
+      str(pk))
+
+# (2) broker-derived account totals pass reconciliation / are surfaced
+truth = broker_truth.account_truth(MIGRATED, now=dt.datetime.now(IST))
+check("2. account_truth on a migrated state emits NO warning at all",
+      truth["warnings"] == [], str(truth["warnings"]))
+check("2. specifically: no 'book value not reconciled' / 'cannot verify book value' text",
+      not any("reconcil" in w.lower() or "verify book value" in w.lower()
+              for w in truth["warnings"]), str(truth["warnings"]))
+check("2. account_value_status 'fresh'; broker account total surfaced (Rs 63,339.56)",
+      truth["account_value_status"] == "fresh"
+      and truth["safe_total_value"] == 63339.56
+      and truth["safe_broker_free_cash"] == 32.31, str(truth))
+check("2. capital_model is reported as 'managed'",
+      truth["capital_model"] == "managed", str(truth))
+
+# (4) unmanaged holdings do not create a false managed-book mismatch
+check("4. 26 unmanaged holdings do NOT break managed-book reconciliation",
+      truth["book_value"]["reconciled"] is True
+      and truth["unmanaged_holdings_count"] == 26, str(truth))
+check("4. managed equity is the managed book only (Rs 32.31) and is NOT the "
+      "Rs 63k account total",
+      truth["safe_managed_equity"] == 32.31
+      and truth["safe_managed_positions_market_value"] == 0.0
+      and truth["safe_managed_equity"] != truth["safe_total_value"], str(truth))
+
+# (5) the dashboard READ path (api/data.py.get_account) needs no legacy field
+acct = _account_with_state(MIGRATED)
+check("5. get_account() succeeds with NO allocated_capital / NO legacy capital authority",
+      acct["book_value_reconciled"] is True
+      and acct["account_warnings"] == []
+      and acct["account_notes"] == [], str(acct))
+check("5. get_account(): portfolio_value is the managed equity (Rs 32.31); "
+      "allocated_capital passes straight through as None",
+      acct["portfolio_value"] == 32.31 and acct["allocated_capital"] is None, str(acct))
+check("5. get_account() exposes the dynamic managed book: managed_equity / "
+      "managed_free_cash / managed_positions_market_value",
+      acct["managed_equity"] == 32.31 and acct["managed_free_cash"] == 32.31
+      and acct["managed_positions_market_value"] == 0.0, str(acct))
+check("5. get_account(): capital_model 'managed', book_value_note None (no problem, "
+      "no calm note needed)",
+      acct["capital_model"] == "managed" and acct["book_value_note"] is None, str(acct))
+check("5. get_account(): total_value (Rs 63,339.56) and managed_equity (Rs 32.31) "
+      "are distinct fields",
+      acct["total_value"] == 63339.56 and acct["managed_equity"] == 32.31, str(acct))
+
+# a recorded deposit: managed equity rises, still reconciles, still no drawdown
+DEPOSITED = json.loads(json.dumps(MIGRATED))
+DEPOSITED["managed"]["cashflow_events"].append(
+    {"ts": _mig_ts, "amount": 50000.0, "kind": "deposit", "reason": "top-up", "by": "vaibhav"})
+for k in ("free_cash", "portfolio_value"):
+    DEPOSITED["managed"][k] = 50032.31
+DEPOSITED["capital"] = DEPOSITED["peak_capital"] = 50032.31
+DEPOSITED["broker_snapshot"]["free_cash"] = 50032.31
+DEPOSITED["broker_snapshot"]["total_account_value"] = 113339.56
+t_dep = broker_truth.account_truth(DEPOSITED, now=dt.datetime.now(IST))
+check("deposit: managed equity rises to Rs 50,032.31, still reconciled, still no "
+      "warning, drawdown still 0%",
+      t_dep["book_value"]["reconciled"] is True and t_dep["warnings"] == []
+      and t_dep["peak_capital"]["implied_drawdown_pct"] == 0.0, str(t_dep))
+
+# (6) the fix introduced no hard-coded current-account amount
+_bt_code_now = _code_only((ROOT / "api" / "broker_truth.py").read_text())
+_data_code_now = _code_only((ROOT / "api" / "data.py").read_text())
+check("6. no observed rupee amount was baked into api/broker_truth.py or api/data.py "
+      "(no 63339 / 63307 / 63032 / 570447 / 5.7L literal)",
+      not any(tok in _bt_code_now or tok in _data_code_now
+              for tok in ("63339", "63307", "63032", "570447", "570000", "63000")),
+      "the dashboard fix must read dynamic broker fields, never a constant")
+# the dashboard fix added NO new numeric literal to api/broker_truth.py — the
+# multi-digit constants present are all pre-existing (the cited Rs 10,000
+# engine.execute default, the 3600s/hour divisor, the Rs 5,000 legacy-bug
+# margin). Compare against the committed baseline.
+import subprocess as _sp  # noqa: E402
+_committed_bt = _sp.run(["git", "-C", str(ROOT), "show", "HEAD:api/broker_truth.py"],
+                        capture_output=True, text=True).stdout
+_lit = lambda s: set(re.findall(r"\b\d[\d_]{2,}(?:\.\d+)?\b", _code_only(s)))
+check("6. api/broker_truth.py gains NO new numeric literal vs the committed version",
+      _lit(_bt_code_now) <= _lit(_committed_bt) | {"10_000.0"},
+      f"new literals: {sorted(_lit(_bt_code_now) - _lit(_committed_bt))}")
+_clear_env()
+
+
+# ---------------------------------------------------------------------------
 print("\n--- 6/7. isolation: no new import path into live execution ---")
 # ---------------------------------------------------------------------------
 

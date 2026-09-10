@@ -4,6 +4,8 @@
 __pycache__/
 *.pyc
 node_modules/
+venv/
+.venv/
 .DS_Store
 memory/.hmm_model.pkl
 memory/.kite_session.json

@@ -164,31 +164,32 @@ def get_account() -> dict:
     the fix for the dashboard having shown stale ~₹5.7L Kite-era figures as
     current INDmoney truth.
 
-    `portfolio_value` is the agent's own mandate only, matching CLAUDE.md's
-    "book value = allocation + own realised P&L" distinction. It is
-    accompanied by `expected_book_value` (allocated_capital + realised P&L)
-    and `book_value_reconciled` so the dashboard can flag a `capital` figure
-    that has drifted from — or been poisoned with — an account-total value.
-
-    `allocated_capital` is passed through untouched: it is the agent's
-    mandate, set by Vaibhav, and is deliberately independent of the
-    brokerage account total. Nothing here ever rewrites it.
+    `portfolio_value` is the agent's own managed book only, matching
+    CLAUDE.md's "book value = your own capital, never the account balance"
+    distinction. Under the **dynamic capital model** (docs/CAPITAL_MODEL.md
+    §3, `state["managed"]`) it is the broker-derived **managed equity**
+    (managed cash + market value of managed positions), recomputed every
+    sync — there is no fixed `allocated_capital` and no stored rupee base.
+    `managed_equity` / `managed_free_cash` / `managed_positions_market_value`
+    expose the same figure and its parts (each `null` unless a fresh sync
+    backs it). `expected_book_value` and `book_value_reconciled` still
+    accompany it: in the managed model the book value is self-consistent by
+    construction, so `book_value_reconciled` is true whenever `state["managed"]`
+    is present — the **absence** of the legacy `allocated_capital` / `capital`
+    fields is NOT a reconciliation failure. `capital_model` says which model
+    is in force (`"managed"` post-migration, `"legacy"` for an unmigrated
+    state / a test fixture with no `managed` block).
 
     The user-facing account model is the **dynamic broker account**:
     `total_value`, `broker_free_cash`, `holdings_market_value`,
     `unmanaged_holdings`, `pnl_today` — all broker-derived, all `null` unless
     a fresh successful sync backs them.
 
-    `allocated_capital` is NOT the user's portfolio capital. It is the fixed
-    scaffold cap on how much the autonomous agent may deploy — a genuine
-    execution-safety boundary today (`engine.execute.sync_from_broker` sets
-    `spendable = min(allocated_capital + realised P&L - deployed,
-    broker_free_cash)`; `engine.guardrails` sizes every trade off the
-    resulting `capital`). It is kept in this payload for that reason and for
-    the stale-state reconciliation check, but the dashboard presents it as
-    "autonomous mandate", clearly distinct from the account — never as the
-    account's value. See docs/CAPITAL_MODEL.md for the planned dynamic model.
-    Nothing here ever rewrites `allocated_capital`.
+    `allocated_capital` is a **legacy** field: the migration removes it from
+    `state.json` and nothing here re-derives it. It is passed straight
+    through (`null` once migrated) purely so an unmigrated state still renders
+    its old "autonomous mandate" note; it is never the account's value and is
+    never rewritten here. See docs/CAPITAL_MODEL.md.
     """
     try:
         state = gr.load_state()
@@ -198,18 +199,32 @@ def get_account() -> dict:
     day = state.get("day", {}) or {}
     snap = state.get("broker_snapshot", {}) or {}
     truth = broker_truth.account_truth(state)
+    bv = truth["book_value"]
+
+    # Under the dynamic model the agent's book value is the broker-derived
+    # managed equity, not state["capital"] (a legacy display mirror that may
+    # lag a sync or be absent entirely). Fall back to `capital` only for an
+    # unmigrated legacy state.
+    portfolio_value = (bv["managed_equity"] if truth["capital_model"] == "managed"
+                       else state.get("capital"))
 
     return {
         "cash": state.get("cash_available"),
         "agent_spendable_cash": state.get("cash_available"),
-        "portfolio_value": state.get("capital"),
+        "portfolio_value": portfolio_value,
+        "capital_model": truth["capital_model"],           # "managed" | "legacy"
         # --- dynamic broker account (the user-facing model) ------------------
         # each is a number only when the sync is fresh AND holdings were valued
         "total_value": truth["safe_total_value"],
         "broker_free_cash": truth["safe_broker_free_cash"],
         "holdings_market_value": truth["safe_holdings_market_value"],
         "pnl_today": day.get("realized_pnl"),
-        # --- autonomous mandate (a scaffold cap, NOT the account value) ------
+        # --- managed book (dynamic model — managed cash + managed positions) -
+        # each is a number only when the sync is fresh
+        "managed_equity": truth["safe_managed_equity"],
+        "managed_free_cash": truth["safe_managed_free_cash"],
+        "managed_positions_market_value": truth["safe_managed_positions_market_value"],
+        # --- autonomous mandate (LEGACY scaffold cap — null once migrated) ---
         "allocated_capital": state.get("allocated_capital"),
         "allocated_capital_set": truth["book_value"]["allocated_capital_set"],
         "realized_pnl_alltime": state.get("realized_pnl_alltime"),

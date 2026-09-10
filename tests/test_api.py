@@ -413,6 +413,56 @@ check("F4: the dynamic broker account is truthful (63339.56 / 32.31 / 63307.25)"
 check("F4: no account-total -> agent-capital conversion (portfolio_value stays ₹10k)",
       acct_v["portfolio_value"] == 10000.0 and acct_v["expected_book_value"] == 10000.0, str(acct_v))
 
+# F5: the state AFTER scripts/migrate_capital_model.py has run — a state["managed"]
+# block is the source of truth, allocated_capital is GONE, `capital` is only a
+# mirror of the broker-derived managed equity. The dashboard must NOT show a red
+# "book value not reconciled" error just because the legacy fixed-capital fields
+# are absent (this was the reported bug).
+_mig = json.loads(json.dumps(_base_state))
+_mig.pop("allocated_capital", None)
+_mig["capital"] = _mig["cash_available"] = _mig["peak_capital"] = 32.31
+_mig["realized_pnl_alltime"] = 0.0
+_mig["open_positions"] = []
+_mig["managed"] = {
+    "model_version": 1, "symbols": [],
+    "cashflow_events": [{"ts": _fresh_sync, "amount": 32.31, "kind": "inception",
+                         "reason": "capital-model migration", "by": "migration"}],
+    "peak_growth": 0.0, "growth": 0.0,
+    "portfolio_value": 32.31, "free_cash": 32.31, "positions_market_value": 0.0,
+    "valued_at": _fresh_sync, "migrated_at": _fresh_sync, "migration_mode": "live",
+}
+_mig["broker_snapshot"] = dict(_base_state["broker_snapshot"],
+                               total_account_value=63339.56, free_cash=32.31,
+                               unmanaged_symbols=[f"S{i}" for i in range(26)])
+_mig_path = TMP / "state_migrated.json"
+_mig_path.write_text(json.dumps(_mig))
+gr.STATE_FILE = _mig_path
+try:
+    acct_m = api_data.get_account()
+finally:
+    gr.STATE_FILE = _orig_state_file
+
+check("F5: migrated state (managed block, no allocated_capital) -> NO 'book value "
+      "not reconciled' warning, nothing in account_warnings",
+      acct_m["account_warnings"] == [] and acct_m["book_value_reconciled"] is True
+      and acct_m["account_notes"] == [], str(acct_m))
+check("F5: migrated state -> capital_model 'managed', portfolio_value is the managed "
+      "equity (₹32.31), allocated_capital passes through as None",
+      acct_m["capital_model"] == "managed" and acct_m["portfolio_value"] == 32.31
+      and acct_m["allocated_capital"] is None, str(acct_m))
+check("F5: migrated state exposes the dynamic managed book (managed_equity / "
+      "managed_free_cash / managed_positions_market_value)",
+      acct_m["managed_equity"] == 32.31 and acct_m["managed_free_cash"] == 32.31
+      and acct_m["managed_positions_market_value"] == 0.0, str(acct_m))
+check("F5: managed equity (₹32.31) and the broker account total (₹63,339.56) are "
+      "distinct — 26 unmanaged holdings are NOT in the managed book",
+      acct_m["managed_equity"] != acct_m["total_value"]
+      and acct_m["total_value"] == 63339.56
+      and acct_m["unmanaged_holdings"]["count"] == 26, str(acct_m))
+check("F5: expected_book_value is the broker-derived managed equity, not a fixed "
+      "₹10,000 / ₹20,000",
+      acct_m["expected_book_value"] == 32.31, str(acct_m))
+
 check("F: /positions (populated) returns the one open position with the right fields",
       len(pos2["positions"]) == 1 and pos2["positions"][0]["symbol"] == "INFY"
       and pos2["positions"][0]["side"] == "BUY" and pos2["positions"][0]["quantity"] == 10,
