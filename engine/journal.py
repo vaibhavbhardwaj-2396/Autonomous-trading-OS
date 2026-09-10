@@ -187,7 +187,13 @@ def roll_day_if_needed(state: Optional[dict] = None) -> dict:
             elif prev_pnl > 0:
                 state["consecutive_losing_days"] = 0
 
-        _managed_equity = (state.get("managed") or {}).get("portfolio_value")
+        # Snapshot the CURRENT managed equity (dynamic, broker-derived) as the
+        # day/week loss-cap baseline. `None` for an unmigrated legacy state —
+        # guardrails._period_start_equity then uses the legacy `starting_capital`
+        # path. `starting_capital` is kept as the legacy display mirror; for a
+        # migrated state state["capital"] already equals portfolio_value.
+        _mgd = state.get("managed") or {}
+        _managed_equity = _mgd.get("portfolio_value") if _mgd else None
         state["day"] = {
             "date": today,
             "starting_capital": state["capital"],
@@ -235,7 +241,12 @@ def update_capital(capital: float, cash_available: float, state: Optional[dict] 
 # immune to the user adding or removing money. See docs/CAPITAL_MODEL.md.
 # ---------------------------------------------------------------------------
 
-MANAGED_MODEL_VERSION = 1
+# 1 = managed block present (dynamic broker-derived equity).
+# 2 = + daily/weekly loss-cap baselines re-based onto managed equity (the
+#     legacy `starting_capital` fixed scaffold is no longer authoritative for
+#     a migrated state). scripts/migrate_capital_model.py runs an idempotent
+#     corrective pass to take a v1 state to v2.
+MANAGED_MODEL_VERSION = 2
 
 
 def _cashflow_total(managed: dict) -> float:
@@ -364,7 +375,15 @@ def render_portfolio_md(state: Optional[dict] = None) -> None:
     dd = drawdown_pct(state) * 100
     level = drawdown_level(state)
     day = state.get("day", {})
-    day_start = day.get("starting_managed_equity") or day.get("starting_capital") or cap
+    # Display baseline, managed-model-aware and consistent with
+    # guardrails._period_start_equity: a migrated state never falls back to the
+    # legacy `starting_capital` (explicit `is not None`, so 0.0 is honoured).
+    if day.get("starting_managed_equity") is not None:
+        day_start = day["starting_managed_equity"]
+    elif managed:
+        day_start = cap
+    else:
+        day_start = day.get("starting_capital") or cap
 
     emoji = {"NORMAL": "🟢", "AMBER": "🟡", "ORANGE": "🟠", "RED": "🔴"}[level]
 

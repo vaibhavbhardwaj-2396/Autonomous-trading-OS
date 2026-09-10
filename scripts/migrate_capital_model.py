@@ -1,29 +1,41 @@
 """
-scripts/migrate_capital_model.py — one-time migration to the dynamic
-broker-derived capital model (docs/CAPITAL_MODEL.md).
+scripts/migrate_capital_model.py — migration to the dynamic broker-derived
+capital model (docs/CAPITAL_MODEL.md).
 
     venv/bin/python scripts/migrate_capital_model.py --simulate   # dry run — writes NOTHING
     venv/bin/python scripts/migrate_capital_model.py --offline    # migrate from the last broker_snapshot
     venv/bin/python scripts/migrate_capital_model.py              # live broker READ + migrate
     venv/bin/python scripts/migrate_capital_model.py --revert <backup.bak>
 
-Safe by construction:
-  * places NO orders — only broker READ calls (funds / holdings / positions / quotes)
-  * idempotent   — exits 0, unchanged, if state already has managed.model_version == 1
-  * reversible   — backs state.json up to memory/state.json.pre-capital-model.<ts>.bak
-  * auditable    — appends a full before/after record to memory/capital_model_migration.jsonl
-  * promotes NO holdings — managed.symbols starts empty; existing holdings stay unmanaged
+Two paths, chosen automatically by the state's managed.model_version:
 
-What it does:
+  * NO `managed` block  -> FULL migration (needs a broker read, or --offline):
+    builds state["managed"] from live broker data, drops allocated_capital,
+    neutralises the legacy Kite-era peak_capital.
+
+  * `managed` block at model_version < CURRENT  -> CORRECTIVE pass (no broker
+    read): re-bases the daily/weekly loss-cap baselines
+    (day/week.starting_managed_equity) onto the current managed equity so the
+    legacy fixed `starting_capital` (₹10k scaffold) can no longer gate a
+    migrated state's risk path. No P&L, no orders, no promotion.
+
+Safe by construction:
+  * places NO orders — the full path only READs the broker; the corrective
+    path does not touch the broker at all
+  * idempotent   — exits 0, unchanged, once managed.model_version == the current
+    MANAGED_MODEL_VERSION; the corrective pass is safe to run repeatedly
+  * reversible   — backs state.json up to memory/state.json.pre-*.<ts>.bak
+  * auditable    — appends a full before/after record to memory/capital_model_migration.jsonl
+  * promotes NO holdings — managed.symbols is untouched; existing holdings stay unmanaged
+
+FULL migration:
   1. compute CURRENT ACCOUNT VALUE  = broker free cash + Σ(broker holding/position qty × LTP)
   2. compute CURRENT MANAGED EQUITY = broker free cash + Σ(agent open-position qty × LTP)
-     (no promoted holdings yet, so this is just the free cash unless the agent already holds
-      positions of its own)
   3. write state["managed"] with peak_growth = 0 and one "inception" cash-flow event equal to
      that managed equity  →  growth = 0  →  drawdown = 0 at cutover
   4. set state["capital"] / state["peak_capital"] / state["cash_available"] to the new
-     managed baseline and DROP state["allocated_capital"] — the legacy Kite-era
-     peak_capital survives only inside the audit record, never as a risk input
+     managed baseline, DROP state["allocated_capital"], and re-base the day/week
+     loss-cap baselines (rebase_period_baselines)
 """
 
 from __future__ import annotations
@@ -48,6 +60,105 @@ AUDIT_LOG = PROJECT_ROOT / "memory" / "capital_model_migration.jsonl"
 # ---------------------------------------------------------------------------
 # Pure core — no I/O, unit-testable
 # ---------------------------------------------------------------------------
+
+def rebase_period_baselines(state: dict, *, managed_equity: float, now: str) -> dict:
+    """Re-base the daily / weekly loss-cap baselines onto managed equity. Pure.
+
+    For each of `state["day"]` and `state["week"]` that exists as a dict:
+      * if `starting_managed_equity` is missing (the period predates the
+        dynamic model), set it to the CURRENT managed equity;
+      * mirror `starting_capital` to that value either way, so the legacy
+        pre-migration fixed scaffold amount cannot survive in a migrated
+        state (guardrails._period_start_equity never reads `starting_capital`
+        for a migrated state, but leaving a stale ₹10k there is misleading).
+
+    A period that already carries a real post-migration `starting_managed_equity`
+    snapshot keeps it. Returns {period_key: {"from": {...}, "to": {...}}} for
+    the audit record; empty when nothing changed.
+    """
+    me = round(float(managed_equity), 2)
+    changes: dict = {}
+    for key in ("day", "week"):
+        period = state.get(key)
+        if not isinstance(period, dict):
+            continue
+        before = {"starting_managed_equity": period.get("starting_managed_equity"),
+                  "starting_capital": period.get("starting_capital")}
+        if period.get("starting_managed_equity") is None:
+            period["starting_managed_equity"] = me
+        period["starting_capital"] = period["starting_managed_equity"]
+        after = {"starting_managed_equity": period["starting_managed_equity"],
+                 "starting_capital": period["starting_capital"]}
+        if after != before:
+            changes[key] = {"from": before, "to": after}
+    return changes
+
+
+def build_corrective(state: dict, *, managed_equity: float, now: str) -> tuple:
+    """Return (new_state, audit) for the idempotent corrective pass that takes
+    an already-migrated state (a `managed` block at model_version < current)
+    up to the current MANAGED_MODEL_VERSION by re-basing the daily/weekly
+    loss-cap baselines onto managed equity. Pure — NO broker read, NO P&L, NO
+    orders, NO promotion. Safe to run repeatedly (main() short-circuits once
+    the state carries the current model version).
+    """
+    new_state = json.loads(json.dumps(state))          # deep copy
+    m = new_state.setdefault("managed", {})
+    from_v = m.get("model_version")
+    me = round(float(managed_equity), 2)
+
+    before = {
+        "model_version": from_v,
+        "day": dict(new_state.get("day") or {}),
+        "week": dict(new_state.get("week") or {}),
+    }
+
+    changes = rebase_period_baselines(new_state, managed_equity=me, now=now)
+
+    m["model_version"] = MANAGED_MODEL_VERSION
+    m["period_baselines_rebased_at"] = now
+    # Drawdown is on the growth model (cash-flow-adjusted) — re-basing a
+    # period baseline does not touch it; recompute only to keep the mirror
+    # field in step.
+    new_state["drawdown_level"] = gr.drawdown_level(new_state)
+
+    notes: list[str] = []
+    if changes:
+        notes.append("legacy `starting_capital` (the pre-migration fixed ₹ scaffold) is no "
+                     "longer authoritative for a migrated state — guardrails."
+                     "_period_start_equity reads `starting_managed_equity`")
+    else:
+        notes.append("no baseline change needed — day/week already carried a managed-equity "
+                     "snapshot; only model_version was advanced")
+    rp = state.get("realized_pnl_alltime") or 0.0
+    dp = (state.get("day") or {}).get("realized_pnl") or 0.0
+    if rp or dp:
+        notes.append(f"realized_pnl_alltime={rp}, day.realized_pnl={dp} at correction — a "
+                     f"re-based period with a missing snapshot treats managed P&L before "
+                     f"that (invalid) baseline as starting fresh; the daily cap still uses "
+                     f"day.realized_pnl directly")
+
+    audit = {
+        "ts": now,
+        "action": "capital_model_corrective_migration",
+        "model_version": MANAGED_MODEL_VERSION,
+        "from_model_version": from_v,
+        "reason": ("re-base daily/weekly loss-cap baselines onto the dynamic managed equity; "
+                   "the legacy fixed starting_capital must not gate a migrated state's risk path"),
+        "managed_equity_at_correction": me,
+        "managed_equity_valued_at": m.get("valued_at"),
+        "before": before,
+        "changes": changes,
+        "after": {
+            "model_version": MANAGED_MODEL_VERSION,
+            "day": dict(new_state.get("day") or {}),
+            "week": dict(new_state.get("week") or {}),
+            "period_baselines_rebased_at": now,
+        },
+        "notes": notes,
+    }
+    return new_state, audit
+
 
 def build_migration(state: dict, *, broker_free_cash: float,
                     priced_by_symbol: dict, account_total_value: float,
@@ -113,6 +224,11 @@ def build_migration(state: dict, *, broker_free_cash: float,
     new_state.pop("allocated_capital", None)            # must not influence anything
     new_state["drawdown_level"] = gr.drawdown_level(new_state)   # NORMAL — growth is 0
 
+    # Re-base any existing day/week loss-cap baselines onto the new managed
+    # equity (a full migration produces a fully current-version state).
+    period_changes = rebase_period_baselines(new_state, managed_equity=managed_equity, now=now)
+    new_state["managed"]["period_baselines_rebased_at"] = now
+
     audit = {
         "ts": now,
         "action": "capital_model_migration",
@@ -134,6 +250,7 @@ def build_migration(state: dict, *, broker_free_cash: float,
             "cash_available": new_state["cash_available"],
             "allocated_capital_removed": True,
             "legacy_peak_capital_retained_only_here": before["peak_capital"],
+            "period_baseline_changes": period_changes,
         },
         "notes": notes,
     }
@@ -180,6 +297,15 @@ def _load_state() -> dict:
     if not STATE_FILE.exists():
         raise SystemExit(f"no state file at {STATE_FILE}")
     return json.loads(STATE_FILE.read_text())
+
+
+def _rel(p: Path) -> str:
+    """Project-relative path for display / audit, or the bare path if it is
+    not under the project root (e.g. a test pointing STATE_FILE at a tmpdir)."""
+    try:
+        return str(p.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(p)
 
 
 def _print_report(before_state, new_state, audit, *, wrote: bool):
@@ -231,6 +357,46 @@ def _print_report(before_state, new_state, audit, *, wrote: bool):
     print()
 
 
+def _print_corrective_report(before_state, new_state, audit, *, wrote: bool):
+    m = new_state["managed"]
+    print("=" * 68)
+    print(f"  CAPITAL-MODEL BASELINE CORRECTION  (v{audit['from_model_version']} -> "
+          f"v{audit['model_version']})"
+          + ("   (SIMULATION — nothing written)" if not wrote else ""))
+    print("=" * 68)
+    print(f"\n   managed equity (broker-derived, last valued {audit['managed_equity_valued_at']})"
+          f" : {audit['managed_equity_at_correction']}")
+    print("\n-- daily / weekly loss-cap baselines --")
+    for key in ("day", "week"):
+        ch = audit["changes"].get(key)
+        if ch is None:
+            cur = (new_state.get(key) or {}).get("starting_managed_equity")
+            print(f"   {key:4s} : unchanged  (starting_managed_equity = {cur})")
+        else:
+            f_, t_ = ch["from"], ch["to"]
+            print(f"   {key:4s} : starting_managed_equity  {f_['starting_managed_equity']} -> "
+                  f"{t_['starting_managed_equity']}")
+            print(f"          starting_capital         {f_['starting_capital']} -> "
+                  f"{t_['starting_capital']}   (legacy fixed ₹ scaffold removed)")
+    print("\n-- unchanged --")
+    print(f"   managed.portfolio_value : {m['portfolio_value']}")
+    print(f"   managed.growth          : {m['growth']}")
+    print(f"   managed.peak_growth     : {m['peak_growth']}")
+    print(f"   peak_capital (mirror)   : {new_state.get('peak_capital')}   (inert — growth model)")
+    print(f"   day.realized_pnl        : {(new_state.get('day') or {}).get('realized_pnl')}")
+    b_sum, a_sum = gr.status_summary(before_state), gr.status_summary(new_state)
+    print("\n-- guardrails.status_summary(): before -> after --")
+    for k in ("drawdown_level", "daily_loss_headroom", "weekly_loss_headroom"):
+        print(f"   {k:22s} : {b_sum[k]}  ->  {a_sum[k]}")
+    print(f"   {'blocking_reasons':22s} : {b_sum['blocking_reasons'] or 'none'}  ->  "
+          f"{a_sum['blocking_reasons'] or 'none'}")
+    if audit["notes"]:
+        print("\n-- notes --")
+        for n in audit["notes"]:
+            print(f"   * {n}")
+    print()
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--simulate", action="store_true", help="compute and print, write nothing")
@@ -248,12 +414,42 @@ def main(argv=None) -> int:
         return 0
 
     state = _load_state()
-    if (state.get("managed") or {}).get("model_version") == MANAGED_MODEL_VERSION:
-        print("already migrated (managed.model_version == "
-              f"{MANAGED_MODEL_VERSION}) — nothing to do.")
+    now = now_ist().isoformat(timespec="seconds")
+    mv = (state.get("managed") or {}).get("model_version")
+
+    if mv == MANAGED_MODEL_VERSION:
+        print(f"already at capital-model v{MANAGED_MODEL_VERSION} — nothing to do.")
         return 0
 
-    now = now_ist().isoformat(timespec="seconds")
+    # --- CORRECTIVE PATH: an already-migrated state at an older model version.
+    #     Re-base day/week loss-cap baselines. No broker read, no P&L. ---
+    if mv is not None:
+        me = (state.get("managed") or {}).get("portfolio_value")
+        if me is None:
+            print("managed block present but portfolio_value is missing — run a real broker "
+                  "sync first so managed equity is known, then re-run.", file=sys.stderr)
+            return 1
+        new_state, audit = build_corrective(state, managed_equity=float(me), now=now)
+        _print_corrective_report(state, new_state, audit, wrote=not args.simulate)
+        if args.simulate:
+            print("SIMULATION — no files changed.")
+            return 0
+        ts_tag = now_ist().strftime("%Y%m%dT%H%M%S")
+        backup = STATE_FILE.with_suffix(f".json.pre-baseline-correction.{ts_tag}.bak")
+        shutil.copy2(STATE_FILE, backup)
+        audit["after"]["backup"] = _rel(backup)
+        tmp = STATE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(new_state, indent=2))
+        tmp.replace(STATE_FILE)
+        with AUDIT_LOG.open("a") as f:
+            f.write(json.dumps(audit, default=str) + "\n")
+        print(f"corrected. backup: {backup.name}")
+        print(f"audit record appended to: {_rel(AUDIT_LOG)}")
+        print("revert with:  venv/bin/python scripts/migrate_capital_model.py --revert "
+              f"{_rel(backup)}")
+        return 0
+
+    # --- FULL MIGRATION PATH: no managed block yet. ---
     if args.offline:
         broker_name, free_cash, priced, total = _offline_read(state)
         priced_is_market = False
@@ -281,7 +477,7 @@ def main(argv=None) -> int:
     ts_tag = now_ist().strftime("%Y%m%dT%H%M%S")
     backup = STATE_FILE.with_suffix(f".json.pre-capital-model.{ts_tag}.bak")
     shutil.copy2(STATE_FILE, backup)
-    audit["after"]["backup"] = str(backup.relative_to(PROJECT_ROOT))
+    audit["after"]["backup"] = _rel(backup)
 
     tmp = STATE_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(new_state, indent=2))
@@ -291,9 +487,9 @@ def main(argv=None) -> int:
         f.write(json.dumps(audit, default=str) + "\n")
 
     print(f"migrated. backup: {backup.name}")
-    print(f"audit record appended to: {AUDIT_LOG.relative_to(PROJECT_ROOT)}")
+    print(f"audit record appended to: {_rel(AUDIT_LOG)}")
     print("revert with:  venv/bin/python scripts/migrate_capital_model.py --revert "
-          f"{backup.relative_to(PROJECT_ROOT)}")
+          f"{_rel(backup)}")
     return 0
 
 

@@ -157,6 +157,54 @@ def _ladder_peak(state: dict) -> float:
     return float(state.get("peak_capital") or 0.0)
 
 
+def _period_start_equity(state: dict, period: dict) -> float:
+    """The equity baseline a daily / weekly loss cap is measured against.
+
+    MIGRATED state (a `state["managed"]` block exists): the authority is the
+    period's `starting_managed_equity` snapshot — the managed equity captured
+    at the last day/week rollover. If that snapshot is absent, the period was
+    opened before the dynamic model and has not rolled over since; fall back
+    to the CURRENT managed equity, NEVER to `starting_capital` (which still
+    holds the pre-migration fixed ₹ scaffold). scripts/migrate_capital_model.py
+    backfills the snapshot, so that fallback is transitional only.
+
+    LEGACY state (no `managed` block — every tests/test_guardrails.py fixture):
+    `starting_capital` then `capital`, byte-for-byte the pre-dynamic-model
+    behaviour.
+
+    Explicit `is not None` throughout: 0.0 is a valid managed-equity baseline
+    and must be honoured, never treated as "unset" and skipped.
+    """
+    snap = period.get("starting_managed_equity")
+    if snap is not None:
+        return float(snap)
+    if _managed(state):                       # migrated — `starting_capital` is not authoritative
+        return managed_equity(state)
+    legacy = period.get("starting_capital")   # legacy path, unchanged
+    return float(legacy) if legacy is not None else float(state.get("capital", 0.0))
+
+
+def _period_realized_change(state: dict, period: dict, current_equity: float) -> float:
+    """Managed trading P&L attributable to `period`: the equity change since
+    the period baseline, with external cash-flow events recorded DURING the
+    period removed — a deposit or withdrawal is never trading P&L.
+
+    A legacy state has no cash-flow ledger, so this is just the equity delta,
+    exactly as `equity - week_start` was before.
+    """
+    gross = current_equity - _period_start_equity(state, period)
+    m = _managed(state)
+    if not m:
+        return gross
+    since = str(period.get("start_date") or period.get("date") or "")
+    flow = sum(
+        float(e.get("amount", 0.0))
+        for e in m.get("cashflow_events") or []
+        if e.get("kind") != "inception" and str(e.get("ts", "")) >= since
+    )
+    return gross - flow
+
+
 # ---------------------------------------------------------------------------
 # Drawdown ladder (guardrails.md §1a)
 # ---------------------------------------------------------------------------
@@ -234,16 +282,21 @@ def check_can_open_positions(state: Optional[dict] = None) -> GateResult:
     equity = managed_equity(state)
 
     # --- Daily loss cap ---
+    # Baseline = managed equity at day start (migrated) / starting_capital
+    # (legacy). day.realized_pnl is booked only by close_position, so it is
+    # already immune to deposits/withdrawals — only the denominator changes.
     day = state.get("day", {})
-    day_start = day.get("starting_managed_equity") or day.get("starting_capital") or equity
+    day_start = _period_start_equity(state, day)
     day_pnl = day.get("realized_pnl", 0.0)
     if day_start > 0 and day_pnl < 0 and abs(day_pnl) / day_start >= DAILY_LOSS_CAP:
         reasons.append(f"daily loss cap hit ({day_pnl:.0f} on {day_start:.0f}, cap {DAILY_LOSS_CAP:.0%})")
 
     # --- Weekly loss cap ---
+    # week_pnl is the equity change since the week baseline with in-week
+    # cash-flow events removed (a deposit/withdrawal is not trading P&L).
     week = state.get("week", {})
-    week_start = week.get("starting_managed_equity") or week.get("starting_capital") or equity
-    week_pnl = equity - week_start
+    week_start = _period_start_equity(state, week)
+    week_pnl = _period_realized_change(state, week, equity)
     if week_start > 0 and week_pnl < 0 and abs(week_pnl) / week_start >= WEEKLY_LOSS_CAP:
         reasons.append(f"weekly loss cap hit ({week_pnl:.0f} on {week_start:.0f}, cap {WEEKLY_LOSS_CAP:.0%})")
 
@@ -534,8 +587,9 @@ def status_summary(state: Optional[dict] = None) -> dict:
     week = state.get("week", {})
     capital = managed_equity(state)                       # current managed equity
     ladder_peak = _ladder_peak(state)
-    day_start = day.get("starting_managed_equity") or day.get("starting_capital") or capital
-    week_start = week.get("starting_managed_equity") or week.get("starting_capital") or capital
+    day_start = _period_start_equity(state, day)
+    week_start = _period_start_equity(state, week)
+    week_pnl = _period_realized_change(state, week, capital)
 
     return {
         "can_open_new_positions": gate.allowed,
@@ -549,7 +603,7 @@ def status_summary(state: Optional[dict] = None) -> dict:
         "risk_per_trade_pct": round(current_risk_per_trade(state) * 100, 2),
         "risk_budget_per_trade": round(capital * current_risk_per_trade(state), 2),
         "daily_loss_headroom": round(day_start * DAILY_LOSS_CAP + day.get("realized_pnl", 0.0), 2),
-        "weekly_loss_headroom": round(week_start * WEEKLY_LOSS_CAP + (capital - week_start), 2),
+        "weekly_loss_headroom": round(week_start * WEEKLY_LOSS_CAP + week_pnl, 2),
         "open_positions": len(state.get("open_positions", [])),
         "max_open_positions": MAX_OPEN_POSITIONS,
         "total_open_risk": round(sum(p.get("open_risk", 0.0) for p in state.get("open_positions", [])), 2),
