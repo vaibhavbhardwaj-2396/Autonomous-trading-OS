@@ -31,6 +31,7 @@ from research.contracts import Contract  # noqa: E402
 from research.brain import hypothesis_intake as hi  # noqa: E402
 from research.brain import worker as w  # noqa: E402
 from research.brain import investigator as inv  # noqa: E402
+from research.brain import opportunity as opp  # noqa: E402
 from research import memory as rm  # noqa: E402
 
 PASSED, FAILED = 0, 0
@@ -209,7 +210,10 @@ print("\n--- C: discovery creates a DRAFT; a repeat is caught as a duplicate ---
 s = fresh_store("c")
 reg = fresh_registry("c")
 st = fresh_state("c")
-lim = w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=0)
+# max_promotions=0 isolates discovery from the (separately tested, §R below)
+# autonomous-promotion step — this section is about discovery/duplicate
+# detection specifically, not what happens to a draft afterwards.
+lim = w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=0, max_promotions=0)
 raw = json.dumps(valid_ai_proposal())
 r_first = w.run_worker_cycle(s, now_ist(), limits=lim, registry_dir=reg,
                              runner=lambda p: raw, state_path=st)
@@ -218,7 +222,8 @@ check("C: the first discovery heartbeat creates exactly one DRAFT",
 _created = list(reg.glob("*.json"))
 check("C: exactly one Contract file was written to the registry", len(_created) == 1)
 _c = Contract.load(r_first.drafts and _created[0].stem or "", reg) if _created else None
-check("C: the created Contract is status='draft' (never locked by the worker)",
+check("C: with autonomous promotion disabled (max_promotions=0), the created "
+      "Contract stays status='draft'",
       _c is not None and _c.status == "draft", str(_c and _c.status))
 
 r_dup = w.run_worker_cycle(s, now_ist(), limits=lim, registry_dir=reg,
@@ -419,11 +424,26 @@ check("J: worker.py never imports engine.execute / engine.guardrails / engine.br
       not any(m.startswith("engine") for m in _imports), str([m for m in _imports if m.startswith("engine")]))
 check("J: worker.py never imports anything from paper/",
       not any(m.split(".")[0] == "paper" for m in _imports), str(_imports))
-check("J: worker.py never calls approve_and_lock() or Contract.lock() in code",
+check("J: worker.py never calls approve_and_lock() or Contract.lock() DIRECTLY "
+      "(the only lock path is through opportunity.attempt_autonomous_promotion(), "
+      "checked below)",
       "approve_and_lock(" not in code and ".lock()" not in code,
-      "discovery must end at DRAFT — a human locks")
+      "the worker must reach the lock primitive only via research.brain.opportunity's "
+      "own narrow, audited, budget-gated API — never call it itself")
 check("J: worker.py never imports hypothesis_intake.approve_and_lock by name",
       not re.search(r"import[^\n]*approve_and_lock", WORKER_SRC))
+check("J: the ONE actual approve_and_lock() call site in the whole control plane "
+      "lives in research/brain/opportunity.py, inside "
+      "attempt_autonomous_promotion() — findable, singular, and gated by the "
+      "EXISTING research budget + an explicit system approver, never a forged "
+      "human name or a second locking code path",
+      (_code_only((Path(__file__).parent.parent / "research" / "brain" /
+                   "opportunity.py").read_text()).count("hi.approve_and_lock(") == 1))
+check("J: research/brain/opportunity.py checks the EXISTING research budget "
+      "(hypothesis_intake.check_research_budget) before every promotion attempt "
+      "— never bypassed, never a second budget model",
+      "check_research_budget(" in _code_only(
+          (Path(__file__).parent.parent / "research" / "brain" / "opportunity.py").read_text()))
 check("J: worker.py never references a broker / order-placement symbol",
       not any(tok in code for tok in ("get_broker", "propose_trade", "place_order", "run_paper_cycle", ".place(")))
 check("J: worker.py imports run_experiment only through the scheduler, never directly",
@@ -470,19 +490,23 @@ print("\n--- L: failure isolation — a component raising is caught, not propaga
 # ---------------------------------------------------------------------------
 
 # L1: the scheduler raising mid-cycle -> recorded in errors, cycle still returns
+# (v2: the unified action loop dispatches ONE experiment at a time via
+# scheduler.run_one_experiment — the component that can fail is that
+# function now, not the old batch run_scheduler(), which the worker no
+# longer calls at all; see research/brain/worker.py's own module docstring)
 s = fresh_store("l1")
 reg = fresh_registry("l1")
 st = fresh_state("l1")
 make_locked_contract("EXP-L-0", registry_dir=reg, locked_at="2024-01-01T00:00:00")
-_orig_run_scheduler = w.sched.run_scheduler
-w.sched.run_scheduler = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("scheduler exploded"))
+_orig_run_one_experiment = w.sched.run_one_experiment
+w.sched.run_one_experiment = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("scheduler exploded"))
 try:
     r_l1 = w.run_worker_cycle(s, now_ist(),
                               limits=w.WorkerLimits(max_experiments=1, max_discovery_attempts=0,
                                                     cooldown_seconds=0),
                               registry_dir=reg, runner=lambda p: "x", state_path=st)
 finally:
-    w.sched.run_scheduler = _orig_run_scheduler
+    w.sched.run_one_experiment = _orig_run_one_experiment
 s.close()
 check("L1: run_worker_cycle returns a full WorkerRunResult even when the scheduler raises",
       isinstance(r_l1, w.WorkerRunResult))
@@ -752,6 +776,89 @@ sq2.close()
 check("Q: the NEXT heartbeat with a healthy proposal drafts normally — the rejection did not "
       "corrupt worker state or leave it stuck",
       r_q2.proposals_created == 1 and len(list(regq.glob("*.json"))) == 1, str(r_q2))
+
+
+# ---------------------------------------------------------------------------
+print("\n--- R: Autonomous Research Control Plane integration — no mandatory "
+      "human approval in the normal worker cycle ---")
+# ---------------------------------------------------------------------------
+
+# R1: a draft created by discovery THIS cycle can be autonomously promoted
+# (locked) in the SAME cycle — with max_promotions at its default (1) and
+# no human `approved_by` supplied anywhere in this test.
+sr = fresh_store("r")
+regr = fresh_registry("r")
+str_ = fresh_state("r")
+raw_r = json.dumps(valid_ai_proposal())
+lim_r = w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=0)  # max_promotions default 1
+r_r1 = w.run_worker_cycle(sr, now_ist(), limits=lim_r, registry_dir=regr,
+                          runner=lambda p: raw_r, state_path=str_)
+check("R1: work_selected includes 'promotion' when a draft is eligible this cycle",
+      "promotion" in r_r1.work_selected, str(r_r1.work_selected))
+check("R1b: proposals_created == 1 and promotions_attempted >= 1 in the SAME cycle",
+      r_r1.proposals_created == 1 and r_r1.promotions_attempted >= 1, str(r_r1))
+_created_r = list(regr.glob("*.json"))
+# v2: the unified action loop may ALSO pick up the just-promoted contract's
+# own now-eligible RUN_EXPERIMENT action later in the SAME heartbeat (it
+# genuinely is the single highest-priority remaining action once nothing
+# else competes) — so "locked" is only the FLOOR of what autonomous
+# promotion, with no human approval step, can produce; "no longer draft" is
+# the invariant this section actually asserts (see docs/RESEARCH_WORKER.md).
+check("R2: the draft created by discovery this cycle is no longer a draft — "
+      "autonomously promoted, with no human approval step",
+      len(_created_r) == 1 and Contract.load(_created_r[0].stem, regr).status != "draft",
+      Contract.load(_created_r[0].stem, regr).status if _created_r else None)
+check("R2b: the promoted contract progressed at least to locked (never skipped straight "
+      "to a status that implies a lock never happened)",
+      len(_created_r) == 1
+      and Contract.load(_created_r[0].stem, regr).status in ("locked", "running", "reported", "abandoned"),
+      Contract.load(_created_r[0].stem, regr).status if _created_r else None)
+check("R3: the promoted hypothesis_id is recorded in telemetry",
+      len(r_r1.promoted_hypothesis_ids) == 1
+      and r_r1.promoted_hypothesis_ids[0] == r_r1.drafts[0], str(r_r1))
+check("R4: promotion counts as USEFUL work — no false cooldown after a real promotion",
+      "cooldown_until" not in json.loads(str_.read_text()), str_.read_text())
+
+# R5: max_promotions=0 disables autonomous promotion cleanly — the draft
+# stays a draft, no error, no crash.
+sr2 = fresh_store("r2")
+regr2 = fresh_registry("r2")
+str2 = fresh_state("r2")
+lim_r0 = w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=0, max_promotions=0)
+r_r5 = w.run_worker_cycle(sr2, now_ist(), limits=lim_r0, registry_dir=regr2,
+                          runner=lambda p: raw_r, state_path=str2)
+check("R5: max_promotions=0 -> promotion is never attempted, 'promotion' not selected",
+      r_r5.promotions_attempted == 0 and "promotion" not in r_r5.work_selected, str(r_r5))
+_created_r5 = list(regr2.glob("*.json"))
+check("R5b: the draft correctly stays a draft with promotion disabled",
+      len(_created_r5) == 1 and Contract.load(_created_r5[0].stem, regr2).status == "draft")
+
+# R6: a frozen opportunity is never promoted by the worker, even though it is
+# otherwise eligible — the AI must not silently overwrite a user override.
+sr3 = fresh_store("r3")
+regr3 = fresh_registry("r3")
+str3 = fresh_state("r3")
+result = hi.create_draft(sr3, valid_ai_proposal(title="frozen one"), registry_dir=regr3)
+opp.freeze(sr3, f"OPP-{result.hypothesis_id}", by="vaibhav", reason="not now")
+r_r6 = w.run_worker_cycle(sr3, now_ist(),
+                          limits=w.WorkerLimits(max_discovery_attempts=0, cooldown_seconds=0),
+                          registry_dir=regr3, runner=lambda p: "unused", state_path=str3)
+check("R6: a frozen draft is never autonomously promoted",
+      result.contract.id not in [
+          h for r in r_r6.promotion_outcomes for h in [r.get("opportunity_id")]]
+      or all(o["outcome"] != "promoted" for o in r_r6.promotion_outcomes), str(r_r6))
+check("R6b: the frozen contract stays a draft after a full worker cycle",
+      Contract.load(result.contract.id, regr3).status == "draft")
+
+# R7: worker.py + opportunity.py together still hold the full isolation
+# boundary — re-proven here at the integration level (component-level proof
+# lives in tests/test_research_opportunity.py §K).
+_opp_src = (Path(__file__).parent.parent / "research" / "brain" / "opportunity.py").read_text()
+_opp_code = _code_only(_opp_src)
+_opp_imports = re.findall(r"^\s*(?:from|import)\s+([.\w]+)", _opp_code, re.MULTILINE)
+check("R7: research.brain.opportunity (now wired into the worker) still imports no "
+      "engine/paper module",
+      not any(m.split(".")[0] in ("engine", "paper") for m in _opp_imports), str(_opp_imports))
 
 
 shutil.rmtree(TMP, ignore_errors=True)
