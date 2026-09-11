@@ -383,7 +383,22 @@ check("2. get_account(): broker is labelled INDmoney / INDstocks",
 check("E (regression): get_account() still has the documented v1 fields",
       {"cash", "portfolio_value", "total_value", "pnl_today", "as_of"} <= acct.keys(), str(acct.keys()))
 
-acct = _account_with_state(fresh_state)
+# get_account() (unlike account_truth() above) takes no `now=` override — it
+# reads api/broker_truth.classify_snapshot()'s real wall-clock `now()`, by
+# design (that IS the dashboard's actual freshness check). So a fixture
+# exercised through get_account() must carry a `synced_at` computed relative
+# to the REAL current time, the same convention every other live-relative
+# fixture in this file already uses (DYNAMIC/VPS/MIGRATED below) — a fixed
+# literal like fresh_state's "2026-09-10T09:45:00+05:30" (used above only
+# with an explicit now=NOW) ages past the 24h threshold the day after it is
+# written and fails for a reason that has nothing to do with the code under
+# test. fresh_state itself is untouched, so its now=NOW checks above stay
+# exactly as deterministic as they were.
+_live_synced_at = (dt.datetime.now(IST) - dt.timedelta(hours=1)).isoformat(timespec="seconds")
+fresh_state_live = dict(fresh_state, broker_snapshot=dict(
+    fresh_state["broker_snapshot"], synced_at=_live_synced_at))
+
+acct = _account_with_state(fresh_state_live)
 check("4. get_account() on a fresh INDstocks sync: total_value == ₹63,000",
       acct["total_value"] == 63000.0, str(acct))
 check("4. get_account(): account_value_status 'fresh', book_value_reconciled True",
@@ -392,13 +407,32 @@ check("4. get_account(): account_warnings is empty on a fresh sync",
       acct["account_warnings"] == [], str(acct))
 
 # 5. allocated_capital is never rewritten to the account total, at any layer
-big_account = dict(fresh_state)
-big_account["broker_snapshot"] = dict(fresh_state["broker_snapshot"], total_account_value=900000.0)
+big_account = dict(fresh_state_live)
+big_account["broker_snapshot"] = dict(fresh_state_live["broker_snapshot"], total_account_value=900000.0)
 acct = _account_with_state(big_account)
 check("5. a ₹9L account total never becomes allocated_capital (stays ₹10,000)",
       acct["allocated_capital"] == 10000.0, str(acct))
 check("5. allocated_capital and total_value are distinct fields with distinct values",
       acct["allocated_capital"] == 10000.0 and acct["total_value"] == 900000.0, str(acct))
+
+# Regression: the >24h staleness threshold itself is still correctly enforced
+# through this SAME real-wall-clock get_account() path (not just "made to
+# report fresh") — a snapshot 25h old must still be reported stale, today and
+# every day, without depending on the calendar date.
+stale_live = dict(fresh_state, broker_snapshot=dict(
+    fresh_state["broker_snapshot"],
+    synced_at=(dt.datetime.now(IST) - dt.timedelta(hours=25)).isoformat(timespec="seconds")))
+acct = _account_with_state(stale_live)
+check("regression: a 25h-old snapshot via get_account() (real wall clock) is still "
+      "reported stale — the 24h freshness threshold was not weakened by the fixture fix",
+      acct["account_value_status"] == "stale" and acct["total_value"] is None, str(acct))
+fresh_edge = dict(fresh_state, broker_snapshot=dict(
+    fresh_state["broker_snapshot"],
+    synced_at=(dt.datetime.now(IST) - dt.timedelta(hours=23, minutes=59)).isoformat(timespec="seconds")))
+acct = _account_with_state(fresh_edge)
+check("regression: a sub-24h-old snapshot via get_account() is still reported fresh "
+      "(the threshold is exercised on both sides, deterministically, via the real clock)",
+      acct["account_value_status"] == "fresh" and acct["total_value"] == 63000.0, str(acct))
 
 
 # ---------------------------------------------------------------------------
