@@ -211,6 +211,38 @@ class SchedulerRunResult(NamedTuple):
     error: Optional[str]  # set only if stopped_early
 
 
+def run_one_experiment(
+    store: Store, contract_id: str, *, registry_dir: Path = REGISTRY_DIR,
+) -> ExperimentOutcome:
+    """Run exactly ONE already-selected, already-locked contract through the
+    existing, unmodified `runner.run_experiment()` — the SAME per-contract
+    try/except `run_scheduler()`'s own loop body already uses below.
+    `ExperimentFailed`/`RunnerRejected` are expected, already-safely-handled
+    outcomes (see the module docstring's "Failure handling") and are caught
+    here and reduced to a normal `ExperimentOutcome`; any OTHER exception is
+    deliberately NOT caught — it propagates, exactly as it would have
+    stopped `run_scheduler()`'s own batch early, so a caller doing bounded,
+    priority-driven, one-action-at-a-time selection across several kinds of
+    research work (research.brain.worker's unified action loop) can decide
+    for itself whether to keep going.
+
+    Exists so a caller can interleave a single experiment with other kinds
+    of work between calls, instead of only ever being able to run
+    `run_scheduler()`'s own fixed batch of up to `max_experiments` contracts
+    in one go. No new execution primitive — a narrower entry point onto the
+    exact same `runner.run_experiment()` call, nothing simulated here.
+    """
+    try:
+        result = runner.run_experiment(contract_id, store, registry_dir=registry_dir)
+        return ExperimentOutcome(
+            contract_id=contract_id, outcome="reported",
+            detail=f"{result.get('n_trades', 0)} trade(s) recorded.")
+    except runner.ExperimentFailed as e:
+        return ExperimentOutcome(contract_id=contract_id, outcome="abandoned", detail=str(e))
+    except runner.RunnerRejected as e:
+        return ExperimentOutcome(contract_id=contract_id, outcome="rejected", detail=str(e))
+
+
 def run_scheduler(
     store: Store,
     *,
@@ -251,27 +283,20 @@ def run_scheduler(
     for contract_id in selected_ids:
         attempted_ids.append(contract_id)
         try:
-            result = runner.run_experiment(contract_id, store, registry_dir=registry_dir)
-            reported_ids.append(contract_id)
-            outcomes.append(ExperimentOutcome(
-                contract_id=contract_id, outcome="reported",
-                detail=f"{result.get('n_trades', 0)} trade(s) recorded."))
-        except runner.ExperimentFailed as e:
-            abandoned_ids.append(contract_id)
-            outcomes.append(ExperimentOutcome(
-                contract_id=contract_id, outcome="abandoned", detail=str(e)))
-            continue
-        except runner.RunnerRejected as e:
-            rejected_ids.append(contract_id)
-            outcomes.append(ExperimentOutcome(
-                contract_id=contract_id, outcome="rejected", detail=str(e)))
-            continue
+            outcome = run_one_experiment(store, contract_id, registry_dir=registry_dir)
         except Exception as e:  # noqa: BLE001 — see module docstring's "Failure handling"
             error = f"{type(e).__name__}: {e}"
             outcomes.append(ExperimentOutcome(
                 contract_id=contract_id, outcome="error", detail=error))
             stopped_early = True
             break
+        outcomes.append(outcome)
+        if outcome.outcome == "reported":
+            reported_ids.append(contract_id)
+        elif outcome.outcome == "abandoned":
+            abandoned_ids.append(contract_id)
+        elif outcome.outcome == "rejected":
+            rejected_ids.append(contract_id)
 
     pending_ids = [cid for cid in eligible_ids if cid not in set(attempted_ids)]
     finished = iso(now_ist())

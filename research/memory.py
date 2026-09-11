@@ -24,6 +24,13 @@ table research/sources/*.py already uses, under new `dataset` values:
                                      which implementation/prompt version
                                      (Phase 2 Slice N,
                                      research/brain/discovery_provenance.py)
+    research_opportunity_event    — the Autonomous Research Control Plane's
+                                     audit trail (research/brain/opportunity.py):
+                                     one row per lifecycle transition, user
+                                     override (freeze/reopen/retire/force-
+                                     reassess), or autonomous promotion —
+                                     never research data itself, only a record
+                                     of what changed and why
 
 Hypothesis vs. Experiment — kept deliberately distinct, per design review:
 a Hypothesis (recorded here) is a claim ("high-volume breakouts may have
@@ -51,6 +58,7 @@ DATASET_EVIDENCE = "research_evidence_summary"
 DATASET_NOTE = "research_note"
 DATASET_RESEARCH_AREA = "research_area_tag"
 DATASET_DISCOVERY_SEARCH = "research_discovery_search"
+DATASET_OPPORTUNITY_EVENT = "research_opportunity_event"
 
 MARKET_ENTITY = "_market"  # same convention research/sources already uses
 
@@ -251,6 +259,56 @@ def record_discovery_search(
     }
     return store.append(
         dataset=DATASET_DISCOVERY_SEARCH, entity=entity, event_time=now,
+        knowledge_time=now, source=source, payload=payload,
+    )
+
+
+def record_opportunity_event(
+    store: Store,
+    *,
+    opportunity_id: str,
+    hypothesis_id: str,
+    event_type: str,
+    actor: str,
+    source: str,
+    reason: Optional[str] = None,
+    previous_state: Optional[str] = None,
+    new_state: Optional[str] = None,
+    evidence_signature: Optional[str] = None,
+    priority_before: Optional[float] = None,
+    priority_after: Optional[float] = None,
+    confidence_before: Optional[float] = None,
+    confidence_after: Optional[float] = None,
+    entity: str = MARKET_ENTITY,
+    extra: Optional[dict] = None,
+) -> Optional[int]:
+    """Record one Autonomous Research Control Plane event (research/brain/
+    opportunity.py) — a lifecycle transition, a user override
+    (freeze/reopen/retire/force-reassess), or an autonomous promotion
+    attempt. Append-only, same pattern as every other dataset in this
+    module: the CURRENT state of an opportunity (frozen? retired? what stage
+    was it last computed as?) is always a fold over its own history, never a
+    separately-maintained field that could drift out of sync with it — see
+    research.brain.opportunity._fold_events().
+
+    `actor` is a free string identifying who/what caused this event — a
+    human's name/handle for a user override, or the explicit system approver
+    identity (research.brain.opportunity.SYSTEM_APPROVER) for an autonomous
+    action. Never anonymous, never blank; this is the audit trail §12 of the
+    Master Vision asks for.
+    """
+    now = now_ist()
+    payload = {
+        "opportunity_id": opportunity_id, "hypothesis_id": hypothesis_id,
+        "event_type": event_type, "actor": actor, "reason": reason,
+        "previous_state": previous_state, "new_state": new_state,
+        "evidence_signature": evidence_signature,
+        "priority_before": priority_before, "priority_after": priority_after,
+        "confidence_before": confidence_before, "confidence_after": confidence_after,
+        **(extra or {}),
+    }
+    return store.append(
+        dataset=DATASET_OPPORTUNITY_EVENT, entity=entity, event_time=now,
         knowledge_time=now, source=source, payload=payload,
     )
 
