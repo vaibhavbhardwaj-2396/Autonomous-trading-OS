@@ -469,6 +469,84 @@ check("hypothesis_intake.py never calls eval, exec, or the builtin compile() "
       not re.search(r"\beval\s*\(|\bexec\s*\(|(?<!re\.)\bcompile\s*\(", src))
 
 
+# ---------------------------------------------------------------------------
+print("\n--- signal: the 200-character boundary is enforced exactly, with the "
+      "observed length in the error ---")
+# ---------------------------------------------------------------------------
+
+check("signal at exactly the 200-char limit is ACCEPTED",
+      hi.validate_proposal(make_valid_proposal(signal="s" * hi.FREE_TEXT_MAX_LEN["signal"]))
+      == [], hi.FREE_TEXT_MAX_LEN["signal"])
+_over = hi.validate_proposal(make_valid_proposal(signal="s" * (hi.FREE_TEXT_MAX_LEN["signal"] + 1)))
+check("signal one character over the limit (201) is REJECTED",
+      any("signal exceeds the maximum length" in p for p in _over), str(_over))
+check("the rejection message names the exact configured limit (200)",
+      any(f"maximum length of {hi.FREE_TEXT_MAX_LEN['signal']} characters" in p for p in _over),
+      str(_over))
+check("the rejection message includes the OBSERVED length (201), never the offending text",
+      any(f"length={hi.FREE_TEXT_MAX_LEN['signal'] + 1}" in p for p in _over)
+      and not any("s" * 50 in p for p in _over), str(_over))
+# title shares the same 200-char tier — same shape of message
+_over_title = hi.validate_proposal(make_valid_proposal(title="t" * 250))
+check("title over its limit is rejected the same way, with its own observed length",
+      any("title exceeds the maximum length of 200 characters (length=250)" in p
+          for p in _over_title), str(_over_title))
+
+
+# ---------------------------------------------------------------------------
+print("\n--- signal/hypothesis/notes: the intended separation is actually accepted ---")
+# ---------------------------------------------------------------------------
+# Demonstrates the whole point of the prompt fix, from the intake side: a
+# realistic proposal shaped exactly the way routines/research_investigate.md
+# now instructs the AI to shape one — a compact `signal` reference, with the
+# actual explanatory content living in `hypothesis` and `notes` (both far
+# longer than 200 chars) — passes intake cleanly. The 200-char cap on
+# `signal` is not an obstacle to a well-formed proposal; it only rejects
+# reasoning written into the wrong field.
+
+_compact_signal = "observatory.volume_zscore"
+_long_hypothesis = (
+    "High-volume anomalies (three or more standard deviations above the trailing "
+    "60-day mean traded volume) in liquid large-cap names tend to precede a short-term "
+    "upward price drift over the following one to ten trading sessions, consistent with "
+    "informed accumulation preceding a public catalyst that has not yet been priced in "
+    "by the broader market, distinct from ordinary mean-reverting noise around earnings "
+    "or index-rebalancing volume spikes."
+)
+_long_notes = (
+    "Relates to the digest's existing volume-anomaly evidence entry, which was marked "
+    "WEAK on a single-year discovery split with fewer than thirty qualifying events. "
+    "This proposal differs materially: it restricts the universe to Nifty 50 liquid "
+    "names only (reducing microstructure noise from illiquid small-caps that dominated "
+    "the prior sample), extends the discovery window to three full years for a larger "
+    "sample, and adds a maximum ten-day holding period the prior test did not specify, "
+    "so this is a genuinely new test of the same underlying idea, not a restatement."
+)
+check("fixture sanity: signal is compact (<=200) while hypothesis/notes are "
+      "substantially longer (>200) — this is the separation being tested",
+      len(_compact_signal) <= 200 < len(_long_hypothesis) and 200 < len(_long_notes),
+      f"signal={len(_compact_signal)} hypothesis={len(_long_hypothesis)} notes={len(_long_notes)}")
+
+realistic_proposal = make_valid_proposal(
+    signal=_compact_signal, hypothesis=_long_hypothesis, notes=_long_notes)
+problems = hi.validate_proposal(realistic_proposal)
+check("a realistic proposal (compact signal, long hypothesis, long notes) has ZERO "
+      "validation problems", problems == [], str(problems))
+
+store_sep = fresh_store("signal_separation")
+reg_sep = fresh_registry("signal_separation")
+result_sep = hi.create_draft(store_sep, realistic_proposal, registry_dir=reg_sep)
+check("it also passes create_draft() end to end and produces a genuine DRAFT Contract",
+      result_sep.contract.status == "draft")
+check("the persisted Contract keeps signal compact and hypothesis/notes in full, "
+      "exactly as submitted — no field got merged, truncated, or swapped",
+      result_sep.contract.signal == _compact_signal
+      and result_sep.contract.hypothesis == _long_hypothesis
+      and result_sep.contract.notes == _long_notes)
+store_sep.close()
+
+
+# ---------------------------------------------------------------------------
 for s in (store, store_missing, store_evil, store_hyp, store_draft, store_gate,
           store_cid, store_fake_hid):
     s.close()

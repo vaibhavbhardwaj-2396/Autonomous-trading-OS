@@ -136,7 +136,11 @@ truth):
 
 - `title`, `hypothesis`, `null_hypothesis` — strings
 - `universe` — one of `"Nifty 50"`, `"Nifty 500"`, `"watchlist"`
-- `signal` — a short string describing the idea in your own words
+- `signal` — a compact signal/metric reference identifying what this hypothesis is based on,
+  at most 200 characters (e.g. `observatory.volume_zscore`). A short identifier or label, NOT
+  a sentence-length explanation. Do not write your reasoning here — put the mechanism,
+  justification, or how this relates to prior evidence in `hypothesis` or `notes` instead,
+  both of which have far more room for that.
 - `entry_rule` — `{"conditions": [{"metric": ..., "op": ..., "value": ...}, ...]}`, 1-3
   conditions. Supported metrics: `volume_zscore`, `price_move_zscore`,
   `event_frequency_zscore`, `close`, `return_1d`. Supported operators: `>`, `>=`, `<`, `<=`,

@@ -407,7 +407,14 @@ def validate_proposal(proposal: Any) -> list[str]:
             problems.append(f"{field_name} must not be empty")
         max_len = FREE_TEXT_MAX_LEN.get(field_name, FREE_TEXT_DEFAULT_MAX_LEN)
         if len(v) > max_len:
-            problems.append(f"{field_name} exceeds the maximum length of {max_len} characters")
+            # The observed length is diagnostic, never the offending text itself — a
+            # bounded, non-sensitive integer that makes a future rejection like this
+            # investigable from telemetry alone (worker_runs.jsonl only ever records
+            # str(exception), never the rejected proposal dict — see
+            # research.brain.investigator.investigate()'s docstring).
+            problems.append(
+                f"{field_name} exceeds the maximum length of {max_len} characters "
+                f"(length={len(v)})")
 
     # -- hypothesis_id shape (existence is checked later, against the store) -
     hid = proposal.get("hypothesis_id")

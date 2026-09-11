@@ -501,6 +501,89 @@ check("9.8: no observed live market/account amount is hard-coded by this fix",
 
 
 # ---------------------------------------------------------------------------
+print("\n--- 10: the `signal` prompt/contract alignment (200-char field) ---")
+# ---------------------------------------------------------------------------
+# The bug this closes: routines/research_investigate.md told the Research AI
+# "signal - a short string describing the idea in your own words" with no
+# numeric limit, while hypothesis_intake.FREE_TEXT_MAX_LEN caps signal at 200
+# (the same tier as `title`) — Claude produced a sentence-length signal that
+# then failed intake. The fix is prompt-only; the 200-char contract itself is
+# unchanged (proven directly against hi.FREE_TEXT_MAX_LEN below, never a
+# second hard-coded "200").
+
+PROMPT_TEXT = inv.PROMPT_PATH.read_text()
+_signal_bullet_match = re.search(r"- `signal`.*?(?=\n- `|\n\n)", PROMPT_TEXT, re.DOTALL)
+check("10.1: the prompt has a `signal` bullet in its 'What to produce' section",
+      _signal_bullet_match is not None)
+_signal_bullet = _signal_bullet_match.group(0) if _signal_bullet_match else ""
+
+check("10.1: the prompt explicitly states the signal character limit",
+      "200 characters" in _signal_bullet, _signal_bullet)
+check("10.1: the prompt includes a concrete example identifier",
+      "observatory." in _signal_bullet and "`" in _signal_bullet, _signal_bullet)
+_example_match = re.search(r"`(observatory\.[\w.]+)`", _signal_bullet)
+check("10.1: the example given is itself a valid, well-under-200-character identifier",
+      _example_match is not None and 0 < len(_example_match.group(1)) <= 200, _signal_bullet)
+check("10.1: the prompt tells the AI this is NOT a sentence-length explanation",
+      "sentence" in _signal_bullet.lower() or "explanation" in _signal_bullet.lower(),
+      _signal_bullet)
+check("10.1: the prompt routes reasoning to `hypothesis` / `notes` instead",
+      "`hypothesis`" in _signal_bullet and "`notes`" in _signal_bullet, _signal_bullet)
+
+# 10.2 — single source of truth: the prompt's stated number must be the SAME
+# number as the actual validation limit, read from the code, never a second
+# literal "200" independently maintained in the test.
+check("10.2: the prompt's stated limit matches hi.FREE_TEXT_MAX_LEN['signal'] exactly "
+      "(single source of truth — code and prompt cannot silently drift apart)",
+      f"{hi.FREE_TEXT_MAX_LEN['signal']} characters" in _signal_bullet, _signal_bullet)
+check("10.2: the 200-char CONTRACT itself is unchanged by this fix",
+      hi.FREE_TEXT_MAX_LEN["signal"] == 200 and hi.FREE_TEXT_MAX_LEN["title"] == 200)
+
+# 10.4 — parse_ai_output() round-trips an arbitrary dict unchanged: no key
+# renaming, merging, or truncation happens in the parser, so a `signal`
+# rejection can only ever be about the VALUE the AI produced, never about
+# where the parser routed it.
+_arbitrary = {
+    "alpha": 1, "beta": [1, 2, {"nested": "value"}], "gamma": None, "delta": True,
+    "signal": "observatory.volume_zscore", "epsilon": {"x": {"y": [1, "z"]}},
+}
+check("10.4: parse_ai_output() returns an arbitrary dict byte-for-byte unchanged",
+      inv.parse_ai_output(json.dumps(_arbitrary)) == _arbitrary)
+_fenced_arbitrary = f"```json\n{json.dumps(_arbitrary)}\n```"
+check("10.4: the same holds through a ```json fence (only the fence is stripped)",
+      inv.parse_ai_output(_fenced_arbitrary) == _arbitrary)
+_parse_src = re.sub(r'"""[\s\S]*?"""', "",
+                    (Path(__file__).parent.parent / "research" / "brain" /
+                     "investigator.py").read_text())
+_parse_body = _parse_src.split("def parse_ai_output")[1].split("\ndef ")[0]
+check("10.4: parse_ai_output()'s body never names a specific proposal field "
+      "(signal/title/hypothesis/...) — it is a generic JSON parse, field-blind by "
+      "construction, so it structurally cannot route one field's content into another",
+      not any(f'"{f}"' in _parse_body or f"'{f}'" in _parse_body
+              for f in ("signal", "title", "hypothesis", "null_hypothesis", "notes")),
+      _parse_body)
+
+# 10.5 — end to end: an otherwise-valid proposal with only signal oversized
+# is rejected as IntakeRejected, nothing is written, and the worker (not just
+# investigate() in isolation) stays bounded and continues past it.
+store10 = fresh_store("oversized_signal")
+reg10 = fresh_registry("oversized_signal")
+_oversized = json.dumps(valid_ai_proposal(signal="s" * 250))
+_raised, _reason = None, ""
+try:
+    inv.investigate(store10, "2024-05-12", runner=lambda p: _oversized, registry_dir=reg10)
+except hi.IntakeRejected as e:
+    _raised, _reason = e, "; ".join(e.reasons)
+check("10.5: investigate() raises hi.IntakeRejected for an otherwise-valid proposal "
+      "with only signal oversized", _raised is not None, str(_raised))
+check("10.5: the rejection names the field, the limit, and the observed length (250)",
+      "signal" in _reason and "200 characters" in _reason and "length=250" in _reason,
+      _reason)
+check("10.5: nothing was written to the registry", registry_files(reg10) == set())
+store10.close()
+
+
+# ---------------------------------------------------------------------------
 for s in (store, store_f, store2, store3, store4, store6, store6b, store7, store8):
     s.close()
 

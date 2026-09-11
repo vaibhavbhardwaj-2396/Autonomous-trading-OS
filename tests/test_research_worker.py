@@ -718,6 +718,42 @@ check("P: worker.py itself still imports no engine / paper / broker module "
               re.findall(r"^\s*(?:from|import)\s+([.\w]+)", _code_only(WORKER_SRC), re.MULTILINE)))
 
 
+# ---------------------------------------------------------------------------
+print("\n--- Q: the worker stays bounded and continues past an oversized-signal rejection ---")
+# ---------------------------------------------------------------------------
+# The other half of the end-to-end proof (the investigate()-level half lives
+# in tests/test_research_investigator.py §10.5): a real (well-formed except
+# for `signal`) AI response run through the ACTUAL worker cycle — not a
+# hand-raised exception — still produces a complete, bounded, non-crashing
+# heartbeat, and a later heartbeat with a healthy response works normally.
+
+sq = fresh_store("q")
+regq = fresh_registry("q")
+stq = fresh_state("q")
+oversized_raw = json.dumps(valid_ai_proposal(signal="s" * 250))
+r_q = w.run_worker_cycle(sq, now_ist(),
+                         limits=w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=0),
+                         registry_dir=regq, runner=lambda p: oversized_raw, state_path=stq)
+sq.close()
+check("Q: run_worker_cycle returns a complete result for a real oversized-signal AI response",
+      isinstance(r_q, w.WorkerRunResult))
+check("Q: the rejection is recorded in telemetry errors, naming signal / 200 / the length",
+      any("signal" in e and "200 characters" in e and "length=250" in e for e in r_q.errors),
+      str(r_q.errors))
+check("Q: no draft was created and nothing was written to the registry",
+      r_q.proposals_created == 0 and not list(regq.glob("*.json")), str(r_q))
+
+# the worker is not stuck afterwards — a healthy response on the next heartbeat drafts normally
+r_q2 = w.run_worker_cycle(sq2 := fresh_store("q2"), now_ist(),
+                          limits=w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=0),
+                          registry_dir=regq, runner=lambda p: json.dumps(valid_ai_proposal()),
+                          state_path=stq)
+sq2.close()
+check("Q: the NEXT heartbeat with a healthy proposal drafts normally — the rejection did not "
+      "corrupt worker state or leave it stuck",
+      r_q2.proposals_created == 1 and len(list(regq.glob("*.json"))) == 1, str(r_q2))
+
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'=' * 52}")
 print(f"  {PASSED} passed, {FAILED} failed")
