@@ -1,4 +1,4 @@
-# Continuous Research Worker v2 (Unified Opportunity-Driven Selection)
+# Continuous Research Worker v3 (+ Autonomous Research Action Expansion)
 
 `research/brain/worker.py` — makes the research loop *continuously* alive
 instead of only running at 01:00 (`research/overnight.py`). Companion to
@@ -10,9 +10,10 @@ the unified action queue — full design).
 
 Every heartbeat repeatedly refreshes the opportunity pool, ranks EVERY
 currently-executable action — running an already-locked experiment,
-autonomously promoting a draft, or running the Research AI — on ONE
-priority scale, and executes the single highest-priority eligible one, until
-the runtime budget is spent or nothing eligible remains:
+autonomously promoting a draft, creating a fresh experiment substrate for a
+high-priority opportunity that has neither, or running the Research AI —
+on ONE priority scale, and executes the single highest-priority eligible
+one, until the runtime budget is spent or nothing eligible remains:
 
 ```
 data ingestion (recorder)
@@ -22,14 +23,18 @@ research state / digest        digest.build_digest                    (once per 
 ┌─────────────────────────────────────────────────────────────────┐
 │  refresh the opportunity pool   opportunity.build_opportunity_pool │
 │  rank every EXECUTABLE action   opportunity.build_action_queue     │
-│      RUN_EXPERIMENT  ← scheduler.eligible_contracts               │
-│      PROMOTE         ← a promotable draft                         │
-│      DISCOVER        ← one synthetic "run the Research AI" action │
-│      (all three scored via the SAME priority_score())             │
+│      RUN_EXPERIMENT     ← scheduler.eligible_contracts            │
+│      PROMOTE            ← a promotable draft (hi.pending_drafts)  │
+│      CREATE_EXPERIMENT  ← a high-priority opportunity with neither, │
+│                            but an unused validation/holdout split  │
+│      DISCOVER           ← one synthetic "run the Research AI" action │
+│      (all four scored via the SAME priority_score())              │
 │  execute the top ELIGIBLE action (per-kind caps still enforced):  │
-│      RUN_EXPERIMENT → scheduler.run_one_experiment → runner.run_experiment │
-│      PROMOTE         → opportunity.attempt_autonomous_promotion   │
-│      DISCOVER        → investigator.investigate  → DRAFT (proposal only) │
+│      RUN_EXPERIMENT    → scheduler.run_one_experiment → runner.run_experiment │
+│      PROMOTE            → opportunity.attempt_autonomous_promotion │
+│      CREATE_EXPERIMENT  → opportunity.attempt_create_experiment   │
+│                           (→ hi.derive_split_contract  → DRAFT)    │
+│      DISCOVER           → investigator.investigate → DRAFT (proposal only) │
 │  record the outcome; loop ─── until budget spent / nothing eligible │
 └─────────────────────────────────────────────────────────────────┘
       ↓
@@ -43,9 +48,14 @@ next heartbeat sees it in the digest
 A rejected hypothesis whose evidence just turned in its favour, or an
 already-locked robustness test, can now genuinely outrank a brand-new
 discovery attempt on any given heartbeat — there is no fixed phase order
-privileging one kind of work over another. See
-`docs/RESEARCH_CONTROL_PLANE.md` §10 for the full design and a worked
-example.
+privileging one kind of work over another. And a high-priority opportunity
+with literally nothing runnable is no longer a dead end: the worker can
+create the smallest research substrate itself (a validation/holdout split
+of an already-locked contract, never a new rule invented, never a Research
+AI call), which then becomes an ordinary PROMOTE candidate on the very next
+rebuild, and can be promoted and run in the same heartbeat if priority and
+budget allow. See `docs/RESEARCH_CONTROL_PLANE.md` §10 and §14 for the full
+design and worked examples.
 
 ## Cadence model — cron is the heartbeat, the worker is the brain
 
@@ -143,6 +153,7 @@ main `.env`, since cron runs as root with it) and then by a CLI flag:
 | `max_discovery_attempts` | 1 | `RESEARCH_WORKER_MAX_DISCOVERY_ATTEMPTS` | `--max-discovery-attempts` |
 | `max_experiments` | 1 | `RESEARCH_WORKER_MAX_EXPERIMENTS` | `--max-experiments` |
 | `max_promotions` | 1 | `RESEARCH_WORKER_MAX_PROMOTIONS` | `--max-promotions` |
+| `max_substrate_creations` | 1 | `RESEARCH_WORKER_MAX_SUBSTRATE_CREATIONS` | `--max-substrate-creations` |
 | `max_runtime_seconds` | 300 | `RESEARCH_WORKER_MAX_RUNTIME_SECONDS` | `--max-runtime-seconds` |
 | `max_concurrent_experiments` | 1 | `RESEARCH_WORKER_MAX_CONCURRENT_EXPERIMENTS` | — (v0 rejects any other value) |
 | `cooldown_seconds` | 1800 | `RESEARCH_WORKER_COOLDOWN_SECONDS` | `--cooldown-seconds` |
@@ -218,13 +229,18 @@ promotions_attempted     autonomous draft->locked attempts this run (v1)
 promoted_hypothesis_ids  which drafts were actually locked (v1)
 promotion_outcomes       [{opportunity_id, outcome, detail}] (v1)
 reassessment_eligible_count  pool entries whose evidence just changed (v1)
-action_log               [{kind, opportunity_id, contract_id, priority_score,
-                          priority_components, compute_cost_estimate, relevance,
-                          confidence_before/after, lifecycle_before/after,
-                          next_priority, outcome, runtime_consumed_seconds}] —
+action_log               [{kind, opportunity_id, hypothesis_id, contract_id,
+                          priority_score, priority_components,
+                          compute_cost_estimate, relevance, confidence_before/
+                          after, lifecycle_before/after, next_priority,
+                          outcome, created_substrate_id, runtime_consumed_seconds}] —
                           one entry per action actually SELECTED and executed
-                          this heartbeat, in order (v2) — see
-                          docs/RESEARCH_CONTROL_PLANE.md §10
+                          this heartbeat, in order (v2/v3) — see
+                          docs/RESEARCH_CONTROL_PLANE.md §10/§14
+substrate_creations_attempted  CREATE_EXPERIMENT attempts this run (v3)
+created_substrate_ids    new DRAFT contract_ids created via substrate
+                          creation this run (v3)
+substrate_creation_outcomes  [{opportunity_id, outcome, detail}] (v3)
 ```
 
 ## Status — `--status` (read-only)
@@ -283,8 +299,20 @@ A routine "ran one experiment, nothing notable" heartbeat sends **nothing**.
   exclusively through `opportunity.attempt_autonomous_promotion()`. The
   unified action loop (`docs/RESEARCH_CONTROL_PLANE.md` §10) changed ONLY
   the ORDER work is selected in — every actual execution path is unchanged.
+- **Substrate creation, too, through exactly ONE narrow path (v3).**
+  `worker.py` never imports or calls
+  `hypothesis_intake.derive_split_contract` directly — the only call site
+  in the whole control plane is inside
+  `research.brain.opportunity.attempt_create_experiment()`, which only ever
+  produces a DRAFT (never a lock — locking a substrate it creates still
+  goes through the SAME `attempt_autonomous_promotion()` path above, on a
+  later selection). Creating a draft is not gated by the research budget
+  (nothing new is being LOCKED), the same way `create_draft()`/discovery
+  never were; only the subsequent lock is. See `docs/RESEARCH_CONTROL_PLANE.md`
+  §14 for the full design and safety argument.
 - Enforced by `tests/test_research_worker.py` sections J and R,
-  `tests/test_research_worker_selection.py` section M, plus
+  `tests/test_research_worker_selection.py` section M,
+  `tests/test_research_action_expansion.py` sections L and M, plus
   `tests/test_research_opportunity.py` section K, and the existing
   `tests/test_kernel_isolation.py`, `tests/test_research_engine_boundary.py`,
   and `tests/test_broker_probe.py`.

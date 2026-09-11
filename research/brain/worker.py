@@ -23,14 +23,17 @@ single, iterative, priority-driven loop:
     │                          ▼                                       │
     │  rank every EXECUTABLE action on ONE scale ── opportunity.        │
     │      build_action_queue()  — RUN_EXPERIMENT (via scheduler.       │
-    │      eligible_contracts), PROMOTE (a promotable draft), DISCOVER  │
-    │      (one synthetic "run the Research AI" action) — all scored   │
-    │      through the SAME priority_score()/_priority_components()   │
+    │      eligible_contracts), PROMOTE (a promotable draft),          │
+    │      CREATE_EXPERIMENT (a substrate for a high-priority          │
+    │      opportunity with neither), DISCOVER (one synthetic "run    │
+    │      the Research AI" action) — all scored through the SAME      │
+    │      priority_score()/_priority_components()                   │
     │                          │                                       │
     │                          ▼                                       │
     │  execute the single highest-priority ELIGIBLE action              │
     │      (per-kind caps still enforced: max_experiments /             │
-    │      max_discovery_attempts / max_promotions)                    │
+    │      max_discovery_attempts / max_promotions /                   │
+    │      max_substrate_creations)                                    │
     │                          │                                       │
     │                          ▼                                       │
     │  record the outcome, update evidence/lifecycle/priority           │
@@ -48,12 +51,16 @@ discovery still goes through `investigator.investigate`, and promotion
 still goes through `opportunity.attempt_autonomous_promotion` (which itself
 still calls the EXISTING, UNMODIFIED locking primitive with the EXISTING,
 UNMODIFIED research-budget rate limit — see that module's own docstring).
-What changed is ONLY the selection policy: which one of those three kinds of
+CREATE_EXPERIMENT (Autonomous Research Action Expansion) goes through the
+new `opportunity.attempt_create_experiment`, which itself only ever calls
+the EXISTING, UNMODIFIED `hypothesis_intake.derive_split_contract` — never
+locks anything, produces a DRAFT that a LATER PROMOTE selection (this same
+heartbeat or a future one) locks through the unchanged path above. What
+changed is ONLY the selection policy: which one of those four kinds of
 work is worth doing right now, decided fresh after every single action,
-instead of "always experiments, then always discovery, then always
-promotion." See `docs/RESEARCH_CONTROL_PLANE.md` for the full priority
-model and `research.brain.opportunity.build_action_queue`'s own docstring
-for exactly how the three action kinds are put on one scale.
+instead of a fixed phase order. See `docs/RESEARCH_CONTROL_PLANE.md` for
+the full priority model and `research.brain.opportunity.build_action_queue`'s
+own docstring for exactly how the four action kinds are put on one scale.
 
 CADENCE MODEL: cron is a **heartbeat**, this module is the **brain**.
 `main()` runs exactly one bounded slice of work and exits. Nothing here
@@ -78,10 +85,14 @@ REUSE, DON'T REIMPLEMENT — every real step is an existing, unmodified componen
     research budgets / areas    -> enforced inside the components above, untouched here
     opportunity pool / priority /
     action ranking / autonomous
-    promotion                   -> research.brain.opportunity (composes ALL of the
-                                   above, reimplements none of it — see that
+    promotion / substrate       -> research.brain.opportunity (composes ALL of the
+    creation                       above, reimplements none of it — see that
                                    module's own docstring, in particular
-                                   `build_opportunity_pool` and `build_action_queue`)
+                                   `build_opportunity_pool`, `build_action_queue`,
+                                   and `attempt_create_experiment`)
+    substrate creation itself   -> research.brain.hypothesis_intake.derive_split_contract
+                                   (inside opportunity.attempt_create_experiment;
+                                   this module never calls it directly)
 
 WHAT THIS MODULE NEVER DOES — structurally true by absence of the import:
   - lock a Contract through any path OTHER than the existing, unmodified
@@ -98,6 +109,13 @@ WHAT THIS MODULE NEVER DOES — structurally true by absence of the import:
     still goes exclusively through `research.brain.scheduler`
     (`run_one_experiment`/`run_scheduler`), which owns the one call to the
     runner primitive; this module has no import of that runner module at all.
+  - call `hypothesis_intake.derive_split_contract` (or `create_draft`)
+    directly. Every consequential creation — a draft from a discovery
+    proposal, or a validation/holdout split derived for a high-priority
+    opportunity with no runnable substrate — goes exclusively through
+    `investigator.investigate`/`opportunity.attempt_create_experiment`;
+    this module never imports `hypothesis_intake.derive_split_contract` by
+    name and never calls it.
   - touch engine/*, memory/state.json, or a broker. `engine.execute`,
     `engine.guardrails`, `engine.broker*` are never imported. `research/`
     already never imports a broker (tests/test_broker_probe.py) and
@@ -190,6 +208,14 @@ class WorkerLimits:
     # budget) still governs how many locks may actually succeed regardless of
     # this number.
     max_promotions: int = 1
+    # Autonomous Research Action Expansion — how many CREATE_EXPERIMENT
+    # substrate-creation attempts (opportunity.attempt_create_experiment(),
+    # a validation/holdout split derivation) one heartbeat may make. Same
+    # conservative-default posture as max_promotions; creating a substrate
+    # never locks anything, so this is NOT gated by the research budget —
+    # only by this cap and by whether a substrate is actually available
+    # (opportunity._available_split_key()).
+    max_substrate_creations: int = 1
 
     ENV = {
         "max_discovery_attempts": "RESEARCH_WORKER_MAX_DISCOVERY_ATTEMPTS",
@@ -200,6 +226,7 @@ class WorkerLimits:
         "discovery_enabled": "RESEARCH_WORKER_DISCOVERY_ENABLED",
         "summary_interval_seconds": "RESEARCH_WORKER_SUMMARY_INTERVAL_SECONDS",
         "max_promotions": "RESEARCH_WORKER_MAX_PROMOTIONS",
+        "max_substrate_creations": "RESEARCH_WORKER_MAX_SUBSTRATE_CREATIONS",
     }
 
     def __post_init__(self) -> None:
@@ -208,7 +235,8 @@ class WorkerLimits:
                 "WorkerLimits.max_concurrent_experiments must be 1 in v0 — parallel "
                 "experiments are deliberately out of scope until measured safe on the "
                 "shared VPS (see docs/RESEARCH_WORKER.md 'Resource safety')")
-        for name in ("max_discovery_attempts", "max_experiments", "max_promotions"):
+        for name in ("max_discovery_attempts", "max_experiments", "max_promotions",
+                    "max_substrate_creations"):
             if getattr(self, name) < 0:
                 raise ValueError(f"WorkerLimits.{name} must be >= 0")
         for name in ("max_runtime_seconds", "cooldown_seconds", "summary_interval_seconds"):
@@ -335,14 +363,22 @@ class WorkerRunResult(NamedTuple):
     """One record per action actually SELECTED and executed this heartbeat,
     in execution order — outcome-aware priority telemetry (not a dashboard
     payload, just enough to later calibrate the priority model from real
-    outcomes). Each entry: kind, opportunity_id, contract_id, priority_score,
-    priority_components, compute_cost_estimate, relevance, confidence_before/
-    after, lifecycle_before/after, next_priority (the runner-up action's
-    score at selection time, or None if it was the only eligible one),
-    outcome, runtime_consumed_seconds. `*_after` fields are back-filled from
-    the FOLLOWING iteration's fresh pool build, so the very last action of a
-    heartbeat may show `*_after=None` — its effect is visible from the next
-    heartbeat's `*_before` instead, never lost, just not yet observed."""
+    outcomes). Each entry: kind, opportunity_id, hypothesis_id, contract_id,
+    priority_score, priority_components, compute_cost_estimate, relevance,
+    confidence_before/after, lifecycle_before/after, next_priority (the
+    runner-up action's score at selection time, or None if it was the only
+    eligible one), outcome, created_substrate_id (set only for a successful
+    CREATE_EXPERIMENT), runtime_consumed_seconds. `*_after` fields are
+    back-filled from the FOLLOWING iteration's fresh pool build, so the very
+    last action of a heartbeat may show `*_after=None` — its effect is
+    visible from the next heartbeat's `*_before` instead, never lost, just
+    not yet observed."""
+    # Autonomous Research Action Expansion fields — appended AFTER
+    # `action_log`, again with defaults, same positional-compatibility
+    # reason as every block above.
+    substrate_creations_attempted: int = 0
+    created_substrate_ids: tuple = ()          # new DRAFT contract_ids created this run
+    substrate_creation_outcomes: tuple = ()    # [{opportunity_id, outcome, detail}]
 
     def as_row(self) -> dict:
         return dict(self._asdict())
@@ -411,6 +447,9 @@ def run_worker_cycle(
     reassessment_eligible_count = 0
     experiments_attempted = 0
     discovery_attempts = 0
+    substrate_creations_attempted = 0
+    created_substrate_ids: list = []
+    substrate_creation_outcomes: list = []
 
     state = _load_state(state_path)
     now_epoch = time.time()
@@ -456,9 +495,12 @@ def run_worker_cycle(
             return promotions_attempted < limits.max_promotions
         if kind == "DISCOVER":
             return discovery_precondition_ok and discovery_attempts < limits.max_discovery_attempts
+        if kind == "CREATE_EXPERIMENT":
+            return substrate_creations_attempted < limits.max_substrate_creations
         return False
 
-    _LABEL = {"RUN_EXPERIMENT": "experiments", "DISCOVER": "discovery", "PROMOTE": "promotion"}
+    _LABEL = {"RUN_EXPERIMENT": "experiments", "DISCOVER": "discovery", "PROMOTE": "promotion",
+             "CREATE_EXPERIMENT": "substrate_creation"}
 
     # -- the unified, priority-driven action loop --------------------------
     # Every iteration: (1) refresh the opportunity pool, (2) rank every
@@ -466,9 +508,11 @@ def run_worker_cycle(
     # highest-priority eligible one, (4) record its result — then loop,
     # until the runtime budget is spent or nothing eligible remains. See
     # research.brain.opportunity.build_action_queue's own docstring for
-    # exactly how RUN_EXPERIMENT/PROMOTE/DISCOVER are put on one scale.
+    # exactly how RUN_EXPERIMENT/PROMOTE/DISCOVER/CREATE_EXPERIMENT are put
+    # on one scale.
     iterations = 0
-    max_iterations = limits.max_experiments + limits.max_discovery_attempts + limits.max_promotions + 3
+    max_iterations = (limits.max_experiments + limits.max_discovery_attempts
+                      + limits.max_promotions + limits.max_substrate_creations + 3)
     # ^ a purely DEFENSIVE hard stop, not the real bounding mechanism — every
     # action already increments its own capped counter above, so ordinary
     # operation can never reach this; it exists only so a genuine bug can
@@ -530,6 +574,7 @@ def run_worker_cycle(
                                  if action.opportunity_id in by_opp_id else None),
             "confidence_after": None, "lifecycle_after": None,
             "next_priority": next_priority, "outcome": None, "runtime_consumed_seconds": None,
+            "created_substrate_id": None,
         }
         t_action_start = now_fn()
 
@@ -570,7 +615,9 @@ def run_worker_cycle(
                 # an Opportunity already present in this SAME pool.
             else:
                 try:
-                    po = opp.attempt_autonomous_promotion(store, target_opp, registry_dir=registry_dir)
+                    po = opp.attempt_autonomous_promotion(
+                        store, target_opp, registry_dir=registry_dir,
+                        contract_id=action.contract_id)
                 except Exception as e:  # noqa: BLE001 — this primitive is documented to
                     # already reduce every failure to a PromotionOutcome; treat an
                     # unexpected raise as an isolated glitch, not a systemic one.
@@ -608,6 +655,29 @@ def run_worker_cycle(
                 else:
                     record["outcome"] = "no_proposal"
 
+        elif action.kind == "CREATE_EXPERIMENT":
+            substrate_creations_attempted += 1
+            target_opp = by_opp_id.get(action.opportunity_id)
+            if target_opp is None:
+                record["outcome"] = "skipped_not_eligible"  # defensive — should not occur;
+                # build_action_queue() only ever builds a CREATE_EXPERIMENT
+                # action from an Opportunity already present in this SAME pool.
+            else:
+                try:
+                    so = opp.attempt_create_experiment(store, target_opp, registry_dir=registry_dir)
+                except Exception as e:  # noqa: BLE001 — this primitive is documented to
+                    # already reduce every failure to a SubstrateOutcome; treat an
+                    # unexpected raise as an isolated glitch, not a systemic one.
+                    errors.append(f"substrate_creation: {type(e).__name__}: {e}")
+                    record["outcome"] = "error"
+                else:
+                    substrate_creation_outcomes.append(
+                        {"opportunity_id": so.opportunity_id, "outcome": so.outcome, "detail": so.detail})
+                    record["outcome"] = so.outcome
+                    if so.outcome == "created":
+                        created_substrate_ids.append(so.created_contract_id)
+                        record["created_substrate_id"] = so.created_contract_id
+
         record["runtime_consumed_seconds"] = round(now_fn() - t_action_start, 4)
         action_log.append(record)
 
@@ -616,6 +686,7 @@ def run_worker_cycle(
     # -- cooldown / no-work bookkeeping -------------------------------------
     did_useful_work = (
         experiments_run > 0 or proposals_created > 0 or len(promoted_hypothesis_ids) > 0
+        or len(created_substrate_ids) > 0
     )
     new_state = dict(state)
     if did_useful_work:
@@ -636,6 +707,10 @@ def run_worker_cycle(
             no_work_reason = (
                 f"{promotions_attempted} promotion attempt(s), none succeeded — "
                 f"{'; '.join(o['outcome'] for o in promotion_outcomes) or 'no eligible candidates'}")
+        elif "substrate_creation" in work_selected and not created_substrate_ids:
+            no_work_reason = (
+                f"{substrate_creations_attempted} substrate-creation attempt(s), none succeeded — "
+                f"{'; '.join(o['outcome'] for o in substrate_creation_outcomes) or 'no eligible candidates'}")
         else:
             no_work_reason = "no useful work this cycle"
     if not work_selected and not no_work_reason:
@@ -659,6 +734,9 @@ def run_worker_cycle(
         promotion_outcomes=tuple(promotion_outcomes),
         reassessment_eligible_count=reassessment_eligible_count,
         action_log=tuple(action_log),
+        substrate_creations_attempted=substrate_creations_attempted,
+        created_substrate_ids=tuple(created_substrate_ids),
+        substrate_creation_outcomes=tuple(substrate_creation_outcomes),
     )
 
 
@@ -790,6 +868,9 @@ def worker_status(*, run_log: Path = RUN_LOG, state_path: Path = STATE_PATH,
         if "promotion" in ws:
             promoted = len(r.get("promoted_hypothesis_ids") or [])
             bits.append(f"promo×{promoted}" if promoted else "promo-skip")
+        if "substrate_creation" in ws:
+            created = len(r.get("created_substrate_ids") or [])
+            bits.append(f"subst×{created}" if created else "subst-skip")
         return "+".join(bits) or "idle"
 
     limits = (last or {}).get("limits") or {}
@@ -809,6 +890,8 @@ def worker_status(*, run_log: Path = RUN_LOG, state_path: Path = STATE_PATH,
         "last_promotions_attempted": (last or {}).get("promotions_attempted"),
         "last_promoted_hypothesis_ids": (last or {}).get("promoted_hypothesis_ids") or [],
         "last_reassessment_eligible_count": (last or {}).get("reassessment_eligible_count"),
+        "last_substrate_creations_attempted": (last or {}).get("substrate_creations_attempted"),
+        "last_created_substrate_ids": (last or {}).get("created_substrate_ids") or [],
         "last_no_work_reason": (last or {}).get("no_work_reason"),
         "last_errors": (last or {}).get("errors") or [],
         "last_runtime_budget_remaining_seconds": (round(max_rt - last_rt, 1)
@@ -838,6 +921,8 @@ def _print_status(st: dict) -> None:
           f"{st['last_opportunities_considered']}  promotions_attempted="
           f"{st['last_promotions_attempted']}  promoted={st['last_promoted_hypothesis_ids']}  "
           f"reassessment_eligible={st['last_reassessment_eligible_count']}")
+    print(f"  substrate creation    : attempted="
+          f"{st['last_substrate_creations_attempted']}  created={st['last_created_substrate_ids']}")
     rem = st["last_runtime_budget_remaining_seconds"]
     if rem is not None:
         print(f"  runtime budget left   : {rem}s of "
@@ -873,6 +958,10 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--max-promotions", type=int, default=None,
                     help="max DRAFT hypotheses to autonomously promote (lock) this "
                          "heartbeat (default 1; 0 disables autonomous promotion)")
+    ap.add_argument("--max-substrate-creations", type=int, default=None,
+                    help="max research-substrate creations (a validation/holdout split "
+                         "derived for a high-priority opportunity with no runnable "
+                         "experiment) this heartbeat (default 1; 0 disables it)")
     ap.add_argument("--max-runtime-seconds", type=float, default=None)
     ap.add_argument("--cooldown-seconds", type=float, default=None)
     ap.add_argument("--no-discovery", action="store_true",
@@ -898,6 +987,7 @@ def main(argv: Optional[list] = None) -> int:
         "max_discovery_attempts": args.max_discovery_attempts,
         "max_experiments": args.max_experiments,
         "max_promotions": args.max_promotions,
+        "max_substrate_creations": args.max_substrate_creations,
         "max_runtime_seconds": args.max_runtime_seconds,
         "cooldown_seconds": args.cooldown_seconds,
     }
@@ -944,6 +1034,8 @@ def main(argv: Optional[list] = None) -> int:
                       f"promotions_attempted={result.promotions_attempted} "
                       f"promoted={list(result.promoted_hypothesis_ids)} "
                       f"reassessment_eligible={result.reassessment_eligible_count}")
+                print(f"  substrate_creations_attempted={result.substrate_creations_attempted} "
+                      f"created_substrate_ids={list(result.created_substrate_ids)}")
                 if result.no_work_reason:
                     print(f"  no_work_reason: {result.no_work_reason}")
                 for e in result.errors:

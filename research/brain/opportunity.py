@@ -257,6 +257,22 @@ class PromotionOutcome(NamedTuple):
     detail: str
 
 
+class SubstrateOutcome(NamedTuple):
+    """The result of one attempt_create_experiment() call — see that
+    function. `parent_contract_id` is the already-existing contract a new
+    substrate was (or would be) derived FROM; `created_contract_id` is the
+    new DRAFT this attempt produced, or None on any refusal."""
+
+    opportunity_id: str
+    hypothesis_id: str
+    parent_contract_id: Optional[str]
+    created_contract_id: Optional[str]
+    substrate_type: Optional[str]
+    outcome: str  # "created" | "skipped_frozen" | "skipped_no_substrate" |
+                  # "rejected" | "error"
+    detail: str
+
+
 # ---------------------------------------------------------------------------
 # Audit trail — research.memory.record_opportunity_event(), read back and
 # folded here. Append-only; "current" state is always a fold over history,
@@ -313,7 +329,7 @@ def _record_event(
     new_state: Optional[str] = None, evidence_signature: Optional[str] = None,
     priority_before: Optional[float] = None, priority_after: Optional[float] = None,
     confidence_before: Optional[float] = None, confidence_after: Optional[float] = None,
-    source: str,
+    source: str, extra: Optional[dict] = None,
 ) -> Optional[int]:
     return rm.record_opportunity_event(
         store, opportunity_id=opportunity_id, hypothesis_id=hypothesis_id,
@@ -322,7 +338,7 @@ def _record_event(
         evidence_signature=evidence_signature,
         priority_before=priority_before, priority_after=priority_after,
         confidence_before=confidence_before, confidence_after=confidence_after,
-        source=source,
+        source=source, extra=extra,
     )
 
 
@@ -519,6 +535,48 @@ def _is_robust(store: Store, hypothesis_id: str, verdict: Optional[str], *, regi
     return False
 
 
+def _available_split_key(
+    store: Store, hypothesis_id: str, *, registry_dir: Path,
+) -> Optional[tuple]:
+    """The first `(parent_contract_id, split_key)` pair this hypothesis
+    could still derive a validation/holdout sibling from — the EXACT
+    eligibility `hypothesis_intake.derive_split_contract()` itself checks
+    (ever-locked parent, i.e. not `status == "draft"` and `locked_hash` is
+    set; `split_key` present in the parent's own declared `splits`; that
+    exact (parent, split_key) pair never derived before — read from the
+    SAME hypothesis-claim rows `derive_split_contract()` itself writes to
+    and reads back, via its private `_prior_split_derivation()`, reused
+    here read-only rather than reimplemented), computed BEFORE ever
+    attempting a derivation so `build_action_queue()` can decide whether
+    CREATE_EXPERIMENT is even possible for this hypothesis without wasting
+    an attempt. Returns None if no such pair exists — a hypothesis that
+    never pre-declared an unused validation/holdout split on any of its
+    ever-locked contracts genuinely has no substrate this strategy can
+    create yet (see this module's own docstring and
+    docs/RESEARCH_CONTROL_PLANE.md for why this is an honest limit, not a
+    bug). Contracts are checked in sorted-id order and split keys in
+    `_SUBSTRATE_SPLIT_KEYS` order, so the result is fully deterministic.
+    """
+    claims = [r["payload"] for r in rm.query_research_log(store, rm.DATASET_HYPOTHESIS)
+             if r["payload"].get("hypothesis_id") == hypothesis_id]
+    for cid in sorted(evaluator.contract_ids_for_hypothesis(store, hypothesis_id)):
+        try:
+            c = Contract.load(cid, registry_dir)
+        except FileNotFoundError:
+            continue
+        if c.status == "draft" or not c.locked_hash:
+            continue  # never locked — derive_split_contract() would refuse it too
+        for split_key in _SUBSTRATE_SPLIT_KEYS:
+            if split_key not in (c.splits or {}):
+                continue
+            already_derived = any(
+                cl.get("split_of") == cid and cl.get("split") == split_key for cl in claims)
+            if already_derived:
+                continue
+            return cid, split_key
+    return None
+
+
 def build_opportunity_pool(
     store: Store, as_of: TimeLike, *, registry_dir: Path = REGISTRY_DIR,
     log_events: bool = True, max_reassessment_events: int = DEFAULT_MAX_REASSESSMENT_EVENTS_PER_CYCLE,
@@ -661,58 +719,91 @@ def build_opportunity_pool(
 
 def attempt_autonomous_promotion(
     store: Store, opportunity: Opportunity, *, registry_dir: Path = REGISTRY_DIR,
-    now=None, approver: str = SYSTEM_APPROVER,
+    now=None, approver: str = SYSTEM_APPROVER, contract_id: Optional[str] = None,
 ) -> PromotionOutcome:
-    """Try to move ONE opportunity from DISCOVERED/TRIAGED to TESTING by
-    calling the existing, unmodified hypothesis_intake.approve_and_lock()
-    with an explicit system approver identity. Every refusal path here is a
-    clean, expected, non-error outcome — never a bypass of an existing gate:
+    """Try to move ONE draft contract to TESTING by calling the existing,
+    unmodified hypothesis_intake.approve_and_lock() with an explicit system
+    approver identity. Every refusal path here is a clean, expected,
+    non-error outcome — never a bypass of an existing gate:
 
       - frozen/retired (user override)      -> skipped_frozen
-      - not a draft / no contract_id         -> skipped_not_eligible
+      - not a draft / no contract to target  -> skipped_not_eligible
       - an exact duplicate elsewhere         -> skipped_duplicate
       - over the EXISTING research budget    -> skipped_budget (checked via
-        (hypothesis_intake.check_research_budget()) — a read-only check,        the SAME check_research_budget() approve_and_lock() itself
-        performed BEFORE ever calling approve_and_lock, so a budget refusal    would apply — never bypassed, never overridden here
-        never even attempts the call)
+        hypothesis_intake.check_research_budget() — a read-only check, the
+        SAME check approve_and_lock() itself would apply — performed BEFORE
+        ever calling approve_and_lock, so a budget refusal never even
+        attempts the call)
       - hypothesis_intake.IntakeRejected     -> rejected (a real validation
         failure surfaced by the existing firewall — e.g. the contract fails
         Contract.check())
+
+    `contract_id`, if given, OVERRIDES `opportunity.contract_id` as the
+    promotion target, and eligibility is then checked against THAT
+    contract's own current status (must be "draft") rather than the
+    opportunity's aggregate `lifecycle_stage`. This is for a hypothesis
+    with MORE THAN ONE contract — e.g. one already-reported/rejected
+    contract plus a freshly `attempt_create_experiment()`-derived draft
+    sibling — where `opportunity.contract_id` (the pool's single
+    "representative" contract, biased toward the ever-locked one; see
+    build_opportunity_pool()) does not necessarily point at the specific
+    draft a caller means to promote. Omitting it (the default) preserves
+    the exact original behaviour for the ordinary one-contract-per-
+    hypothesis case.
 
     A successful promotion is recorded as a LIFECYCLE_TRANSITION audit event
     (previous_state=the opportunity's own stage, new_state="TESTING") in
     addition to whatever audit note approve_and_lock() itself already writes.
     """
+    target_contract_id = contract_id if contract_id is not None else opportunity.contract_id
+
     if opportunity.override_state.get("frozen") or opportunity.override_state.get("retired"):
         return PromotionOutcome(opportunity.id, opportunity.hypothesis_id,
-                                opportunity.contract_id, "skipped_frozen",
+                                target_contract_id, "skipped_frozen",
                                 "opportunity is frozen or retired by user override")
-    if opportunity.lifecycle_stage not in ("DISCOVERED", "TRIAGED") or not opportunity.contract_id:
+
+    if contract_id is not None:
+        # An explicit target — check ITS OWN current status, the
+        # authoritative source, rather than the opportunity's aggregate
+        # lifecycle_stage (which a SECOND, still-draft contract does not
+        # move, by design — see build_opportunity_pool()'s own docstring).
+        try:
+            target = Contract.load(contract_id, registry_dir)
+        except FileNotFoundError:
+            return PromotionOutcome(opportunity.id, opportunity.hypothesis_id,
+                                    contract_id, "skipped_not_eligible",
+                                    f"{contract_id} not found in the registry")
+        if target.status != "draft":
+            return PromotionOutcome(opportunity.id, opportunity.hypothesis_id,
+                                    contract_id, "skipped_not_eligible",
+                                    f"{contract_id} is not a draft (status={target.status!r})")
+    elif opportunity.lifecycle_stage not in ("DISCOVERED", "TRIAGED") or not opportunity.contract_id:
         return PromotionOutcome(opportunity.id, opportunity.hypothesis_id,
                                 opportunity.contract_id, "skipped_not_eligible",
                                 f"lifecycle_stage={opportunity.lifecycle_stage} is not promotable")
+
     if opportunity.is_duplicate:
         return PromotionOutcome(opportunity.id, opportunity.hypothesis_id,
-                                opportunity.contract_id, "skipped_duplicate",
+                                target_contract_id, "skipped_duplicate",
                                 "an exact-duplicate rule specification already exists")
 
     within_budget, count = hi.check_research_budget(registry_dir, now=now)
     if not within_budget:
         return PromotionOutcome(opportunity.id, opportunity.hypothesis_id,
-                                opportunity.contract_id, "skipped_budget",
+                                target_contract_id, "skipped_budget",
                                 f"research budget exhausted ({count} locks already this period)")
 
     try:
         hi.approve_and_lock(
-            store, opportunity.contract_id, approved_by=approver,
+            store, target_contract_id, approved_by=approver,
             registry_dir=registry_dir, now=now,
         )
     except hi.IntakeRejected as e:
         return PromotionOutcome(opportunity.id, opportunity.hypothesis_id,
-                                opportunity.contract_id, "rejected", "; ".join(e.reasons))
+                                target_contract_id, "rejected", "; ".join(e.reasons))
     except Exception as e:  # noqa: BLE001 — never propagate out of a bounded promotion attempt
         return PromotionOutcome(opportunity.id, opportunity.hypothesis_id,
-                                opportunity.contract_id, "error", f"{type(e).__name__}: {e}")
+                                target_contract_id, "error", f"{type(e).__name__}: {e}")
 
     _record_event(
         store, opportunity_id=opportunity.id, hypothesis_id=opportunity.hypothesis_id,
@@ -722,8 +813,93 @@ def attempt_autonomous_promotion(
         priority_before=opportunity.priority_score, priority_after=opportunity.priority_score,
         source="research.brain.opportunity",
     )
-    return PromotionOutcome(opportunity.id, opportunity.hypothesis_id, opportunity.contract_id,
+    return PromotionOutcome(opportunity.id, opportunity.hypothesis_id, target_contract_id,
                             "promoted", f"locked by {approver}")
+
+
+# ---------------------------------------------------------------------------
+# Substrate creation — Autonomous Research Action Expansion. The SECOND new
+# consequential action this control plane can take on its own (the first
+# being attempt_autonomous_promotion() above). Bridges the one remaining gap
+# the Unified Selection slice documented: a high-priority opportunity with
+# no runnable experiment and no pending draft used to have no Action at all,
+# however valuable it became. This closes that gap for the case where a
+# substrate strategy actually exists (v1: an unused, pre-declared
+# validation/holdout split — see _available_split_key() above) — never by
+# inventing a new rule spec or calling the Research AI, only by reusing the
+# EXISTING, UNMODIFIED hypothesis_intake.derive_split_contract(), which
+# already carries its own single-use-per-split guard and its own lineage
+# recording (a hypothesis-claim row naming split_of/split/contract_id).
+# ---------------------------------------------------------------------------
+
+def attempt_create_experiment(
+    store: Store, opportunity: Opportunity, *, registry_dir: Path = REGISTRY_DIR,
+    now=None, actor: str = SYSTEM_APPROVER,
+) -> SubstrateOutcome:
+    """Try to create the smallest available research substrate for
+    `opportunity` — v1's one strategy: derive a validation/holdout split
+    from a contract of its hypothesis that has ALREADY been locked (in any
+    post-lock status: locked, running, reported, or abandoned) and that
+    declared, but never used, that split. Produces a DRAFT, exactly like
+    `hypothesis_intake.create_draft()`/`derive_split_contract()` always
+    have — never a locked Contract. Locking still goes through the
+    EXISTING, unmodified `attempt_autonomous_promotion()` on a later
+    selection (the same heartbeat, if the unified loop's next iteration
+    ranks PROMOTE highest, or a later one).
+
+    Every refusal is a clean, expected, non-error outcome:
+
+      - frozen/retired (user override)   -> skipped_frozen
+      - no unused split available        -> skipped_no_substrate (the
+        honest v1 limit — see this module's own docstring)
+      - hypothesis_intake.IntakeRejected  -> rejected (a real, already-
+        enforced guard fired — e.g. the single-use split guard, in the
+        rare case something else derived it between selection and
+        execution; never bypassed, never retried blindly)
+
+    On success, records a `SUBSTRATE_CREATED` audit event carrying the full
+    lineage (`parent_contract_id`, `created_contract_id`, `substrate_type`,
+    `split_key`) in its `extra` payload — in addition to the hypothesis-
+    claim row `derive_split_contract()` itself already writes — so a
+    generated experiment is traceable back to the opportunity and the
+    reassessment that motivated it, not just to its parent contract.
+    """
+    if opportunity.override_state.get("frozen") or opportunity.override_state.get("retired"):
+        return SubstrateOutcome(opportunity.id, opportunity.hypothesis_id, None, None, None,
+                                "skipped_frozen", "opportunity is frozen or retired by user override")
+
+    found = _available_split_key(store, opportunity.hypothesis_id, registry_dir=registry_dir)
+    if found is None:
+        return SubstrateOutcome(opportunity.id, opportunity.hypothesis_id, None, None, None,
+                                "skipped_no_substrate",
+                                "no unused validation/holdout split available to derive")
+    parent_contract_id, split_key = found
+
+    try:
+        result = hi.derive_split_contract(
+            store, parent_contract_id, split_key, opportunity.hypothesis_id,
+            registry_dir=registry_dir)
+    except hi.IntakeRejected as e:
+        return SubstrateOutcome(opportunity.id, opportunity.hypothesis_id, parent_contract_id, None,
+                                "split_derivation", "rejected", "; ".join(e.reasons))
+    except Exception as e:  # noqa: BLE001 — never propagate out of a bounded creation attempt
+        return SubstrateOutcome(opportunity.id, opportunity.hypothesis_id, parent_contract_id, None,
+                                "split_derivation", "error", f"{type(e).__name__}: {e}")
+
+    _record_event(
+        store, opportunity_id=opportunity.id, hypothesis_id=opportunity.hypothesis_id,
+        event_type="SUBSTRATE_CREATED", actor=actor,
+        reason=f"autonomous substrate creation: {split_key} split derived from {parent_contract_id}",
+        previous_state=opportunity.lifecycle_stage, new_state=opportunity.lifecycle_stage,
+        evidence_signature=opportunity.evidence_signature,
+        priority_before=opportunity.priority_score, priority_after=opportunity.priority_score,
+        source="research.brain.opportunity",
+        extra={"parent_contract_id": parent_contract_id, "created_contract_id": result.contract.id,
+               "substrate_type": "split_derivation", "split_key": split_key},
+    )
+    return SubstrateOutcome(opportunity.id, opportunity.hypothesis_id, parent_contract_id,
+                            result.contract.id, "split_derivation", "created",
+                            f"created {result.contract.id} ({split_key} split of {parent_contract_id})")
 
 
 # ---------------------------------------------------------------------------
@@ -747,23 +923,35 @@ def attempt_autonomous_promotion(
 # it); a PROMOTE action is scored the same way; DISCOVER is scored by
 # handing the exact same pure function a neutral, synthetic input.
 #
-# Some OPPORTUNITY_TYPES (REASSESS_REJECTED chief among them) do not yet
-# have an executable substrate in v1 — a hypothesis that already ran and was
-# rejected has no pending draft and no still-locked contract to point an
-# action at, only a history. Such an opportunity stays fully visible and
-# correctly scored in the pool (a future dossier, or a human, can act on it
-# right now via force_reassess()/reopen()) but simply produces no Action
-# here — per the slice's own instruction, "unsupported types may remain
-# represented but ineligible; do not require every type to be executable
-# yet." The moment a reassessment-eligible hypothesis DOES have a runnable
-# substrate (e.g. a retest contract already locked for it), it is picked up
-# automatically here, scored via its own REASSESS_REJECTED/ROBUSTNESS_TEST
-# Opportunity — which is exactly how a rejected hypothesis "returns to the
-# pool" and can outrank a fresh discovery attempt: not a calendar, not a
-# special-cased branch, just the same priority score everything else gets.
+# An opportunity with no runnable draft and no still-locked contract (the
+# common REASSESS_REJECTED case — a hypothesis that already ran to
+# completion has no pending draft and no locked-but-unrun contract, only a
+# history) used to produce NO Action at all here, however high its priority
+# rose. Autonomous Research Action Expansion (this addition) closes MOST of
+# that gap with a fourth action kind, CREATE_EXPERIMENT (see below) — a
+# high-priority opportunity with no executable substrate can now cause the
+# WORKER ITSELF to create the smallest one available (a validation/holdout
+# split derivation, `hypothesis_intake.derive_split_contract` — reused
+# verbatim, including its existing single-use-per-split guard), which then
+# becomes an ordinary PROMOTE candidate next queue rebuild, and after that
+# an ordinary RUN_EXPERIMENT candidate — no new locking path, no new
+# execution path, no new duplicate-detection logic. The gap is not fully
+# closed: a hypothesis that never pre-declared a validation/holdout split on
+# any of its ever-locked contracts still has nothing for CREATE_EXPERIMENT
+# to derive (§12 of docs/RESEARCH_CONTROL_PLANE.md documents this honestly).
 # ---------------------------------------------------------------------------
 
-ACTION_KINDS = ("RUN_EXPERIMENT", "PROMOTE", "DISCOVER")
+ACTION_KINDS = ("RUN_EXPERIMENT", "PROMOTE", "DISCOVER", "CREATE_EXPERIMENT")
+
+# The only two non-"discovery" split keys hypothesis_intake.VALID_SPLIT_KEYS
+# defines — "discovery" itself is refused by derive_split_contract() (it
+# would just re-test the parent's own window). Preference order: a
+# "validation" split is the ordinary confirmatory step for a hypothesis;
+# "holdout" is offered second, once validation is exhausted. Not
+# hard-coded from scratch — this is exactly `hi.VALID_SPLIT_KEYS - {"discovery"}`,
+# spelled out in a fixed, deterministic order rather than re-derived from a
+# frozenset (whose iteration order is not guaranteed) on every call.
+_SUBSTRATE_SPLIT_KEYS = ("validation", "holdout")
 
 
 class Action(NamedTuple):
@@ -771,13 +959,13 @@ class Action(NamedTuple):
     research.brain.worker's own bounded loop. Self-contained and
     explainable — every field a caller needs to answer "why this, and not
     something else" is here, without a second lookup, even though
-    RUN_EXPERIMENT/PROMOTE actions are also traceable back to a full
-    Opportunity via `opportunity_id`."""
+    RUN_EXPERIMENT/PROMOTE/CREATE_EXPERIMENT actions are also traceable back
+    to a full Opportunity via `opportunity_id`."""
 
     kind: str                          # one of ACTION_KINDS
     opportunity_id: Optional[str]      # None only for the synthetic DISCOVER action
     hypothesis_id: Optional[str]
-    contract_id: Optional[str]
+    contract_id: Optional[str]         # for CREATE_EXPERIMENT: the PARENT contract it derives from
     priority_score: float
     priority_components: dict
     compute_cost_estimate: float
@@ -786,6 +974,12 @@ class Action(NamedTuple):
     evidence_value: float              # named, explainable "expected information gain" proxy
     relevance: str                     # why this action is eligible right now
     rationale: str
+    substrate_type: Optional[str] = None
+    """Which substrate-creation strategy a CREATE_EXPERIMENT action would
+    use — "split_derivation" in v1, the only strategy implemented (§ below).
+    Always None for RUN_EXPERIMENT/PROMOTE/DISCOVER. An explicit, named
+    field rather than a hidden side effect — a future second strategy adds a
+    new value here, not a new action kind, keeping the priority scale flat."""
 
 
 def _evidence_value_estimate(*, confidence: Optional[float], reassessment_eligible: bool) -> float:
@@ -826,24 +1020,34 @@ def build_action_queue(
 ) -> list:
     """Turn the current opportunity pool into a single, ranked queue of
     Actions — RUN_EXPERIMENT (one per genuinely runnable locked contract),
-    PROMOTE (one per promotable draft), and at most one synthetic DISCOVER.
-    Sorted by priority_score, descending — the "which one thing is most
-    worth doing right now" answer the unified worker loop consumes directly.
+    PROMOTE (one per promotable draft), CREATE_EXPERIMENT (one per
+    opportunity with neither of those but a substrate it could still
+    create), and at most one synthetic DISCOVER. Sorted by priority_score,
+    descending — the "which one thing is most worth doing right now" answer
+    the unified worker loop consumes directly.
 
     Read-only throughout: `scheduler.eligible_contracts()` only reads the
-    registry, and everything else here reads the already-built `pool` and
-    `evaluator.resolve_hypothesis_id()` (a Store read). Nothing here
-    mutates a Contract, locks anything, or runs an experiment — deciding
-    an action is highest-priority and actually executing it are two
+    registry, and everything else here reads the already-built `pool`,
+    `evaluator.resolve_hypothesis_id()`/`contract_ids_for_hypothesis()`, and
+    `_available_split_key()` (Store + registry reads). Nothing here mutates
+    a Contract, locks anything, runs an experiment, or creates a substrate —
+    deciding an action is highest-priority and actually executing it are two
     different steps, owned by two different modules.
 
     A frozen or retired opportunity is excluded outright, not merely
     zero-scored — a user override must be unselectable, never just
     outranked (Master Vision §11/§14; the same rule
-    attempt_autonomous_promotion() itself re-checks before ever promoting).
+    attempt_autonomous_promotion()/attempt_create_experiment() themselves
+    re-check before ever acting).
     """
     by_hid = {o.hypothesis_id: o for o in pool}
     actions: list = []
+    # Every hypothesis that already has an executable path (a locked
+    # contract to run, or a draft to promote) this iteration — a
+    # CREATE_EXPERIMENT action is only ever offered for a hypothesis with
+    # NEITHER, so it never competes against, or duplicates, work that is
+    # already directly runnable.
+    hids_with_a_path: set = set()
 
     try:
         eligible_contracts = sched.eligible_contracts(store, registry_dir=registry_dir)
@@ -858,6 +1062,7 @@ def build_action_queue(
         if o is not None and (o.override_state.get("frozen") or o.override_state.get("retired")):
             continue
         if o is not None:
+            hids_with_a_path.add(o.hypothesis_id)
             actions.append(Action(
                 kind="RUN_EXPERIMENT", opportunity_id=o.id, hypothesis_id=o.hypothesis_id,
                 contract_id=c.id, priority_score=o.priority_score,
@@ -897,20 +1102,85 @@ def build_action_queue(
             rationale="runnable per scheduler.eligible_contracts(); no matching Opportunity in the pool",
         ))
 
-    for o in pool:
-        if o.lifecycle_stage not in ("DISCOVERED", "TRIAGED") or not o.contract_id:
-            continue
+    # PROMOTE — sourced from hi.pending_drafts() (EVERY draft Contract
+    # actually sitting in the registry), the same "authoritative external
+    # state, not the pool's own derived field" pattern the RUN_EXPERIMENT
+    # loop above already uses via scheduler.eligible_contracts(). This
+    # matters for exactly one case build_opportunity_pool()'s own docstring
+    # documents: a hypothesis with MORE THAN ONE contract (one already-
+    # scored, one freshly attempt_create_experiment()-derived draft) has a
+    # pool `Opportunity` whose own `contract_id`/`lifecycle_stage` describe
+    # the ALREADY-SCORED representative contract, never the new draft
+    # sibling — reading pending_drafts() directly finds it regardless.
+    try:
+        pending = hi.pending_drafts(registry_dir=registry_dir)
+    except Exception:  # noqa: BLE001 — a read-only ranking helper never raises
+        pending = []
+    for c in pending:
+        try:
+            hid = evaluator.resolve_hypothesis_id(store, c.id)
+        except Exception:  # noqa: BLE001
+            hid = None
+        o = by_hid.get(hid) if hid else None
+        if o is None:
+            continue  # an unlinked draft is never autonomously promoted — no known evidence trail
         if o.override_state.get("frozen") or o.override_state.get("retired"):
             continue
+        hids_with_a_path.add(o.hypothesis_id)
         actions.append(Action(
             kind="PROMOTE", opportunity_id=o.id, hypothesis_id=o.hypothesis_id,
-            contract_id=o.contract_id, priority_score=o.priority_score,
+            contract_id=c.id, priority_score=o.priority_score,
             priority_components=o.priority_components, compute_cost_estimate=o.compute_cost_estimate,
             confidence=o.confidence, novelty=o.priority_components.get("novelty", 0.0),
             evidence_value=_evidence_value_estimate(
                 confidence=o.confidence, reassessment_eligible=o.reassessment_eligible),
-            relevance=f"{o.lifecycle_stage} draft ready for autonomous promotion",
+            relevance=f"draft {c.id} ({o.lifecycle_stage}) is ready for autonomous promotion",
             rationale=o.rationale,
+        ))
+
+    # CREATE_EXPERIMENT — only for a hypothesis with NO other executable
+    # path this iteration, that has actually been tested at least once
+    # (evidence_verdict is not None; an untested idea is DISCOVER/PROMOTE's
+    # job, never this one), that is not frozen/retired, and — the one
+    # explicit stage exclusion in this whole function — is NOT plain
+    # REJECTED. A plain REJECTED opportunity (reassessment_eligible=False:
+    # nothing about its evidence picture has changed since it was last
+    # looked at) has, by construction, no evidence/value trigger yet;
+    # offering it a substrate anyway would be an unconditional retry —
+    # exactly the "arbitrary retry period" this slice's own instructions
+    # forbid. The moment something changes (a sibling turns PROMISING, a
+    # new variant is scored, or a human calls force_reassess()),
+    # build_opportunity_pool() itself reclassifies it REASSESSING, and THIS
+    # loop offers it a substrate immediately — the trigger is the evidence
+    # signature changing, never a special-cased branch here. Every OTHER
+    # stage (REASSESSING, PROMISING, ROBUST, TESTING, EVALUATING) reaches
+    # this point on equal footing — a PROMISING-but-not-yet-ROBUST
+    # hypothesis with no confirmation sibling derived yet is exactly as
+    # eligible as a REASSESSING one, with no REASSESS_REJECTED-specific
+    # branch anywhere in this loop.
+    for o in pool:
+        if o.hypothesis_id in hids_with_a_path:
+            continue
+        if o.override_state.get("frozen") or o.override_state.get("retired"):
+            continue
+        if o.lifecycle_stage == "REJECTED":
+            continue
+        if o.evidence_verdict is None:
+            continue
+        found = _available_split_key(store, o.hypothesis_id, registry_dir=registry_dir)
+        if found is None:
+            continue
+        parent_cid, split_key = found
+        actions.append(Action(
+            kind="CREATE_EXPERIMENT", opportunity_id=o.id, hypothesis_id=o.hypothesis_id,
+            contract_id=parent_cid, priority_score=o.priority_score,
+            priority_components=o.priority_components, compute_cost_estimate=o.compute_cost_estimate,
+            confidence=o.confidence, novelty=o.priority_components.get("novelty", 0.0),
+            evidence_value=_evidence_value_estimate(
+                confidence=o.confidence, reassessment_eligible=o.reassessment_eligible),
+            relevance=f"no runnable substrate exists for this {o.lifecycle_stage} opportunity; "
+                     f"a {split_key} split can still be derived from {parent_cid}",
+            rationale=o.rationale, substrate_type="split_derivation",
         ))
 
     if discovery_available:
