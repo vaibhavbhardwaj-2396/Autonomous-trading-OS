@@ -1,6 +1,6 @@
-# Autonomous Research Control Plane v1 + v2 (Unified Selection)
+# Autonomous Research Control Plane v1 + v2 (Unified Selection) + v3 (Action Expansion)
 
-Implements the first two slices of the Living Quant OS Master Vision's
+Implements the first three slices of the Living Quant OS Master Vision's
 roadmap ("current foundation" → **AUTONOMOUS RESEARCH CONTROL PLANE** →
 strategy factory → portfolio engine → capital allocation → execution).
 Companion to `docs/RESEARCH_WORKER.md` (the heartbeat/cron this plugs into)
@@ -21,6 +21,15 @@ repeatedly executes the single highest-priority eligible one until its
 runtime budget is spent, so a rejected hypothesis whose evidence just turned
 in its favour (or an existing robustness test) can now genuinely outrank a
 brand-new discovery attempt — see §10.
+
+**What changed in v3 (Autonomous Research Action Expansion), in one
+sentence:** a high-priority opportunity with no runnable experiment and no
+pending draft — the common REASSESS_REJECTED case — used to reach the top
+of the queue with nothing to execute; the worker can now create the
+smallest available research substrate itself (a validation/holdout split
+derived from an already-locked contract of the same hypothesis — never a
+new rule invented, never a Research AI call), via a fourth action kind,
+CREATE_EXPERIMENT, scored on the exact same priority scale — see §14.
 
 ```
 data ingestion → digest → discovery (AI proposal) → DRAFT
@@ -346,6 +355,13 @@ requirement to edit the cron.
   the only call site in the entire control plane is inside
   `opportunity.attempt_autonomous_promotion()`, and it is exactly one call
   (`tests/test_research_worker.py` §J mechanically counts it).
+- **No second substrate-creation path either (v3).** The only call site for
+  `hypothesis_intake.derive_split_contract()` in the entire control plane is
+  inside `opportunity.attempt_create_experiment()` — exactly one call
+  (`tests/test_research_action_expansion.py` §M mechanically counts it).
+  `attempt_create_experiment()` produces a DRAFT only; it never locks
+  anything itself — locking still goes exclusively through
+  `attempt_autonomous_promotion()` above.
 - **No engine/broker/paper import anywhere.** `research/brain/opportunity.py`
   imports no `engine.*`, no `paper.*`, no broker module, never reads
   `memory/state.json`. `engine/` still imports nothing from `research/`
@@ -378,18 +394,14 @@ requirement to edit the cron.
   more experiment instead"). Explicitly deferred, per this slice's own
   instructions, until production telemetry (`action_log`, §10) shows how
   compute is actually consumed.
-- **Reassessment does not yet trigger new discovery work.** See §3 — the
-  eligibility signal exists and is explainable; acting on it (proposing a
-  new variant targeted at a specific reassessment candidate) is not built.
-  A concrete, visible consequence: a REASSESS_REJECTED opportunity with NO
-  existing runnable substrate (no pending draft, no still-locked contract —
-  the common case, since a rejected hypothesis's own contract already ran
-  to completion) produces no Action in §10's queue at all. It stays fully
-  visible and correctly scored in the pool (a human can act on it via
-  `force_reassess()`/a manually derived retest contract right now), but the
-  worker itself cannot yet manufacture a fresh experiment FOR it — per this
-  slice's own instruction, "unsupported types may remain represented but
-  ineligible; do not require every type to be executable yet."
+- **Reassessment triggering new work is now PARTIALLY closed (v3, §14).**
+  A REASSESS_REJECTED (or PROMISING-but-unconfirmed) opportunity with no
+  runnable substrate can now cause the worker to create one itself — but
+  only via ONE strategy (deriving an unused, pre-declared validation/
+  holdout split from an already-locked contract of the SAME hypothesis).
+  A hypothesis that never pre-declared such a split, on any of its
+  ever-locked contracts, still produces no Action — see §14's own
+  "remaining gaps" for exactly what is and isn't covered now.
 - **No Strategy Factory, Portfolio Engine, or Capital Allocation.** Exactly
   as the roadmap orders them — this slice is "Autonomous Research Control
   Plane" only. `portfolio_relevance` is a placeholder field, nothing more.
@@ -432,3 +444,174 @@ by the worker) to the new `scheduler.run_one_experiment()`; §R2 updated to
 assert "no longer a draft" rather than exactly "locked", since the unified
 loop may legitimately also run the just-promoted contract's own experiment
 within the same heartbeat once nothing else outranks it.
+
+**v3 (Autonomous Research Action Expansion)** —
+`tests/test_research_action_expansion.py` (55 checks): a reassessed
+opportunity WITH an existing runnable contract still selects RUN_EXPERIMENT,
+never CREATE_EXPERIMENT (§A); one WITHOUT a runnable contract, but with an
+unused pre-declared split, selects CREATE_EXPERIMENT instead (§B); the
+created substrate is correctly linked — hypothesis-claim row, `split_of`/
+`split_key`, and a `SUBSTRATE_CREATED` audit event carrying full lineage
+(§C); it becomes an ordinary PROMOTE candidate on the very next queue
+rebuild, sourced via `hi.pending_drafts()` (§D); a second attempt for the
+same, already-used split is refused, not silently repeated (§E); a frozen
+(§F) or retired-unless-reopened (§G) opportunity cannot generate substrate;
+new evidence carries a previously-REJECTED (not just REASSESSING)
+opportunity all the way to an executable, discovery-beating priority (§H);
+a substantially higher-value existing experiment is never outranked by a
+lower-value CREATE_EXPERIMENT (§I); `max_substrate_creations` bounds
+attempts exactly like every other per-kind cap, across two independently-
+eligible opportunities (§J); the full worker loop can create substrate,
+promote it, AND run it, all in one heartbeat (§K); isolation (§L) and every
+existing safety boundary (§M, including the single `derive_split_contract`
+call site and the research budget continuing to gate ONLY locking, never
+draft creation) are re-proven unchanged. Also: `test_research_opportunity`
+(75/75), `test_research_worker` (97/97), `test_research_worker_selection`
+(40/40), all isolation suites, the full Python suite (2577/0 across 50
+modules), and the frontend suite (60/0) all stay green.
+
+## 14. Autonomous Research Action Expansion (v3) — substrate creation
+
+### Why an opportunity can require substrate creation
+
+§10's unified queue only ever offers RUN_EXPERIMENT for a contract
+`scheduler.eligible_contracts()` says is genuinely locked-and-runnable, and
+PROMOTE for a genuinely pending draft. A hypothesis that already ran to
+completion — the ordinary shape of a REJECTED/REASSESSING opportunity, and
+also a PROMISING-but-not-yet-ROBUST one with no confirmation sibling ever
+derived — has NEITHER. Its priority score could rise arbitrarily high
+(§3's reassessment trigger, or simply staying PROMISING) with nothing in
+§10's queue for the worker to actually DO about it. v3 closes most of that
+gap: when a high-priority opportunity has no executable path, the worker
+can create the smallest one available itself.
+
+### The one substrate strategy implemented: split derivation
+
+`research.brain.opportunity._available_split_key()` looks, read-only, for
+the first `(parent_contract_id, split_key)` pair the hypothesis could still
+derive a sibling from — a contract that has EVER been locked (any
+post-lock status: locked/running/reported/abandoned), that pre-declared a
+`"validation"` or `"holdout"` split in its own `splits` dict, and where
+that exact split has never been derived before. `attempt_create_experiment()`
+then calls the EXISTING, UNMODIFIED `hypothesis_intake.derive_split_contract()`
+on it — the same primitive a human research reviewer would use by hand —
+producing a new DRAFT contract that tests the SAME rule spec on a
+DIFFERENT, pre-committed evaluation window. No new rule is ever invented,
+and no Research AI subprocess is ever called: this is a fully deterministic
+action.
+
+This is deliberately the ONLY strategy in v3. A hypothesis that never
+pre-declared a validation/holdout split on any of its ever-locked contracts
+has no substrate for this strategy to create — it stays fully visible and
+correctly scored in the pool, but produces no CREATE_EXPERIMENT action (see
+this section's own "What remains deferred" below). `Action.substrate_type` names the strategy
+explicitly (`"split_derivation"` today) so a future second strategy adds a
+new value there, never a new action kind — the priority scale stays flat.
+
+### How duplicate prevention works
+
+Two layers, both reused rather than reimplemented:
+
+1. `_available_split_key()` itself will not return a `(parent, split_key)`
+   pair that a hypothesis-claim row already records as derived (reading the
+   SAME `split_of`/`split` metadata `derive_split_contract()` has always
+   written) — so `build_action_queue()` never even OFFERS a CREATE_EXPERIMENT
+   action for an already-exhausted split.
+2. `hypothesis_intake.derive_split_contract()`'s own existing single-use
+   guard enforces the same rule authoritatively at execution time, for the
+   rare case something else derived it between selection and execution.
+
+A hypothesis with BOTH `"validation"` and `"holdout"` pre-declared can
+legitimately receive CREATE_EXPERIMENT twice — once each — never more; this
+is a second genuine research question (a holdout test after a validation
+one), not a duplicate.
+
+### How reassessed/rejected work becomes actionable
+
+CREATE_EXPERIMENT is offered for any opportunity, of any type, that (a) has
+no other executable path this iteration (no RUN_EXPERIMENT/PROMOTE
+candidate — tracked via `hids_with_a_path` in `build_action_queue()`), (b)
+is not frozen/retired, (c) is NOT plain `REJECTED` (see below), (d) has a
+recorded evidence verdict (an untested idea is DISCOVER/PROMOTE's job), and
+(e) has an available split per `_available_split_key()`. This is a
+mechanical condition, not a `REASSESS_REJECTED`-specific branch — it
+naturally covers the motivating case (a rejected hypothesis whose
+reassessment value just rose) and, on equal footing, a PROMISING-but-not-
+yet-ROBUST hypothesis that never had a confirmation sibling derived.
+
+**The one explicit stage exclusion: plain `REJECTED`.** A REJECTED
+opportunity with `reassessment_eligible=False` has, by construction,
+nothing about its evidence picture that has changed since it was last
+looked at — offering it a substrate anyway would be an unconditional retry,
+exactly the "arbitrary retry period" this slice's own instructions forbid.
+The moment a sibling turns PROMISING, a new variant is scored elsewhere, or
+a human calls `force_reassess()`, `build_opportunity_pool()` itself
+reclassifies it `REASSESSING` — and only then does this loop offer it a
+substrate. The trigger is the SAME evidence-signature change §3 already
+defined; v3 adds no new trigger of its own, only a new thing to DO once
+triggered. No six-month timer, no fixed retry count, anywhere.
+
+### How CREATE_EXPERIMENT participates in the unified queue
+
+Scored with `opportunity.priority_score`/`priority_components` directly —
+the SAME value the opportunity already earned, no second formula. This
+guarantees a substantially-higher-value existing RUN_EXPERIMENT (e.g. a
+robustness test, §10's ≈7.5 example) is never outranked by a lower-value
+CREATE_EXPERIMENT (e.g. a merely-reassessed idea, ≈3.9) — they compete on
+the identical scale everything else does (`tests/test_research_action_
+expansion.py` §I). `Action` exposes `opportunity_id`, `hypothesis_id`,
+`contract_id` (the PARENT it would derive from), `priority_score`,
+`priority_components`, `compute_cost_estimate`, `confidence`, `novelty`,
+`evidence_value`, `relevance`, and `substrate_type` — the same explainable
+shape every other action kind already has.
+
+`research.brain.worker`'s unified loop dispatches it through
+`opportunity.attempt_create_experiment()`, bounded by a new
+`WorkerLimits.max_substrate_creations` (default 1, env
+`RESEARCH_WORKER_MAX_SUBSTRATE_CREATIONS`, flag `--max-substrate-creations`)
+— the same conservative-default posture as `max_promotions`, enforced the
+same way, never gated by the research budget (creating a draft stays as
+unlimited as `create_draft()` itself always was; only LOCKING it is
+budget-gated). Because the created draft becomes an ordinary PROMOTE
+candidate on the very next pool/queue rebuild — sourced from
+`hypothesis_intake.pending_drafts()` directly, the same "authoritative
+external state" pattern RUN_EXPERIMENT already used via
+`scheduler.eligible_contracts()`, precisely because a hypothesis with more
+than one contract has a pool `Opportunity` whose own `contract_id`/
+`lifecycle_stage` describe its OLDER, already-scored representative
+contract, never a fresh sibling — the worker can create a substrate,
+promote it, and run it, all in the same heartbeat, when priority and budget
+allow (`tests/test_research_action_expansion.py` §K).
+
+### Lineage
+
+Every generated experiment is traceable: the hypothesis-claim row
+`derive_split_contract()` itself writes carries `split_of` (the parent) and
+`split` (the key); `attempt_create_experiment()` additionally records a
+`SUBSTRATE_CREATED` audit event (the SAME `research_opportunity_event`
+dataset every other control-plane event lives in) whose `extra` payload
+carries `parent_contract_id`, `created_contract_id`, `substrate_type`, and
+`split_key`, with `reason` naming the split derived. The full chain —
+opportunity → hypothesis → reassessment reason → generated substrate →
+experiment → evidence — is reconstructable from `opportunity.override_history()`
+plus the hypothesis-claim log, with no new store, no new table.
+
+### What remains deferred
+
+- **Only one substrate strategy.** A hypothesis with no pre-declared
+  validation/holdout split on any ever-locked contract still gets no
+  CREATE_EXPERIMENT action. A second strategy (e.g. asking the Research AI
+  for a targeted retest variant of a SPECIFIC rejected hypothesis, rather
+  than an arbitrary new idea) is future work — it would add a new
+  `substrate_type` value, not a new action kind.
+- **No true shared compute allocator.** `max_substrate_creations` is a hard
+  per-kind ceiling, exactly like every other cap — not yet traded off
+  against `max_experiments`/`max_discovery_attempts`/`max_promotions` by a
+  resource-aware scheduler. `attempt_create_experiment()`'s own compute
+  cost is inherited from the opportunity's `compute_cost_estimate`, the same
+  convention PROMOTE already used, not a fresh profiler measurement.
+- **No portfolio-relevance-driven substrate priority.** `portfolio_relevance`
+  stays the same inert placeholder field it has always been (§7) — this
+  slice does not let a portfolio-level gap raise a substrate's priority.
+- **No dashboard/dossier UI change.** The lineage above is fully queryable
+  today; no new frontend or API surface was built for it.
