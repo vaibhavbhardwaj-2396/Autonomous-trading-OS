@@ -134,7 +134,23 @@ accepted. The object must have these fields (see `research/brain/hypothesis_inta
 `validate_proposal()` for the authoritative rules — this is a summary, not the source of
 truth):
 
-- `title`, `hypothesis`, `null_hypothesis` — strings
+Every field below has a HARD character limit the system enforces deterministically — a
+proposal that exceeds even one of them is rejected outright, the entire proposal, not just
+truncated. These limits exist so every field stays a compact, machine-usable statement, not a
+place to write an essay. If you have more to say than a limit allows, that reasoning belongs in
+`notes` (2000 characters — by far the most room of any field) or should simply be trimmed:
+say the same claim more concisely, not more elaborately.
+
+- `title` — at most 200 characters. A short label, not a sentence.
+- `hypothesis` — at most 1000 characters. State the claim itself, concisely: what you believe
+  is true and why, in one or two sentences. This is a compact claim statement, not a research
+  essay — do not use it to walk through your full reasoning, cite every piece of prior
+  evidence, or restate the digest. If your reasoning genuinely needs more space than that,
+  put the EXTRA detail in `notes` (2000 characters) and keep `hypothesis` itself to the claim
+  and its core mechanism only.
+- `null_hypothesis` — at most 1000 characters. The claim you'd need to falsify — equally
+  concise, one or two sentences, not a restatement of `hypothesis` in negative form padded
+  with extra caveats.
 - `universe` — one of `"Nifty 50"`, `"Nifty 500"`, `"watchlist"`
 - `signal` — a compact signal/metric reference identifying what this hypothesis is based on,
   at most 200 characters (e.g. `observatory.volume_zscore`). A short identifier or label, NOT
@@ -148,12 +164,16 @@ truth):
 - `exit_rule` — an object using any of `stop_loss_pct`, `target_pct`, `max_hold_days`
 - `splits` — `{"discovery": ["YYYY-MM-DD", "YYYY-MM-DD"], ...}` — must include a
   `"discovery"` window at minimum
-- `independence`, `falsification`, `abandon_condition` — strings, pre-committed before any
-  test runs, not written after seeing a result
+- `independence`, `falsification`, `abandon_condition` — strings, each at most 1000
+  characters, pre-committed before any test runs, not written after seeing a result. State
+  the rule plainly (e.g. "abandon if discovery-split expectancy_r <= 0"); this is a
+  pre-committed decision rule, not a place to argue for it at length.
 - `evaluation_start`, `evaluation_end` — ISO dates, matching the discovery window
-- `notes` — optional string. If this hypothesis relates to something in the digest's
-  `evidence` section, briefly say how it differs or why it is a legitimate new test of it.
-  Otherwise omit it or leave it blank.
+- `notes` — optional string, at most 2000 characters — deliberately the most room of any
+  field. If this hypothesis relates to something in the digest's `evidence` section, briefly
+  say how it differs or why it is a legitimate new test of it. This is also where any EXTRA
+  reasoning that would otherwise overflow `hypothesis`/`null_hypothesis`/`independence`/
+  `falsification`/`abandon_condition` belongs. Otherwise omit it or leave it blank.
 
 Do not include `contract_id` — the system assigns it. Do not include `hypothesis_id` unless
 you are proposing a new variant of a hypothesis already visible in the digest's registry, in

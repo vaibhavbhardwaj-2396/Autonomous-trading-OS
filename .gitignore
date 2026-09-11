@@ -20,6 +20,7 @@ research/*.db-shm
 # lock — operational artifacts written on the VPS, never versioned code
 # (same class as the .db files above).
 research/*_runs.jsonl
+research/ai_failures.jsonl
 research/.worker.lock
 research/.worker_state.json
 research/.worker_state.json.tmp
