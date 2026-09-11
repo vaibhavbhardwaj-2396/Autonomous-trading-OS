@@ -62,6 +62,13 @@ def _raises(fn) -> bool:
 
 
 TMP = Path(tempfile.mkdtemp(prefix="lq-test-worker-"))
+
+# Priority Task 0 — redirect the AI-failure diagnostic log to this run's own
+# tmp dir; see tests/test_research_investigator.py's identical line for why
+# this one redirect (investigator.investigate() resolves it as a bare
+# global at call time) is enough for every DISCOVER action in this whole
+# file, including every fail-closed scenario below.
+inv.AI_FAILURE_LOG = TMP / "ai_failures.jsonl"
 WORKER_SRC = (Path(__file__).parent.parent / "research" / "brain" / "worker.py").read_text()
 
 

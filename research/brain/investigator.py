@@ -37,8 +37,17 @@ that call, and nothing more.
                                        after a genuine DRAFT exists; never for
                                        a NoProposal or a rejected/malformed
                                        AI response (see submit_proposal()'s
-                                       docstring — nothing is written on any
-                                       exception path either).
+                                       docstring — RESEARCH MEMORY and the
+                                       REGISTRY get no write on any exception
+                                       path). Priority Task 0 (operational
+                                       stabilization) adds the ONE exception
+                                       to that: an InvestigatorError also
+                                       appends one bounded diagnostic row to
+                                       AI_FAILURE_LOG (research/ai_failures.
+                                       jsonl) via _record_ai_failure() — see
+                                       that constant's own docstring for why
+                                       this is operational telemetry, not a
+                                       second research/registry write.
 
 What this module does NOT do, structurally (it imports none of the modules
 that could do these things, so this is enforced by absence — the same
@@ -114,11 +123,27 @@ from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 
 from .. import memory as rm
+from ..store import now_ist, iso
 from . import hypothesis_intake as hi
 from .digest import build_digest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 PROMPT_PATH = PROJECT_ROOT / "routines" / "research_investigate.md"
+
+# Priority Task 0 (operational stabilization) — a bounded, append-only
+# diagnostic log for exactly ONE thing: an InvestigatorError, with enough
+# context to understand WHY it happened without re-running anything. This
+# is deliberately NOT research memory and NOT the registry (the module
+# docstring's "nothing is written in either case" claim is about those two
+# specific stores, and stays true) — it is operational telemetry, the same
+# category and convention as research/worker_runs.jsonl /
+# research/recorder_runs.jsonl, just for the one failure mode those files
+# never had room to describe: what the Research AI actually said.
+AI_FAILURE_LOG = PROJECT_ROOT / "research" / "ai_failures.jsonl"
+AI_FAILURE_RAW_EXCERPT_MAX = 4000
+"""How much of a raw AI response `_record_ai_failure()` will persist —
+bounded so a single pathological response (or a run of them) cannot grow
+this file without limit. Diagnostic excerpt, not a full archive."""
 
 # Directories the Research AI subprocess is granted, beyond its own cwd —
 # deliberately narrower than run_cycle.sh's live-agent invocation, which
@@ -165,15 +190,18 @@ def _validate_claude_binary(path: str) -> None:
         raise InvestigatorError(
             f"{ENV_CLAUDE_BIN} (or the default) must be an absolute path, got "
             f"{path!r} — a bare command name depends on the invoking process's "
-            f"PATH, which is exactly what breaks this under cron.")
+            f"PATH, which is exactly what breaks this under cron.",
+            stage="binary_config")
     if not p.exists():
         raise InvestigatorError(
             f"Claude Code executable not found at {path!r}. Set {ENV_CLAUDE_BIN} "
-            f"to the correct absolute path (default: {DEFAULT_CLAUDE_BIN!r}).")
+            f"to the correct absolute path (default: {DEFAULT_CLAUDE_BIN!r}).",
+            stage="binary_config")
     if not os.access(p, os.X_OK):
         raise InvestigatorError(
             f"Claude Code executable at {path!r} is not executable "
-            f"(chmod +x it, or set {ENV_CLAUDE_BIN} to a runnable path).")
+            f"(chmod +x it, or set {ENV_CLAUDE_BIN} to a runnable path).",
+            stage="binary_config")
 
 
 DEFAULT_SOURCE = "research_investigator.ai"
@@ -199,7 +227,26 @@ class InvestigatorError(RuntimeError):
     a proposal problem, not a boundary problem. Nothing is written to
     research memory or the registry in either case; every step between the
     digest and a successful create_draft() call is either a pure function or
-    raises before writing anything."""
+    raises before writing anything.
+
+    `stage` names WHERE in the boundary this failed — one of:
+    "binary_config" (the configured Claude Code executable is missing/not
+    absolute/not executable), "timeout", "process_error" (non-zero exit),
+    "invocation_error" (the subprocess/runner itself raised), "empty_response",
+    "malformed_json", or "not_object" (valid JSON, but not a single object).
+    Defaults to "unknown" so every pre-existing single-argument
+    `InvestigatorError("...")` construction (including in already-published
+    tests) stays valid. `raw_response`, if given, is the untouched raw text
+    the Research AI actually produced — kept on the exception instance only
+    long enough for `investigate()` to hand it to `_record_ai_failure()`
+    (a bounded, local diagnostic log — see AI_FAILURE_LOG above); this
+    exception is never itself persisted anywhere with the raw text attached."""
+
+    def __init__(self, message: str, *, stage: str = "unknown",
+                raw_response: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.raw_response = raw_response
 
 
 class InvestigatorResult(NamedTuple):
@@ -295,14 +342,15 @@ def _default_runner(prompt: str) -> str:
     except subprocess.TimeoutExpired as e:
         raise InvestigatorError(
             f"Research AI process timed out after "
-            f"{RESEARCH_AI_TIMEOUT_SECONDS}s") from e
+            f"{RESEARCH_AI_TIMEOUT_SECONDS}s", stage="timeout") from e
     except OSError as e:
-        raise InvestigatorError(f"could not invoke Research AI process: {e}") from e
+        raise InvestigatorError(
+            f"could not invoke Research AI process: {e}", stage="invocation_error") from e
 
     if proc.returncode != 0:
         raise InvestigatorError(
             f"Research AI process exited {proc.returncode}: "
-            f"{(proc.stderr or '')[:500]}")
+            f"{(proc.stderr or '')[:500]}", stage="process_error")
     return proc.stdout
 
 
@@ -314,12 +362,45 @@ def _default_runner(prompt: str) -> str:
 # research/brain/.
 # ---------------------------------------------------------------------------
 
+def _extract_json_object(text: str) -> Optional[str]:
+    """If `text` is a single JSON object with extra, harmless characters
+    around it (a stray sentence before/after, trailing whitespace, an
+    unfenced "Here is my proposal:" preamble), return just the object's own
+    substring — from its first `{` to the LAST `}` in the whole text.
+    Returns None when there's nothing to trim (no braces at all, or the
+    substring is the whole text already) or the substring couldn't possibly
+    be a complete object (no closing brace at all).
+
+    Purely structural — brace POSITION only. This never edits, completes,
+    or guesses at the JSON body itself; the caller runs the exact same
+    strict `json.loads` on whatever this returns, and a result that still
+    isn't valid JSON is still rejected outright. Not a fuzzy parser: text
+    containing more than one top-level object, or a brace character
+    appearing in the surrounding prose itself, is explicitly out of scope
+    for this narrow fallback — it will either extract the wrong span (and
+    then fail the same strict parse) or return None."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    candidate = text[start:end + 1]
+    if candidate == text:
+        return None  # nothing to trim — the direct parse attempt already covers this
+    return candidate
+
+
 def parse_ai_output(raw: str) -> dict:
     """Turn the Research AI's raw stdout into a dict. The only parsing
     performed is json.loads on a single JSON object, optionally wrapped in a
-    ```json fence — nothing more permissive is attempted. A response that
-    isn't clean, single-JSON-object output is rejected outright as an
-    InvestigatorError: fail closed, not "try to salvage it"."""
+    ```json fence, optionally surrounded by harmless extra text a direct
+    parse would otherwise reject (see _extract_json_object() above) —
+    nothing more permissive than that is attempted. A response that still
+    isn't a clean, single-JSON-object once that narrow trimming is applied
+    is rejected outright as an InvestigatorError: fail closed, not "try to
+    salvage it". Every raised InvestigatorError here carries `raw_response`
+    set to the ORIGINAL, untouched `raw` argument (not the stripped/fenced/
+    trimmed `text`), so a caller logging it for diagnostics sees exactly
+    what the Research AI produced."""
     text = (raw or "").strip()
 
     if text.startswith("```"):
@@ -331,20 +412,69 @@ def parse_ai_output(raw: str) -> dict:
         text = "\n".join(lines).strip()
 
     if not text:
-        raise InvestigatorError("Research AI returned an empty response")
+        raise InvestigatorError(
+            "Research AI returned an empty response", stage="empty_response",
+            raw_response=raw)
 
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as e:
-        raise InvestigatorError(
-            f"Research AI response is not valid JSON: {e}") from e
+        candidate = _extract_json_object(text)
+        if candidate is None:
+            raise InvestigatorError(
+                f"Research AI response is not valid JSON: {e}",
+                stage="malformed_json", raw_response=raw) from e
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            # The trimmed candidate is STILL not valid JSON — report the
+            # ORIGINAL error against the ORIGINAL text, not the failed
+            # extraction attempt; trying to salvage it further is exactly
+            # the "generic fuzzy parser" this function must not become.
+            raise InvestigatorError(
+                f"Research AI response is not valid JSON: {e}",
+                stage="malformed_json", raw_response=raw) from e
 
     if not isinstance(parsed, dict):
         raise InvestigatorError(
             f"Research AI response must be a single JSON object, got "
-            f"{type(parsed).__name__}")
+            f"{type(parsed).__name__}", stage="not_object", raw_response=raw)
 
     return parsed
+
+
+def _record_ai_failure(error: InvestigatorError, *, log_path: Path = AI_FAILURE_LOG) -> None:
+    """Best-effort diagnostic record of one InvestigatorError — see
+    AI_FAILURE_LOG's own module-level docstring for why this exists and
+    what it deliberately is NOT (research memory, the registry, a second
+    source of truth). Persists the failure `stage`, the exception message,
+    and a BOUNDED excerpt of the raw response (never the full text, capped
+    at AI_FAILURE_RAW_EXCERPT_MAX) — enough to distinguish "empty", "prose,
+    no JSON", "truncated JSON", "JSON but the wrong shape", etc. from each
+    other without re-running anything. Never raises: a failure to log a
+    diagnostic about a failure must never itself become a second, different
+    failure, so any exception here (a full disk, a permissions problem) is
+    silently swallowed, the same posture every other best-effort telemetry
+    write in this codebase already takes (research.brain.worker._persist_run,
+    research.recorder._persist_run)."""
+    try:
+        excerpt = None
+        raw_len = 0
+        truncated = False
+        if error.raw_response is not None:
+            raw_len = len(error.raw_response)
+            truncated = raw_len > AI_FAILURE_RAW_EXCERPT_MAX
+            excerpt = error.raw_response[:AI_FAILURE_RAW_EXCERPT_MAX]
+        row = {
+            "ts": iso(now_ist()), "stage": error.stage, "message": str(error),
+            "raw_response_excerpt": excerpt, "raw_response_length": raw_len,
+            "raw_response_truncated": truncated,
+        }
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a") as f:
+            f.write(json.dumps(row, default=str) + "\n")
+    except Exception:  # noqa: BLE001 — diagnostics must never mask the real failure
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +523,7 @@ def investigate(
     persist_draft: bool = True,
     digest: Optional[dict] = None,
     duplicate_check: Optional[Callable[[dict], Optional[str]]] = None,
+    ai_failure_log: Optional[Path] = None,
 ):
     """The whole seam, end to end — see the module docstring's diagram.
 
@@ -440,15 +571,31 @@ def investigate(
     runner = runner or _default_runner
     digest = digest if digest is not None else build_context(store, as_of)
     prompt = build_prompt(digest)
+    # A bare global reference, resolved at CALL time, never bound as a
+    # default-parameter value at import time — the same "read fresh every
+    # call" posture resolve_claude_binary() already documents in this file.
+    # This is what lets a test (or a future caller) redirect every
+    # diagnostic write by setting `investigator.AI_FAILURE_LOG` once,
+    # without having to thread `ai_failure_log=` through every call site
+    # that doesn't care to override it individually.
+    log_path = ai_failure_log if ai_failure_log is not None else AI_FAILURE_LOG
 
     try:
         raw = runner(prompt)
-    except InvestigatorError:
+    except InvestigatorError as e:
+        _record_ai_failure(e, log_path=log_path)
         raise
     except Exception as e:  # a broken injected runner fails closed, not open
-        raise InvestigatorError(f"Research AI invocation failed: {e}") from e
+        err = InvestigatorError(f"Research AI invocation failed: {e}",
+                                stage="invocation_error")
+        _record_ai_failure(err, log_path=log_path)
+        raise err from e
 
-    proposal = parse_ai_output(raw)
+    try:
+        proposal = parse_ai_output(raw)
+    except InvestigatorError as e:
+        _record_ai_failure(e, log_path=log_path)
+        raise
 
     if proposal.get("no_proposal") is True:
         reason = proposal.get("reason")

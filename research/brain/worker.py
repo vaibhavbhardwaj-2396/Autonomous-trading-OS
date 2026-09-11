@@ -379,9 +379,68 @@ class WorkerRunResult(NamedTuple):
     substrate_creations_attempted: int = 0
     created_substrate_ids: tuple = ()          # new DRAFT contract_ids created this run
     substrate_creation_outcomes: tuple = ()    # [{opportunity_id, outcome, detail}]
+    # Priority Task 0 (operational stabilization) fields — appended AFTER
+    # `substrate_creation_outcomes`, again with defaults, same positional-
+    # compatibility reason as every block above. Heartbeat truth (Phase 6):
+    # every one of these is derivable from fields already above, but is
+    # made a first-class, explicit field anyway — a consumer (a future
+    # dashboard, a future shared compute allocator, a human tailing
+    # worker_runs.jsonl) should never have to recompute it from action_log.
+    run_id: str = ""
+    """Same value as `worker_id` — an explicit alias so a consumer doesn't
+    need to know that name to find "the identifier for this run"."""
+    outcome: str = "ok"                        # "ok" | "error" | "no_work"
+    actions_attempted: int = 0                  # len(action_log)
+    actions_succeeded: int = 0                  # action_log entries whose outcome != "error"
+    actions_failed: int = 0                     # action_log entries whose outcome == "error"
+    discovery_attempts: int = 0                  # DISCOVER actions actually executed this run
+    experiments_attempted: int = 0               # RUN_EXPERIMENT actions actually executed this run
+    ai_invocation_status: str = "not_attempted"  # "ok" | "error" | "not_attempted"
+    """Whether the Research AI boundary itself (a DISCOVER action's runner
+    call + parse) succeeded this run — distinct from `proposals_created`,
+    since a working AI call that legitimately returns no_proposal or a
+    caught duplicate is still "ok", not an error."""
+    telegram_status: str = "not_attempted"
+    """"sent" | "failed" | "skipped_no_notify" | "skipped_no_lines" |
+    "not_attempted" (set only by main(), which owns notification — see
+    maybe_notify()). `notified` (bool) is retained for backward
+    compatibility and is always exactly `telegram_status == "sent"`."""
 
     def as_row(self) -> dict:
         return dict(self._asdict())
+
+
+def _new_worker_id() -> str:
+    """One shared definition of "this run's identifier" — used both by
+    run_worker_cycle() itself and by main()'s crash-fallback path below, so
+    a heartbeat that crashes before run_worker_cycle can mint its own ID
+    still gets a real, well-formed one rather than a placeholder."""
+    return f"worker-{os.getpid()}-{int(time.time())}"
+
+
+def _crash_result(*, started_wall, worker_id: str, limits: "WorkerLimits",
+                  error: BaseException) -> "WorkerRunResult":
+    """A complete, valid WorkerRunResult for the one case run_worker_cycle()
+    is designed never to reach: an exception escaping it entirely (e.g. a
+    genuine bug, or WorkerLimits.from_env() itself raising on a bad env var
+    combination before any work started). Without this, main() would let
+    the exception propagate straight past `_persist_run()`/`maybe_notify()`
+    — that heartbeat would vanish with NO telemetry row and NO Telegram
+    alert at all, strictly worse than an ordinary recorded error cycle.
+    This is Priority Task 0's own concrete, provable finding: the one gap
+    between "run_worker_cycle() is designed to catch everything inside it"
+    and "every invocation is guaranteed a persisted record" (see
+    docs/RESEARCH_WORKER.md 'Reliability')."""
+    finished_wall = now_ist()
+    return WorkerRunResult(
+        started_at=iso(started_wall), finished_at=iso(finished_wall),
+        runtime_seconds=0.0, worker_id=worker_id, digest_as_of=None,
+        work_selected=[], proposals_created=0, drafts=[], duplicate_rejections=0,
+        experiments_run=0, experiment_outcomes=[], evidence_updates=0,
+        no_work_reason=None,
+        errors=[f"run_worker_cycle: {type(error).__name__}: {error}"],
+        limits=asdict(limits), notified=False, run_id=worker_id, outcome="error",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +458,7 @@ def run_worker_cycle(
     runner: Optional[Callable[[str], str]] = None,
     state_path: Path = STATE_PATH,
     now_fn: Callable[[], float] = time.monotonic,
+    ai_failure_log: Optional[Path] = None,
 ) -> WorkerRunResult:
     """One heartbeat. Repeatedly selects and executes the single
     highest-priority ELIGIBLE action — RUN_EXPERIMENT, PROMOTE, or
@@ -427,7 +487,7 @@ def run_worker_cycle(
     limits = limits or WorkerLimits.from_env()
     started_wall = now_ist()
     t0 = now_fn()
-    worker_id = f"worker-{os.getpid()}-{int(time.time())}"
+    worker_id = _new_worker_id()
 
     work_selected: list = []
     errors: list = []
@@ -635,7 +695,8 @@ def run_worker_cycle(
             try:
                 result = inv.investigate(
                     store, as_of, runner=runner, registry_dir=registry_dir,
-                    digest=digest, duplicate_check=dup_check)
+                    digest=digest, duplicate_check=dup_check,
+                    ai_failure_log=ai_failure_log)
             except (inv.InvestigatorError, hi.IntakeRejected) as e:
                 errors.append(f"discovery: {type(e).__name__}: {str(e)[:200]}")
                 record["outcome"] = "error"
@@ -721,6 +782,18 @@ def run_worker_cycle(
     finished_wall = now_ist()
     runtime = round(now_fn() - t0, 3)
 
+    # -- Heartbeat truth (Phase 6) — derived, first-class summary fields ---
+    actions_failed = sum(1 for a in action_log if a.get("outcome") == "error")
+    actions_attempted = len(action_log)
+    discover_entries = [a for a in action_log if a["kind"] == "DISCOVER"]
+    if not discover_entries:
+        ai_invocation_status = "not_attempted"
+    elif any(a.get("outcome") == "error" for a in discover_entries):
+        ai_invocation_status = "error"
+    else:
+        ai_invocation_status = "ok"
+    outcome = "error" if errors else ("no_work" if not work_selected else "ok")
+
     return WorkerRunResult(
         started_at=iso(started_wall), finished_at=iso(finished_wall),
         runtime_seconds=runtime, worker_id=worker_id, digest_as_of=digest_as_of,
@@ -737,6 +810,10 @@ def run_worker_cycle(
         substrate_creations_attempted=substrate_creations_attempted,
         created_substrate_ids=tuple(created_substrate_ids),
         substrate_creation_outcomes=tuple(substrate_creation_outcomes),
+        run_id=worker_id, outcome=outcome, actions_attempted=actions_attempted,
+        actions_succeeded=actions_attempted - actions_failed, actions_failed=actions_failed,
+        discovery_attempts=discovery_attempts, experiments_attempted=experiments_attempted,
+        ai_invocation_status=ai_invocation_status, telegram_status="not_attempted",
     )
 
 
@@ -771,8 +848,11 @@ def _notify(message: str) -> bool:
 
 
 def maybe_notify(result: WorkerRunResult, *, limits: WorkerLimits,
-                 state_path: Path = STATE_PATH, now: Optional[float] = None) -> bool:
-    """Bounded notification policy (docs/RESEARCH_WORKER.md 'Telegram'):
+                 state_path: Path = STATE_PATH, now: Optional[float] = None) -> str:
+    """Bounded notification policy (docs/RESEARCH_WORKER.md 'Telegram') —
+    UNCHANGED in POLICY by Priority Task 0 (kept intentionally: see that
+    slice's own audit note on why this stays draft/error/periodic-only,
+    not "one message per 10-minute heartbeat"), only made observable:
 
       * a new DRAFT proposal   -> notify (that is the meaningful event)
       * an error this cycle    -> notify
@@ -783,6 +863,21 @@ def maybe_notify(result: WorkerRunResult, *, limits: WorkerLimits,
     A routine "ran an experiment, nothing else" cycle sends nothing. The
     first heartbeat after a (re)deploy only *seeds* the summary clock — the
     first periodic roll-up lands one interval later, never as a deploy burst.
+
+    A draft AND an error in the SAME cycle still produce exactly ONE
+    Telegram message (both lines joined into one `_notify()` call below) —
+    this policy has always coalesced everything worth saying about one run
+    into at most one send, never one message per condition, and never more
+    than one send per `main()` invocation (the ONE call site — see
+    `tests/test_research_worker_stabilization.py` §J for the mechanical
+    proof this stays true).
+
+    Returns a status string — "sent", "failed" (a real send was attempted
+    and `_notify()` itself returned false), or "skipped_no_lines" (nothing
+    this cycle met the bar above) — so a caller can persist WHICH of those
+    happened (`WorkerRunResult.telegram_status`) rather than only a bare
+    bool. `bool(status == "sent")` reproduces the exact old return value
+    for any caller that only ever checked truthiness.
     """
     now = now if now is not None else time.time()
     state = _load_state(state_path)
@@ -811,13 +906,22 @@ def maybe_notify(result: WorkerRunResult, *, limits: WorkerLimits,
             f"{len(result.errors)} error(s).")
 
     if not lines:
-        return False
+        return "skipped_no_lines"
 
-    sent = _notify("\n".join(lines))
+    # `_notify()` already guards send_message() internally and is documented
+    # to return bool, never raise — this is a SECOND, defensive guard around
+    # that call itself (belt and suspenders, the same posture the research
+    # budget check already takes elsewhere in this codebase), so a Telegram-
+    # side failure can NEVER propagate out of maybe_notify() and corrupt
+    # anything downstream, even if _notify()'s own guard were ever weakened.
+    try:
+        sent = _notify("\n".join(lines))
+    except Exception:  # noqa: BLE001
+        sent = False
     if sent and (result.proposals_created or is_summary):
         state["last_summary_at"] = now
         _save_state(state, state_path)
-    return sent
+    return "sent" if sent else "failed"
 
 
 def _fmt_interval(seconds: float) -> str:
@@ -993,7 +1097,17 @@ def main(argv: Optional[list] = None) -> int:
     }
     if args.no_discovery:
         overrides["discovery_enabled"] = False
-    limits = WorkerLimits.from_env(**overrides)
+    try:
+        limits = WorkerLimits.from_env(**overrides)
+    except Exception as e:  # noqa: BLE001 — a bad env/flag combination must
+        # still produce a visible, actionable failure, not a raw traceback
+        # with no telemetry and no alert (see _crash_result's own docstring
+        # for why an exception THIS early is exactly as important to
+        # surface as one inside run_worker_cycle itself).
+        print(f"FATAL: invalid worker configuration: {e}", file=sys.stderr)
+        if not args.no_notify:
+            _notify(f"🔴 Research worker: invalid configuration — {type(e).__name__}: {e}")
+        return 1
 
     registry_dir = Path(args.registry_dir) if args.registry_dir else REGISTRY_DIR
 
@@ -1008,17 +1122,28 @@ def main(argv: Optional[list] = None) -> int:
                             f"{type(e).__name__}: {e}")
                 return 1
 
+            started_wall = now_ist()
+            worker_id = _new_worker_id()
             try:
-                result = run_worker_cycle(
-                    store, now_ist(), limits=limits, registry_dir=registry_dir)
+                try:
+                    result = run_worker_cycle(
+                        store, now_ist(), limits=limits, registry_dir=registry_dir)
+                except Exception as e:  # noqa: BLE001 — run_worker_cycle() is designed
+                    # to catch everything itself; if it somehow doesn't, degrade to a
+                    # recorded, notified error cycle rather than let this heartbeat
+                    # vanish with no telemetry row and no Telegram alert at all.
+                    result = _crash_result(
+                        started_wall=started_wall, worker_id=worker_id,
+                        limits=limits, error=e)
             finally:
                 store.close()
 
             _persist_run(result)
-            notified = False
+            telegram_status = "skipped_no_notify"
             if not args.no_notify:
-                notified = maybe_notify(result, limits=limits)
-            result = result._replace(notified=notified)
+                telegram_status = maybe_notify(result, limits=limits)
+            result = result._replace(
+                notified=(telegram_status == "sent"), telegram_status=telegram_status)
 
             if args.json:
                 print(json.dumps(result.as_row(), indent=2, default=str))

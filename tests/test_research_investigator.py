@@ -53,6 +53,15 @@ def check(name, condition, detail=""):
 
 TMP = Path(tempfile.mkdtemp(prefix="lq-test-investigator-"))
 
+# Priority Task 0 — redirect the AI-failure diagnostic log to this run's own
+# tmp dir. investigator.investigate() resolves inv.AI_FAILURE_LOG as a bare
+# global at CALL time (never bound as an early default), specifically so
+# this one-line redirect, done ONCE here, is honoured by every investigate()
+# call in this whole file that doesn't explicitly override it — none of them
+# need to be touched individually, and none of this file's many fail-closed
+# scenarios write a single row to the real project-level research/ai_failures.jsonl.
+inv.AI_FAILURE_LOG = TMP / "ai_failures.jsonl"
+
 
 def fresh_store(name) -> Store:
     p = TMP / f"{name}.db"

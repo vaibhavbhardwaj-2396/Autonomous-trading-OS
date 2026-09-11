@@ -241,7 +241,52 @@ substrate_creations_attempted  CREATE_EXPERIMENT attempts this run (v3)
 created_substrate_ids    new DRAFT contract_ids created via substrate
                           creation this run (v3)
 substrate_creation_outcomes  [{opportunity_id, outcome, detail}] (v3)
+run_id                    == worker_id — an explicit alias (Priority Task 0)
+outcome                   "ok" | "error" | "no_work" — one-glance summary
+actions_attempted         len(action_log)
+actions_succeeded         action_log entries whose outcome != "error"
+actions_failed            action_log entries whose outcome == "error"
+discovery_attempts        DISCOVER actions actually executed this run
+experiments_attempted     RUN_EXPERIMENT actions actually executed this run
+ai_invocation_status      "ok" | "error" | "not_attempted" — the Research AI
+                          boundary itself, distinct from proposals_created
+                          (a working call can legitimately propose nothing)
+telegram_status           "sent" | "failed" | "skipped_no_lines" |
+                          "skipped_no_notify" — richer than the boolean
+                          `notified` field (kept for backward compatibility;
+                          always exactly `telegram_status == "sent"`)
 ```
+
+**Heartbeat truth, not Telegram, is authoritative** (Priority Task 0). Every
+one of the fields above is guaranteed to be persisted for EVERY invocation,
+including one that crashes somewhere `run_worker_cycle()` itself was not
+designed to catch — `main()`'s own top-level guard degrades that case to a
+recorded `outcome="error"` row (`errors` naming
+`run_worker_cycle: <exception>`) rather than letting the heartbeat vanish
+with no telemetry and no Telegram alert at all. Telegram
+(`docs/RESEARCH_WORKER.md` §Telegram below) intentionally stays silent on
+most routine runs by design — `worker_runs.jsonl` / `--status` are how you
+verify the worker is actually alive, not the chat.
+
+## AI failure diagnostics — `research/ai_failures.jsonl`
+
+A second, separate, bounded append-only log (Priority Task 0) — one row
+per `InvestigatorError`, written by `investigator._record_ai_failure()`
+from inside `investigate()`. Never research memory, never the registry;
+operational diagnostics only, same class as `worker_runs.jsonl` itself.
+Each row: `stage` (`empty_response` | `malformed_json` | `not_object` |
+`timeout` | `process_error` | `invocation_error` | `binary_config`), the
+exception `message`, and a **truncated** `raw_response_excerpt` (capped at
+`investigator.AI_FAILURE_RAW_EXCERPT_MAX`, 4000 chars) plus
+`raw_response_length`/`raw_response_truncated` — enough to tell "the AI
+said nothing" from "the AI wrote three paragraphs of prose with no JSON"
+from "the JSON was truncated mid-object" without re-running anything.
+`parse_ai_output()` also now tolerates a single JSON object surrounded by
+harmless extra text (an unfenced "Here is my proposal:" preamble, say) —
+see `investigator._extract_json_object()` — before falling back to this
+diagnostic path; it still rejects, unmodified, anything that isn't
+structurally a single clean JSON object once that narrow trimming is
+applied.
 
 ## Status — `--status` (read-only)
 
