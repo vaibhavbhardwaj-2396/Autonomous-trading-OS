@@ -108,6 +108,7 @@ ones it can actually prove:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional
@@ -125,7 +126,55 @@ PROMPT_PATH = PROJECT_ROOT / "routines" / "research_investigate.md"
 # for what this can and cannot be proven to enforce.
 RESEARCH_AI_ADD_DIRS = ("research", "routines")
 RESEARCH_AI_TIMEOUT_SECONDS = 300
-CLAUDE_BINARY = "claude"
+
+# The Claude Code executable the Research AI subprocess invokes. A bare
+# "claude" resolves via the invoking process's PATH — which is exactly what
+# cron does not have (cron's PATH is minimal and does not include
+# ~/.local/bin, where the Claude Code installer puts the binary; run_cycle.sh
+# hits the identical issue and works around it with its own explicit
+# CLAUDE_BIN lookup). ENV_CLAUDE_BIN lets that path be configured per
+# deployment without editing code; DEFAULT_CLAUDE_BIN is this deployment's
+# known-good absolute path (the VPS's cron user is root). Both are read at
+# call time inside resolve_claude_binary(), never cached at import, so a
+# fix takes effect on the very next heartbeat.
+ENV_CLAUDE_BIN = "RESEARCH_AI_CLAUDE_BIN"
+DEFAULT_CLAUDE_BIN = "/root/.local/bin/claude"
+
+
+def resolve_claude_binary() -> str:
+    """The absolute path to the Claude Code executable, deterministically:
+    `RESEARCH_AI_CLAUDE_BIN` if set (stripped of surrounding whitespace),
+    else `DEFAULT_CLAUDE_BIN`. Never falls back to a bare "claude" — that
+    would silently reintroduce the PATH dependency this function exists to
+    remove."""
+    override = (os.environ.get(ENV_CLAUDE_BIN) or "").strip()
+    return override or DEFAULT_CLAUDE_BIN
+
+
+def _validate_claude_binary(path: str) -> None:
+    """Fail closed, with a clear and actionable message, before ever calling
+    subprocess.run — a bare `[Errno 2] No such file or directory: 'claude'`
+    tells nobody that the fix is to set RESEARCH_AI_CLAUDE_BIN. Not cached:
+    checked once per _default_runner() call, so re-installing or re-linking
+    the binary is picked up on the very next heartbeat with no code change.
+    Raises InvestigatorError (never a bare OSError) — the same boundary-
+    failure type every other _default_runner() failure raises, so a caller
+    never needs a second except clause for this."""
+    p = Path(path)
+    if not p.is_absolute():
+        raise InvestigatorError(
+            f"{ENV_CLAUDE_BIN} (or the default) must be an absolute path, got "
+            f"{path!r} — a bare command name depends on the invoking process's "
+            f"PATH, which is exactly what breaks this under cron.")
+    if not p.exists():
+        raise InvestigatorError(
+            f"Claude Code executable not found at {path!r}. Set {ENV_CLAUDE_BIN} "
+            f"to the correct absolute path (default: {DEFAULT_CLAUDE_BIN!r}).")
+    if not os.access(p, os.X_OK):
+        raise InvestigatorError(
+            f"Claude Code executable at {path!r} is not executable "
+            f"(chmod +x it, or set {ENV_CLAUDE_BIN} to a runnable path).")
+
 
 DEFAULT_SOURCE = "research_investigator.ai"
 
@@ -225,11 +274,17 @@ def build_prompt(digest: dict, *, prompt_path: Path = PROMPT_PATH) -> str:
 def _default_runner(prompt: str) -> str:
     """The real Research AI process — its own identity, its own prompt, its
     own (narrower) --add-dir scope. Reuses exactly the invocation shape
-    run_cycle.sh already uses (`claude -p <prompt> --permission-mode
+    run_cycle.sh already uses (`<claude_bin> -p <prompt> --permission-mode
     acceptEdits --add-dir <dir>`), never run_cycle.sh itself, and never the
-    live agent's prompts, briefing, or session. Not exercised by any test in
-    this slice."""
-    cmd = [CLAUDE_BINARY, "-p", prompt, "--permission-mode", "acceptEdits"]
+    live agent's prompts, briefing, or session. The executable path is
+    resolved via resolve_claude_binary() (RESEARCH_AI_CLAUDE_BIN, else
+    DEFAULT_CLAUDE_BIN) and validated before invocation — never a bare
+    "claude" looked up on PATH. Not exercised by any test in this slice
+    (every test injects its own `runner`); resolve_claude_binary() and
+    _validate_claude_binary() ARE tested directly."""
+    claude_bin = resolve_claude_binary()
+    _validate_claude_binary(claude_bin)
+    cmd = [claude_bin, "-p", prompt, "--permission-mode", "acceptEdits"]
     for d in RESEARCH_AI_ADD_DIRS:
         cmd += ["--add-dir", str(PROJECT_ROOT / d)]
     try:

@@ -30,6 +30,7 @@ from research.store import Store, now_ist  # noqa: E402
 from research.contracts import Contract  # noqa: E402
 from research.brain import hypothesis_intake as hi  # noqa: E402
 from research.brain import worker as w  # noqa: E402
+from research.brain import investigator as inv  # noqa: E402
 from research import memory as rm  # noqa: E402
 
 PASSED, FAILED = 0, 0
@@ -660,6 +661,61 @@ check("O: --status on a machine with NO telemetry file does not crash",
 _rc_status = w.main(["--status", "--no-notify"])
 check("O: worker.main(['--status']) returns 0 and opens no Store / takes no lock",
       _rc_status == 0)
+
+
+# ---------------------------------------------------------------------------
+print("\n--- P: worker stays bounded when discovery fails with the cron-PATH error ---")
+# ---------------------------------------------------------------------------
+# research.brain.investigator._default_runner now raises InvestigatorError
+# (never a bare OSError) when the configured Claude Code executable cannot be
+# resolved — exactly what cron hit as `[Errno 2] No such file or directory:
+# 'claude'`. Prove the worker's own bounding/telemetry/isolation are
+# unaffected by that specific failure mode.
+
+_calls = {"n": 0}
+
+
+def _claude_bin_missing_runner(prompt):
+    """Simulates _default_runner()'s new fail-closed path without touching a
+    real subprocess — same exception type and message shape it now raises."""
+    _calls["n"] += 1
+    raise inv.InvestigatorError(
+        f"Claude Code executable not found at '/root/.local/bin/claude'. Set "
+        f"{inv.ENV_CLAUDE_BIN} to the correct absolute path.")
+
+
+s = fresh_store("p")
+reg = fresh_registry("p")
+st = fresh_state("p")
+r_p = w.run_worker_cycle(s, now_ist(),
+                         limits=w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=900),
+                         registry_dir=reg, runner=_claude_bin_missing_runner, state_path=st)
+s.close()
+check("P: worker.run_worker_cycle returns a complete result, never raises, "
+      "when discovery fails to resolve the Claude binary",
+      isinstance(r_p, w.WorkerRunResult))
+check("P: the failure is recorded in telemetry errors with the actionable env var name",
+      any(inv.ENV_CLAUDE_BIN in e for e in r_p.errors), str(r_p.errors))
+check("P: no draft is created and no experiment side effect occurs",
+      r_p.proposals_created == 0 and r_p.experiments_run == 0, str(r_p))
+check("P: nothing was written to the registry", not list(reg.glob("*.json")))
+check("P: exactly max_discovery_attempts (1) call was made — bounded, no internal retry storm",
+      _calls["n"] == 1, str(_calls))
+check("P: an error cycle does NOT set a cooldown (a broken binary must keep surfacing "
+      "as an error every heartbeat, never go silently quiet)",
+      "cooldown_until" not in json.loads(st.read_text()), st.read_text())
+r_p2 = w.run_worker_cycle(s2 := fresh_store("p2"), now_ist(),
+                          limits=w.WorkerLimits(max_discovery_attempts=1, cooldown_seconds=0),
+                          registry_dir=reg, runner=_claude_bin_missing_runner, state_path=st)
+s2.close()
+check("P: a second heartbeat after the failure still returns cleanly (no crash loop)",
+      isinstance(r_p2, w.WorkerRunResult) and r_p2.errors)
+check("P: the second heartbeat made exactly one more bounded attempt (2 total, not a storm)",
+      _calls["n"] == 2, str(_calls))
+check("P: worker.py itself still imports no engine / paper / broker module "
+      "(the investigator-side fix adds no worker-side import)",
+      not any(m.split(".")[0] in ("engine", "paper") for m in
+              re.findall(r"^\s*(?:from|import)\s+([.\w]+)", _code_only(WORKER_SRC), re.MULTILINE)))
 
 
 shutil.rmtree(TMP, ignore_errors=True)

@@ -20,6 +20,7 @@ mocked via an injected `runner` callable, per the slice's own mandate.
 Run with:  python -m tests.test_research_investigator
 """
 
+import os
 import re
 import sys
 import json
@@ -262,8 +263,10 @@ check("investigator.py's code never CALLS into engine.journal",
       "engine.journal" not in code)
 check("investigator.py's code never references memory/state.json",
       "state.json" not in code)
-check("investigator.py's code never references .env",
-      ".env" not in code)
+check("investigator.py's code never references the .env FILE "
+      "(os.environ.get(...) for a named var, e.g. RESEARCH_AI_CLAUDE_BIN, is "
+      "reading an env var, not opening the .env secrets file)",
+      ".env" not in code.replace("os.environ", ""))
 
 _EVAL_EXEC_RE = re.compile(r"\beval\s*\(|\bexec\s*\(|(?<!re\.)\bcompile\s*\(")
 check("investigator.py contains no eval/exec/compile call",
@@ -379,6 +382,122 @@ check("the NoProposal carries the AI's stated reason",
       r8.reason == "nothing in the digest stood out")
 check("a no_proposal response writes nothing to the registry",
       registry_files(reg8) == set())
+
+
+# ---------------------------------------------------------------------------
+print("\n--- 9: Claude Code executable resolution (cron PATH fix) ---")
+# ---------------------------------------------------------------------------
+# cron's minimal PATH does not include ~/.local/bin, so a bare "claude" (a
+# PATH lookup) fails under cron with [Errno 2] No such file or directory,
+# even though the interactive shell resolves it fine. resolve_claude_binary()
+# / _validate_claude_binary() replace that PATH lookup with a deterministic,
+# configurable, validated absolute path.
+
+_saved_env = os.environ.get(inv.ENV_CLAUDE_BIN)
+os.environ.pop(inv.ENV_CLAUDE_BIN, None)
+try:
+    check("9.1: with no override, resolve_claude_binary() returns the configured default",
+          inv.resolve_claude_binary() == inv.DEFAULT_CLAUDE_BIN, inv.resolve_claude_binary())
+    check("9.1: the default is an absolute path (never a bare PATH-dependent name)",
+          Path(inv.DEFAULT_CLAUDE_BIN).is_absolute())
+    check("9.1: the default is this deployment's known Claude Code path",
+          inv.DEFAULT_CLAUDE_BIN == "/root/.local/bin/claude")
+
+    os.environ[inv.ENV_CLAUDE_BIN] = "/opt/custom/claude"
+    check("9.2: RESEARCH_AI_CLAUDE_BIN overrides the default",
+          inv.resolve_claude_binary() == "/opt/custom/claude")
+    os.environ[inv.ENV_CLAUDE_BIN] = "  /opt/custom/claude  "
+    check("9.2: surrounding whitespace in the env var is stripped",
+          inv.resolve_claude_binary() == "/opt/custom/claude")
+    os.environ[inv.ENV_CLAUDE_BIN] = ""
+    check("9.2: a blank override falls back to the default (never an empty command)",
+          inv.resolve_claude_binary() == inv.DEFAULT_CLAUDE_BIN)
+finally:
+    os.environ.pop(inv.ENV_CLAUDE_BIN, None)
+    if _saved_env is not None:
+        os.environ[inv.ENV_CLAUDE_BIN] = _saved_env
+
+# 9.3: a missing executable is a clear, actionable InvestigatorError
+_missing = str(TMP / "no-such-claude-binary")
+try:
+    inv._validate_claude_binary(_missing)
+    _raised = None
+except Exception as e:
+    _raised = e
+check("9.3: a missing executable raises InvestigatorError (never a bare OSError/[Errno 2])",
+      isinstance(_raised, inv.InvestigatorError), str(_raised))
+check("9.3: the error names the missing path and the env var that fixes it",
+      _raised is not None and _missing in str(_raised) and inv.ENV_CLAUDE_BIN in str(_raised),
+      str(_raised))
+
+# 9.4: a relative / bare command name is refused outright — resolving it would
+# silently reintroduce the exact PATH dependency this fix removes.
+try:
+    inv._validate_claude_binary("claude")
+    _raised_rel = None
+except Exception as e:
+    _raised_rel = e
+check("9.4: a non-absolute path is refused (this IS the cron bug being fixed)",
+      isinstance(_raised_rel, inv.InvestigatorError)
+      and "absolute" in str(_raised_rel).lower(), str(_raised_rel))
+
+# 9.5: an existing, executable file validates cleanly (no exception)
+_ok_bin = TMP / "fake-claude"
+_ok_bin.write_text("#!/bin/sh\necho ok\n")
+_ok_bin.chmod(0o755)
+_validated_ok = True
+try:
+    inv._validate_claude_binary(str(_ok_bin))
+except inv.InvestigatorError:
+    _validated_ok = False
+check("9.5: an absolute, existing, executable path validates without error", _validated_ok)
+
+# 9.6: a non-executable file is refused with a distinct, actionable message
+_noexec_bin = TMP / "not-executable-claude"
+_noexec_bin.write_text("not a script")
+_noexec_bin.chmod(0o644)
+try:
+    inv._validate_claude_binary(str(_noexec_bin))
+    _raised_noexec = None
+except Exception as e:
+    _raised_noexec = e
+check("9.6: a non-executable file is refused (chmod +x guidance)",
+      _raised_noexec is not None and "not executable" in str(_raised_noexec).lower(),
+      str(_raised_noexec))
+
+# 9.7: end to end through investigate() with the REAL _default_runner (still
+# never touching the real claude binary — the configured path is broken on
+# purpose) — the failure surfaces as InvestigatorError, not [Errno 2], and
+# nothing is written.
+_saved_env2 = os.environ.get(inv.ENV_CLAUDE_BIN)
+os.environ[inv.ENV_CLAUDE_BIN] = str(TMP / "still-missing-claude")
+store9 = fresh_store("claudebin")
+reg9 = fresh_registry("claudebin")
+_threw, _e2e_msg = False, ""
+try:
+    inv.investigate(store9, "2024-05-12", runner=inv._default_runner, registry_dir=reg9)
+except inv.InvestigatorError as e:
+    _threw, _e2e_msg = True, str(e)
+finally:
+    os.environ.pop(inv.ENV_CLAUDE_BIN, None)
+    if _saved_env2 is not None:
+        os.environ[inv.ENV_CLAUDE_BIN] = _saved_env2
+    store9.close()
+check("9.7: investigate() with the real _default_runner + a broken "
+      "RESEARCH_AI_CLAUDE_BIN raises InvestigatorError end to end (not a bare [Errno 2])",
+      _threw and "Errno 2" not in _e2e_msg and inv.ENV_CLAUDE_BIN in _e2e_msg, _e2e_msg)
+check("9.7: nothing was written to the registry when resolution fails",
+      registry_files(reg9) == set())
+
+# 9.8: isolation + no hard-coded observed value — the fix adds no new import
+# and no fixed market/account rupee amount.
+_isrc = re.sub(r'"""[\s\S]*?"""', "",
+              (Path(__file__).parent.parent / "research" / "brain" / "investigator.py").read_text())
+_iimports = re.findall(r"^\s*(?:from|import)\s+([.\w]+)", _isrc, re.MULTILINE)
+check("9.8: investigator.py still imports no engine / broker / paper module",
+      not any(m.split(".")[0] in ("engine", "paper") for m in _iimports), str(_iimports))
+check("9.8: no observed live market/account amount is hard-coded by this fix",
+      not any(t in _isrc for t in ("32.31", "63339", "63307", "570447", "570000")))
 
 
 # ---------------------------------------------------------------------------

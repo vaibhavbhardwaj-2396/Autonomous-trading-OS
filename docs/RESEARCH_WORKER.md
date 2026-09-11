@@ -122,6 +122,25 @@ time, one discovery attempt, no unbounded historical scan, no parallel
 `claude` invocations. Widen only after watching `logs/research_worker.log`
 and VPS load.
 
+### The Claude Code executable — `RESEARCH_AI_CLAUDE_BIN`
+
+Discovery shells out to Claude Code (`research.brain.investigator.
+_default_runner`). cron's PATH is minimal and does not include
+`~/.local/bin` (the same reason `run_cycle.sh` resolves its own `CLAUDE_BIN`
+explicitly rather than trusting `command -v claude`) — a bare `"claude"`
+resolved via PATH fails under cron with `[Errno 2] No such file or directory:
+'claude'` even though it works fine in an interactive shell.
+
+`research.brain.investigator.resolve_claude_binary()` fixes this
+deterministically: `RESEARCH_AI_CLAUDE_BIN` if set, else
+`DEFAULT_CLAUDE_BIN` = `/root/.local/bin/claude` — this deployment's actual
+install path, so **no cron env var is needed**; `deploy/research.cron` needs
+no change. The resolved path is validated (absolute, exists, executable)
+*before* the subprocess call, raising a clear `InvestigatorError` naming the
+broken path and the env var to fix it — never a bare `OSError`/`[Errno 2]`.
+Set `RESEARCH_AI_CLAUDE_BIN=/some/other/path` only if this deployment's
+Claude Code install path ever changes, or for a non-`root` install.
+
 ## Concurrency / idempotency
 
 - **`research/.worker.lock`** — a POSIX `flock`. A second concurrent
