@@ -593,6 +593,58 @@ store10.close()
 
 
 # ---------------------------------------------------------------------------
+print("\n--- 11: _default_runner() feeds the prompt via STDIN, never argv "
+      "('Argument list too long' fix) ---")
+# ---------------------------------------------------------------------------
+# The real production failure this closes: [Errno 7] Argument list too long
+# — the digest-embedding prompt grows over time and eventually exceeds the
+# kernel's per-argument size limit when passed as a `-p <prompt>` argv
+# element. subprocess.run() itself is mocked here (never a real `claude`
+# invocation, per this file's own mandate) purely to inspect HOW
+# _default_runner() would have invoked it.
+
+_captured = {}
+
+
+def _fake_run(cmd, *, input=None, **kwargs):  # noqa: A002 - matches subprocess.run's own name
+    _captured["cmd"] = cmd
+    _captured["input"] = input
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"no_proposal": true, "reason": "test"}'
+        stderr = ""
+    return _Proc()
+
+
+_huge_prompt = "x" * 500_000  # comfortably over Linux's 128 KiB single-arg limit
+_orig_subprocess_run = inv.subprocess.run
+_orig_validate_bin = inv._validate_claude_binary
+inv.subprocess.run = _fake_run
+inv._validate_claude_binary = lambda path: None  # bypass the existence/exec checks —
+# resolve_claude_binary() would otherwise point at DEFAULT_CLAUDE_BIN, which
+# does not exist on this test machine; only the argv/stdin SHAPE of the
+# call matters for this test, not whether a real binary is present.
+try:
+    inv._default_runner(_huge_prompt)
+finally:
+    inv.subprocess.run = _orig_subprocess_run
+    inv._validate_claude_binary = _orig_validate_bin
+
+check("11.1: the huge prompt is NOT present anywhere in the constructed argv",
+      not any(_huge_prompt in str(arg) for arg in _captured.get("cmd", [])),
+      [len(str(a)) for a in _captured.get("cmd", [])])
+check("11.2: the prompt was instead passed via subprocess.run(..., input=...)",
+      _captured.get("input") == _huge_prompt)
+check("11.3: '-p' is still present in argv (print mode is still requested)",
+      "-p" in _captured.get("cmd", []), _captured.get("cmd"))
+check("11.4: --permission-mode acceptEdits and --add-dir are still passed as argv flags",
+      "--permission-mode" in _captured.get("cmd", [])
+      and "acceptEdits" in _captured.get("cmd", [])
+      and "--add-dir" in _captured.get("cmd", []), _captured.get("cmd"))
+
+
+# ---------------------------------------------------------------------------
 for s in (store, store_f, store2, store3, store4, store6, store6b, store7, store8):
     s.close()
 

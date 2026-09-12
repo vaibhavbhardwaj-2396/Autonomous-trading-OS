@@ -13,10 +13,17 @@ that call, and nothing more.
           |                           nothing else goes in
           v
     runner(prompt)                    the Research AI process — injectable;
-          |                           production default shells out to the
-          |                           same `claude -p ...` mechanism
-          |                           run_cycle.sh already uses, as its own
-          |                           separate process, scoped narrower
+          |                           production default shells out to
+          |                           `claude -p` as its own separate
+          |                           process, scoped narrower than
+          |                           run_cycle.sh's own invocation — and,
+          |                           unlike that one, feeds the prompt via
+          |                           STDIN, never as a command-line
+          |                           argument (this prompt embeds the full
+          |                           digest and grows over time; run_cycle.
+          |                           sh's does not — see _default_runner()'s
+          |                           own docstring for the kernel limit
+          |                           this avoids)
           v
     parse_ai_output()                 strict JSON parse only — no eval, no
           |                           exec, no compile, anywhere in this file
@@ -320,23 +327,33 @@ def build_prompt(digest: dict, *, prompt_path: Path = PROMPT_PATH) -> str:
 
 def _default_runner(prompt: str) -> str:
     """The real Research AI process — its own identity, its own prompt, its
-    own (narrower) --add-dir scope. Reuses exactly the invocation shape
-    run_cycle.sh already uses (`<claude_bin> -p <prompt> --permission-mode
-    acceptEdits --add-dir <dir>`), never run_cycle.sh itself, and never the
-    live agent's prompts, briefing, or session. The executable path is
-    resolved via resolve_claude_binary() (RESEARCH_AI_CLAUDE_BIN, else
-    DEFAULT_CLAUDE_BIN) and validated before invocation — never a bare
-    "claude" looked up on PATH. Not exercised by any test in this slice
-    (every test injects its own `runner`); resolve_claude_binary() and
-    _validate_claude_binary() ARE tested directly."""
+    own (narrower) --add-dir scope. The executable path is resolved via
+    resolve_claude_binary() (RESEARCH_AI_CLAUDE_BIN, else DEFAULT_CLAUDE_BIN)
+    and validated before invocation — never a bare "claude" looked up on
+    PATH. Not exercised by any test in this slice (every test injects its
+    own `runner`); resolve_claude_binary() and _validate_claude_binary()
+    ARE tested directly.
+
+    The prompt is passed via STDIN (`-p` with no positional value,
+    `subprocess.run(..., input=prompt)`), never as a command-line argument.
+    This module's prompt embeds the full research digest as JSON
+    (build_prompt()) — unlike run_cycle.sh's own, much smaller, roughly
+    fixed-size live-agent prompt, this one GROWS over time as more evidence,
+    hypotheses, and registry entries accumulate. Passed as a single argv
+    element, that eventually exceeds the kernel's single-argument size
+    limit (Linux's MAX_ARG_STRLEN, 128 KiB — a per-argument cap, tighter
+    than and independent of the total ARG_MAX headroom `ulimit -s` implies)
+    and every invocation starts failing with a bare `OSError`/
+    `[Errno 7] Argument list too long`, exactly the failure mode this
+    fix closes. Stdin has no such kernel limit."""
     claude_bin = resolve_claude_binary()
     _validate_claude_binary(claude_bin)
-    cmd = [claude_bin, "-p", prompt, "--permission-mode", "acceptEdits"]
+    cmd = [claude_bin, "-p", "--permission-mode", "acceptEdits"]
     for d in RESEARCH_AI_ADD_DIRS:
         cmd += ["--add-dir", str(PROJECT_ROOT / d)]
     try:
         proc = subprocess.run(
-            cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True,
+            cmd, input=prompt, cwd=str(PROJECT_ROOT), capture_output=True, text=True,
             timeout=RESEARCH_AI_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as e:
