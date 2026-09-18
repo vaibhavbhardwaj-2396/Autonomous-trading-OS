@@ -69,7 +69,7 @@ client = app.test_client()
 
 PROTECTED_GET_ROUTES = [
     "/account", "/positions", "/orders", "/trades", "/risk", "/regime",
-    "/research/drafts", "/research/evidence", "/research/areas",
+    "/research/drafts", "/research/evidence", "/research/areas", "/research/worker-status",
     "/strategies", "/backtests",
 ]
 
@@ -88,6 +88,8 @@ REAL_REGIME_JSONL = PROJECT_ROOT / "memory" / "regime_log.jsonl"
 REAL_MARKET_DB = PROJECT_ROOT / "research" / "market_memory.db"
 REAL_STRATEGIES_REGISTRY = PROJECT_ROOT / "strategies" / "registry"
 REAL_RESEARCH_REGISTRY = PROJECT_ROOT / "research" / "registry"
+REAL_WORKER_RUN_LOG = PROJECT_ROOT / "research" / "worker_runs.jsonl"
+REAL_WORKER_STATE = PROJECT_ROOT / "research" / ".worker_state.json"
 
 
 def _fingerprint_tree(path: Path) -> str:
@@ -116,6 +118,8 @@ def _fingerprint_all() -> dict:
         "market_memory.db": _fingerprint_tree(REAL_MARKET_DB),
         "strategies/registry": _fingerprint_tree(REAL_STRATEGIES_REGISTRY),
         "research/registry": _fingerprint_tree(REAL_RESEARCH_REGISTRY),
+        "research/worker_runs.jsonl": _fingerprint_tree(REAL_WORKER_RUN_LOG),
+        "research/.worker_state.json": _fingerprint_tree(REAL_WORKER_STATE),
     }
 
 
@@ -198,6 +202,9 @@ check("D: strategies/registry/ is byte-identical (no StrategyVersion saved)",
       before["strategies/registry"] == after["strategies/registry"])
 check("D: research/registry/ is byte-identical (no Contract locked/approved)",
       before["research/registry"] == after["research/registry"])
+check("D: worker telemetry and cooldown bookmark are byte-identical after status reads",
+      before["research/worker_runs.jsonl"] == after["research/worker_runs.jsonl"]
+      and before["research/.worker_state.json"] == after["research/.worker_state.json"])
 
 
 # ===========================================================================
@@ -241,6 +248,12 @@ check("E: /research/evidence returns the digest's evidence-section shape",
 
 r = client.get("/research/areas", headers=AUTH)
 check("E: /research/areas returns an empty list cleanly", r.get_json()["areas"] == [])
+
+r = client.get("/research/worker-status", headers=AUTH)
+worker_status = r.get_json()
+check("E: /research/worker-status exposes telemetry and queue admission without running work",
+      {"heartbeats_recorded", "last_heartbeat_at", "last_queue_health", "recent_errors"}
+      <= worker_status.keys(), str(worker_status))
 
 r = client.get("/strategies", headers=AUTH)
 check("E: /strategies returns an empty list cleanly on the real registry",

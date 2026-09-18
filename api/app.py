@@ -15,6 +15,7 @@ argument. Every other route remains exactly what it always was: read-only.
     GET /research/drafts             |
     GET /research/evidence           |
     GET /research/areas              |
+    GET /research/worker-status      |
     GET /strategies                  |
     GET /backtests                  /
 
@@ -244,6 +245,11 @@ def create_app() -> Flask:
     @auth.require_auth
     def research_areas_route():
         return jsonify(data.get_research_areas(data.get_default_store()))
+
+    @app.route("/research/worker-status", methods=["GET"])
+    @auth.require_auth
+    def research_worker_status():
+        return jsonify(data.get_research_worker_status())
 
     # -- Strategies / backtests ---------------------------------------------
 

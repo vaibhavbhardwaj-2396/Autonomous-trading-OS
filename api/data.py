@@ -21,6 +21,7 @@ existing module it reads through:
     research/evidence              -> research.brain.digest's evidence
                                       section (Slice V)
     research/areas                 -> research.brain.research_areas
+    research/worker-status         -> research.brain.worker.worker_status
     strategies                     -> strategies.registry
     backtests                      -> research.memory's research_note log,
                                       filtered to notes
@@ -57,6 +58,7 @@ from research.store import Store, iso, now_ist
 from research import memory as rm
 from research.brain import draft_backlog, research_areas
 from research.brain import digest as digest_mod
+from research.brain import worker as research_worker
 from strategies import registry as sreg
 
 from . import broker_truth
@@ -458,6 +460,20 @@ def get_research_areas(store: Store) -> dict:
     except Exception as e:
         raise DataSourceError("research areas are unavailable") from e
     return {"areas": areas, "count": len(areas), "as_of": iso(now_ist())}
+
+
+def get_research_worker_status() -> dict:
+    """The continuous worker's own telemetry summary.
+
+    ``worker_status`` only reads its append-only JSONL telemetry and small
+    cooldown bookmark. It never opens the research Store, acquires the worker
+    lock, invokes an AI provider, or starts research work; this API adapter
+    deliberately adds no behaviour beyond that authoritative view.
+    """
+    try:
+        return research_worker.worker_status()
+    except Exception as e:
+        raise DataSourceError("research worker telemetry is unavailable") from e
 
 
 # ---------------------------------------------------------------------------

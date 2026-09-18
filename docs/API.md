@@ -163,6 +163,7 @@ All protected endpoints require the bearer token above. All are `GET` only.
 | `GET /research/drafts` | `research.brain.draft_backlog.build_backlog()` | pending-review DRAFT Contracts |
 | `GET /research/evidence` | `research.brain.digest.build_digest()`'s evidence section | PROMISING/WEAK/INCONCLUSIVE/CONTRADICTED verdicts |
 | `GET /research/areas` | `research.brain.research_areas.groups_as_dicts()` | hypothesis-to-area tags |
+| `GET /research/worker-status` | `research.brain.worker.worker_status()` | latest heartbeat, cooldown, errors, limits, and discovery queue-admission decision; telemetry-only read |
 | `GET /strategies` | `strategies.registry.list_versions()` | registered StrategyVersions, `?limit=` |
 | `GET /backtests` | `research.memory`'s research-note log | backtest **completion notes** only, see below |
 

@@ -446,6 +446,21 @@ export async function renderResearch() {
   const results = [];
 
   results.push(
+    await load("/research/worker-status", "research-worker-cards", (data) => {
+      const queue = data.last_queue_health || {};
+      const decision = queue.decision || {};
+      const blocked = decision.discovery_allowed === false;
+      const reasons = (decision.blocking_reasons || []).join("; ");
+      el("research-worker-cards").innerHTML = [
+        { label: "Last heartbeat", value: dt(data.last_heartbeat_at) },
+        { label: "Last cycle", value: (data.last_work_selected || []).join(", ") || "idle" },
+        { label: "Discovery admission", value: blocked ? "Backpressured" : "Allowed", cls: blocked ? "amber" : "good", detail: reasons || "queue below limits" },
+        { label: "Recent errors", value: num((data.recent_errors || []).length, 0), cls: (data.recent_errors || []).length ? "bad" : "good" },
+      ].map((card) => `<div class="card"><div class="label">${esc(card.label)}</div><div class="value ${card.cls || ""}">${esc(card.value)}</div><div class="subtext">${esc(card.detail || "")}</div></div>`).join("");
+    }, "Research worker telemetry unavailable")
+  );
+
+  results.push(
     await load("/research/drafts", "research-drafts", (data) => {
       table(
         el("research-drafts"),

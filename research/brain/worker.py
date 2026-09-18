@@ -1101,6 +1101,7 @@ def worker_status(*, run_log: Path = RUN_LOG, state_path: Path = STATE_PATH,
         "last_reassessment_eligible_count": (last or {}).get("reassessment_eligible_count"),
         "last_substrate_creations_attempted": (last or {}).get("substrate_creations_attempted"),
         "last_created_substrate_ids": (last or {}).get("created_substrate_ids") or [],
+        "last_queue_health": (last or {}).get("queue_health"),
         "last_no_work_reason": (last or {}).get("no_work_reason"),
         "last_errors": (last or {}).get("errors") or [],
         "last_runtime_budget_remaining_seconds": (round(max_rt - last_rt, 1)
@@ -1132,6 +1133,12 @@ def _print_status(st: dict) -> None:
           f"reassessment_eligible={st['last_reassessment_eligible_count']}")
     print(f"  substrate creation    : attempted="
           f"{st['last_substrate_creations_attempted']}  created={st['last_created_substrate_ids']}")
+    queue_health = st.get("last_queue_health") or {}
+    queue_decision = queue_health.get("decision") or {}
+    if queue_decision:
+        print(f"  discovery admission   : "
+              f"{'allowed' if queue_decision.get('discovery_allowed') else 'backpressured'}"
+              f" {queue_decision.get('blocking_reasons') or []}")
     rem = st["last_runtime_budget_remaining_seconds"]
     if rem is not None:
         print(f"  runtime budget left   : {rem}s of "
