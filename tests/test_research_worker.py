@@ -587,7 +587,11 @@ finally:
         else:
             os.environ[k] = v
 lim_cli = w.WorkerLimits.from_env(max_discovery_attempts=3, max_experiments=3,
-                                  max_runtime_seconds=900.0)
+                                  max_runtime_seconds=900.0,
+                                  # This fixture isolates the existing per-kind
+                                  # cap. Queue backpressure has its own test
+                                  # immediately below.
+                                  runnable_experiment_high_watermark=10)
 check("M: env RESEARCH_WORKER_* -> limits 3 / 3 / 900, concurrency still 1",
       lim_env.max_discovery_attempts == 3 and lim_env.max_experiments == 3
       and lim_env.max_runtime_seconds == 900.0 and lim_env.max_concurrent_experiments == 1)
@@ -608,6 +612,26 @@ check("M: the deeper batch runs at most 3 experiments even with 6 locked",
       r_m.experiments_run == 3, str(r_m))
 check("M: the deeper batch makes at most 3 discovery drafts even with 6 distinct ideas",
       r_m.proposals_created == 3, str(r_m))
+
+# Default queue policy: when downstream work is already at capacity, consume
+# it first and do not spend an AI call creating another draft.
+s = fresh_store("m_backpressure")
+reg = fresh_registry("m_backpressure")
+st = fresh_state("m_backpressure")
+for i in range(3):
+    make_locked_contract(f"EXP-MB-{i}", registry_dir=reg, locked_at=f"2024-03-0{i+1}T00:00:00")
+r_mb = w.run_worker_cycle(
+    s, now_ist(), limits=w.WorkerLimits(max_discovery_attempts=1, max_experiments=1,
+                                        cooldown_seconds=0),
+    registry_dir=reg, runner=lambda p: json.dumps(valid_ai_proposal()), state_path=st)
+s.close()
+check("M: downstream runnable backlog blocks fresh discovery by default",
+      r_mb.discovery_attempts == 0 and r_mb.experiments_run == 1, str(r_mb))
+check("M: queue-health telemetry explains why discovery was withheld",
+      r_mb.queue_health is not None
+      and r_mb.queue_health["decision"]["discovery_allowed"] is False
+      and "runnable experiment backlog" in r_mb.queue_health["decision"]["blocking_reasons"][0],
+      str(r_mb.queue_health))
 
 
 # ---------------------------------------------------------------------------

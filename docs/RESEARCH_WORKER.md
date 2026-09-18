@@ -154,6 +154,8 @@ main `.env`, since cron runs as root with it) and then by a CLI flag:
 | `max_experiments` | 1 | `RESEARCH_WORKER_MAX_EXPERIMENTS` | `--max-experiments` |
 | `max_promotions` | 1 | `RESEARCH_WORKER_MAX_PROMOTIONS` | `--max-promotions` |
 | `max_substrate_creations` | 1 | `RESEARCH_WORKER_MAX_SUBSTRATE_CREATIONS` | `--max-substrate-creations` |
+| `draft_backlog_high_watermark` | 3 | `RESEARCH_WORKER_DRAFT_BACKLOG_HIGH_WATERMARK` | — |
+| `runnable_experiment_high_watermark` | 2 | `RESEARCH_WORKER_RUNNABLE_EXPERIMENT_HIGH_WATERMARK` | — |
 | `max_runtime_seconds` | 300 | `RESEARCH_WORKER_MAX_RUNTIME_SECONDS` | `--max-runtime-seconds` |
 | `max_concurrent_experiments` | 1 | `RESEARCH_WORKER_MAX_CONCURRENT_EXPERIMENTS` | — (v0 rejects any other value) |
 | `cooldown_seconds` | 1800 | `RESEARCH_WORKER_COOLDOWN_SECONDS` | `--cooldown-seconds` |
@@ -169,6 +171,12 @@ cron ticks in that window exit immediately (lock held).
 time, one discovery attempt, no unbounded historical scan, no parallel
 `claude` invocations. Widen only after watching `logs/research_worker.log`
 and VPS load.
+
+Discovery is also admission-controlled. When either three reviewable drafts
+or two locked runnable experiments are already queued, the worker continues
+to promote and run existing work but will not create another Research AI
+discovery request. This is a high-water mark, not a discard rule: the queue
+must drain before discovery resumes.
 
 ### The Claude Code executable — `RESEARCH_AI_CLAUDE_BIN`
 
@@ -223,6 +231,7 @@ evidence_updates         distinct hypotheses whose verdict was (re)recorded
 no_work_reason           why the heartbeat was idle (null if it did work)
 errors                   [str] — a component failing is recorded, never raised out
 limits                   the effective WorkerLimits for this run
+queue_health             {snapshot, decision}; discovery admission decision and reasons
 notified                 whether a Telegram message went out
 opportunities_considered size of the opportunity pool this run (v1)
 promotions_attempted     autonomous draft->locked attempts this run (v1)

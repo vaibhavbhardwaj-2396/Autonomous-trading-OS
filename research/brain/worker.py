@@ -198,6 +198,7 @@ from control import runtime as ctrl
 # infrastructure state (control.resources) are deliberately two independent
 # axes rather than one combined thing.
 from control import resources as rg
+from . import queue_policy as qpol
 
 RESEARCH_DIR = Path(__file__).resolve().parent.parent
 RUN_LOG = RESEARCH_DIR / "worker_runs.jsonl"
@@ -236,6 +237,10 @@ class WorkerLimits:
     # only by this cap and by whether a substrate is actually available
     # (opportunity._available_split_key()).
     max_substrate_creations: int = 1
+    # Discovery is admission-controlled separately from its per-heartbeat
+    # cap: do not create fresh drafts while the downstream factory is full.
+    draft_backlog_high_watermark: int = 3
+    runnable_experiment_high_watermark: int = 2
 
     ENV = {
         "max_discovery_attempts": "RESEARCH_WORKER_MAX_DISCOVERY_ATTEMPTS",
@@ -247,6 +252,8 @@ class WorkerLimits:
         "summary_interval_seconds": "RESEARCH_WORKER_SUMMARY_INTERVAL_SECONDS",
         "max_promotions": "RESEARCH_WORKER_MAX_PROMOTIONS",
         "max_substrate_creations": "RESEARCH_WORKER_MAX_SUBSTRATE_CREATIONS",
+        "draft_backlog_high_watermark": "RESEARCH_WORKER_DRAFT_BACKLOG_HIGH_WATERMARK",
+        "runnable_experiment_high_watermark": "RESEARCH_WORKER_RUNNABLE_EXPERIMENT_HIGH_WATERMARK",
     }
 
     def __post_init__(self) -> None:
@@ -259,6 +266,9 @@ class WorkerLimits:
                     "max_substrate_creations"):
             if getattr(self, name) < 0:
                 raise ValueError(f"WorkerLimits.{name} must be >= 0")
+        for name in ("draft_backlog_high_watermark", "runnable_experiment_high_watermark"):
+            if getattr(self, name) < 1:
+                raise ValueError(f"WorkerLimits.{name} must be >= 1")
         for name in ("max_runtime_seconds", "cooldown_seconds", "summary_interval_seconds"):
             if getattr(self, name) < 0:
                 raise ValueError(f"WorkerLimits.{name} must be >= 0")
@@ -425,6 +435,10 @@ class WorkerRunResult(NamedTuple):
     "not_attempted" (set only by main(), which owns notification — see
     maybe_notify()). `notified` (bool) is retained for backward
     compatibility and is always exactly `telegram_status == "sent"`."""
+    queue_health: Optional[dict] = None
+    """Latest queue snapshot and discovery-admission decision observed during
+    this heartbeat. None only when the worker was paused before opening its
+    research store."""
 
     def as_row(self) -> dict:
         return dict(self._asdict())
@@ -550,6 +564,7 @@ def run_worker_cycle(
     promoted_hypothesis_ids: list = []
     promotion_outcomes: list = []
     reassessment_eligible_count = 0
+    queue_health: Optional[dict] = None
     experiments_attempted = 0
     discovery_attempts = 0
     substrate_creations_attempted = 0
@@ -667,7 +682,29 @@ def run_worker_cycle(
                     _prev["confidence_after"] = _prev_opp.confidence
                     _prev["lifecycle_after"] = _prev_opp.lifecycle_stage
 
-        discovery_available = _has_room("DISCOVER")
+        # Queue health is observed at every selection point, immediately
+        # before the action queue is built.  If it cannot be measured, fail
+        # closed for new AI discovery while leaving already-runnable work
+        # eligible; lack of queue visibility is never a reason to add more.
+        try:
+            snapshot = qpol.ResearchQueueSnapshot(
+                draft_count=len(hi.pending_drafts(registry_dir=registry_dir)),
+                locked_runnable_count=len(sched.eligible_contracts(store, registry_dir=registry_dir)),
+                reported_count=sum(1 for o in pool if o.evidence_verdict is not None),
+                promising_count=sum(1 for o in pool if o.lifecycle_stage == "PROMISING"),
+                robust_count=sum(1 for o in pool if o.lifecycle_stage == "ROBUST"),
+            )
+            decision = qpol.ResearchQueuePolicy(
+                draft_high_watermark=limits.draft_backlog_high_watermark,
+                runnable_experiment_high_watermark=limits.runnable_experiment_high_watermark,
+            ).decide(snapshot)
+            queue_health = {"snapshot": snapshot.to_dict(), "decision": decision.to_dict()}
+        except Exception as e:  # noqa: BLE001 — safe admission failure, not a worker crash
+            errors.append(f"queue_health: {type(e).__name__}: {e}")
+            decision = qpol.QueuePolicyDecision(False, ("queue health unavailable",))
+            queue_health = {"snapshot": None, "decision": decision.to_dict()}
+
+        discovery_available = _has_room("DISCOVER") and decision.discovery_allowed
         try:
             queue = opp.build_action_queue(
                 store, pool, registry_dir=registry_dir, discovery_available=discovery_available)
@@ -881,6 +918,7 @@ def run_worker_cycle(
         actions_succeeded=actions_attempted - actions_failed, actions_failed=actions_failed,
         discovery_attempts=discovery_attempts, experiments_attempted=experiments_attempted,
         ai_invocation_status=ai_invocation_status, telegram_status="not_attempted",
+        queue_health=queue_health,
     )
 
 
