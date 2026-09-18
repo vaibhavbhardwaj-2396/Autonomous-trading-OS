@@ -4,6 +4,19 @@
 
 const ESCAPE_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
+// A recorded queue decision is historical; absence cannot mean permission.
+export function discoveryAdmissionDisplay(status) {
+  const decision = status?.last_queue_health?.decision;
+  if (typeof decision?.discovery_allowed !== "boolean") {
+    return { value: "Unknown", cls: "amber", detail: "No queue decision recorded" };
+  }
+  const reasons = Array.isArray(decision.blocking_reasons)
+    ? decision.blocking_reasons.join("; ") : "";
+  return decision.discovery_allowed
+    ? { value: "Allowed last cycle", cls: "", detail: "Queue below limits at last measurement" }
+    : { value: "Backpressured last cycle", cls: "amber", detail: reasons || "Discovery withheld" };
+}
+
 export function esc(s) {
   if (s === null || s === undefined) return "";
   return String(s).replace(/[&<>"']/g, (c) => ESCAPE_MAP[c]);

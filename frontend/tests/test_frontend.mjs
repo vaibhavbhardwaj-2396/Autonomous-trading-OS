@@ -37,6 +37,16 @@ function check(name, cond, detail) {
 
 const fmt = await import("../js/format.js");
 
+check("missing telemetry does not imply permission to discover",
+  fmt.discoveryAdmissionDisplay({}).value === "Unknown"
+  && fmt.discoveryAdmissionDisplay({ last_queue_health: null }).value === "Unknown");
+check("recorded admission is labelled as historical",
+  fmt.discoveryAdmissionDisplay({ last_queue_health: { decision: { discovery_allowed: true } } }).value === "Allowed last cycle");
+check("backpressure preserves the recorded reason",
+  fmt.discoveryAdmissionDisplay({ last_queue_health: { decision: {
+    discovery_allowed: false, blocking_reasons: ["draft limit"],
+  } } }).detail === "draft limit");
+
 check("money() formats a positive number with the rupee sign", fmt.money(1500) === "₹1,500");
 check("money() formats a negative number with a leading minus, sign inside", fmt.money(-250) === "-₹250");
 check("money() renders null as an em dash", fmt.money(null) === "—");
