@@ -24,6 +24,12 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
 
+      # Live state is deliberately gitignored. Tests need the documented,
+      # non-secret bootstrap state, so create it only inside this disposable
+      # GitHub runner.
+      - name: Create test state
+        run: cp memory/state.json.template memory/state.json
+
       # Test modules are executable scripts that report their own summary and
       # call sys.exit(), so unittest discovery cannot import them safely.
       - name: Run test modules
