@@ -1,7 +1,15 @@
 // frontend/js/api.js — the ONLY place that talks to the network. Every view
-// module calls apiGet(path) and gets back a plain result object; nothing
-// else in this app constructs a URL, sets a header, or calls fetch()
-// directly. GET only — this dashboard has no write path, on purpose.
+// module calls apiGet(path) (or, for the two deliberate control actions,
+// apiPost(path, body)) and gets back a plain result object; nothing else
+// in this app constructs a URL, sets a header, or calls fetch() directly.
+//
+// outcome 2 note: apiPost exists for exactly two backend routes —
+// POST /control/mode (RUNNING/PAUSED/SAFE_MODE/STOPPED) and POST /ai/config
+// (provider/model selection) — both already validated, authenticated,
+// narrow write routes on the API itself (see api/app.py's own module
+// docstring). This file adds no new write capability of its own; it is
+// still true that nothing here can place, size, or modify an order, or
+// touch research/paper state.
 
 const CFG = window.DASHBOARD_CONFIG || {};
 const API_BASE_URL = (CFG.apiBaseUrl || "http://127.0.0.1:8787").replace(/\/+$/, "");
@@ -53,6 +61,50 @@ export async function apiGet(path) {
     return { ok: false, status: resp.status, error: "bad_response" };
   }
   return { ok: true, data: body };
+}
+
+/**
+ * POST `${API_BASE_URL}${path}` with a JSON body. Same result shape as
+ * apiGet(). Used ONLY by the two control-action forms (organism mode,
+ * AI provider) — see this file's own header comment.
+ */
+export async function apiPost(path, body) {
+  let resp;
+  try {
+    resp = await fetch(API_BASE_URL + path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+      },
+      body: JSON.stringify(body || {}),
+    });
+  } catch (e) {
+    return { ok: false, status: 0, error: "network" };
+  }
+
+  let responseBody = null;
+  try {
+    responseBody = await resp.json();
+  } catch (e) {
+    // fall through with responseBody still null
+  }
+
+  if (resp.status === 401) {
+    return { ok: false, status: 401, error: "unauthorized" };
+  }
+  if (!resp.ok) {
+    return {
+      ok: false,
+      status: resp.status,
+      error: "http",
+      detail: (responseBody && (responseBody.detail || responseBody.error)) || resp.statusText,
+    };
+  }
+  if (responseBody === null) {
+    return { ok: false, status: resp.status, error: "bad_response" };
+  }
+  return { ok: true, data: responseBody };
 }
 
 export function apiBaseUrlForDisplay() {

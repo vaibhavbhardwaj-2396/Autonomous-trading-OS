@@ -20,6 +20,8 @@
     <button data-view="paper">Paper</button>
     <button data-view="research">Research</button>
     <button data-view="strategies">Strategies</button>
+    <button data-view="control">Control</button>
+    <button data-view="artifacts">Artifacts</button>
   </nav>
 
   <main>
@@ -135,6 +137,59 @@
       <div class="readonly-note">
         Observation only — this dashboard cannot promote a StrategyVersion or run a backtest.
       </div>
+    </section>
+
+    <!-- ============================== Control ============================== -->
+    <section id="view-control" class="view">
+      <section class="panel">
+        <h2>Organism State</h2>
+        <div id="control-cards" class="grid"></div>
+        <div id="control-actions"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Resource Governor</h2>
+        <div id="resource-cards" class="grid"></div>
+      </section>
+
+      <section class="panel">
+        <h2>AI Provider</h2>
+        <div id="ai-cards" class="grid"></div>
+        <div id="ai-config-actions"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Mode Change History</h2>
+        <div id="control-history" class="table-wrap"></div>
+      </section>
+
+      <section class="panel">
+        <h2>AI Provider Switch History</h2>
+        <div id="ai-config-history" class="table-wrap"></div>
+      </section>
+
+      <div class="readonly-note">
+        Every action here requires a typed reason and is fully audited.
+        This can pause/resume research and paper/shadow work and select
+        the research AI provider — it can never place, size, or modify a
+        live order, and live execution can only ever be additionally
+        paused from here, never resumed (resuming live trading stays a
+        deliberate, separate human action via Telegram).
+      </div>
+    </section>
+
+    <!-- ============================== Artifacts ============================= -->
+    <section id="view-artifacts" class="view">
+      <section class="panel">
+        <h2>Artifact Explorer</h2>
+        <div id="artifact-filter"></div>
+        <div id="artifact-list" class="table-wrap"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Detail</h2>
+        <div id="artifact-detail" class="empty-state">Select an artifact above to inspect it.</div>
+      </section>
     </section>
   </main>
 

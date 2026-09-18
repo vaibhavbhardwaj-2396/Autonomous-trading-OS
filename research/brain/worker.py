@@ -159,7 +159,7 @@ import os
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from pathlib import Path
 from typing import Callable, Iterator, NamedTuple, Optional
 
@@ -178,6 +178,26 @@ from ..experiments import evaluator
 # investigator,digest}, none of which import this module, so there is no cycle.
 from ..overnight import _existing_duplicate as _proposal_duplicate_of
 from . import opportunity as opp
+# INTELLIGENT + EFFICIENT + TRACEABLE (outcome 2) — the LLM provider
+# abstraction. See llm.py's own module docstring for why this changes
+# nothing about investigate()'s existing runner seam.
+from . import llm
+# Priority Phase 4 — the global RUNNING/PAUSED/SAFE_MODE/STOPPED control
+# layer. control/ is a NEW, neutral, top-level package (a sibling of
+# research/, not part of it) that imports nothing from engine/, research/,
+# or paper/ — see control/runtime.py's own module docstring for exactly
+# why that matters. This is a genuinely new kind of import for this
+# module (a true top-level sibling, not a research-internal one), but it
+# adds no edge to the engine<->research isolation graph:
+# tests/test_kernel_isolation.py checks "research does not import
+# guardrails/execute/journal/broker" — control is none of those.
+from control import runtime as ctrl
+# STABLE + CONTROLLED — the Resource Governor. Same neutral, dependency-free
+# top-level package as control.runtime; see control/resources.py's own
+# module docstring for why organism state (control.runtime) and
+# infrastructure state (control.resources) are deliberately two independent
+# axes rather than one combined thing.
+from control import resources as rg
 
 RESEARCH_DIR = Path(__file__).resolve().parent.parent
 RUN_LOG = RESEARCH_DIR / "worker_runs.jsonl"
@@ -443,6 +463,30 @@ def _crash_result(*, started_wall, worker_id: str, limits: "WorkerLimits",
     )
 
 
+def _paused_result(*, started_wall, worker_id: str, limits: "WorkerLimits",
+                   mode: str, control_reason: str) -> "WorkerRunResult":
+    """A complete, valid, HONEST WorkerRunResult for a heartbeat that did
+    NOTHING because the global control layer (control/runtime.py) says
+    research is not currently allowed (PAUSED or STOPPED). Persisted
+    exactly like every other heartbeat — Phase 6's "every invocation
+    produces a record" stays true even while paused — but this heartbeat
+    touches NOTHING else: no store opened, no worker lock taken, no digest
+    built, no Research AI call. Exit code 0 — a deliberate pause is not a
+    failure, and main() deliberately does not send a Telegram message for
+    this (a routine paused skip every 10 minutes would be exactly the
+    spam Priority Task 0 already fixed the notification policy to avoid)."""
+    finished_wall = now_ist()
+    reason = f"global control mode is {mode}" + (f" ({control_reason})" if control_reason else "")
+    return WorkerRunResult(
+        started_at=iso(started_wall), finished_at=iso(finished_wall),
+        runtime_seconds=0.0, worker_id=worker_id, digest_as_of=None,
+        work_selected=[], proposals_created=0, drafts=[], duplicate_rejections=0,
+        experiments_run=0, experiment_outcomes=[], evidence_updates=0,
+        no_work_reason=reason, errors=[], limits=asdict(limits), notified=False,
+        run_id=worker_id, outcome="paused",
+    )
+
+
 # ---------------------------------------------------------------------------
 # The cycle — bounded, sequential, delegating every real step. `runner` is
 # injectable for exactly the reason overnight.run_overnight_cycle takes one:
@@ -498,6 +542,7 @@ def run_worker_cycle(
     experiment_outcomes: list = []
     touched_hids: set = set()
     no_work_reason: Optional[str] = None
+    mid_cycle_control_stop: Optional[str] = None
     action_log: list = []
 
     opportunities_considered = 0
@@ -582,6 +627,22 @@ def run_worker_cycle(
         iterations += 1
         if iterations > max_iterations:
             errors.append("action loop: iteration safety cap reached — stopping defensively")
+            break
+
+        # Priority Phase 4: re-checked every iteration, not just once at
+        # entry — a heartbeat already mid-cycle when the global mode
+        # changes to PAUSED/STOPPED must stop selecting NEW actions
+        # immediately, not run to its own runtime budget regardless. An
+        # action already dispatched this iteration is never interrupted
+        # mid-flight (a subprocess already in flight is left to finish on
+        # its own) — only the NEXT selection is prevented. Recorded via a
+        # dedicated variable, not no_work_reason directly, because the
+        # bookkeeping section below would otherwise overwrite it with a
+        # generic budget/discovery reason — see that section.
+        if not ctrl.research_allowed():
+            mid_cycle_control_stop = (
+                f"global control mode changed mid-cycle (now {ctrl.get_state()['mode']}) "
+                f"— stopped before selecting further work")
             break
 
         try:
@@ -755,7 +816,13 @@ def run_worker_cycle(
     elif not errors:
         # Nothing useful and nothing broke -> back off discovery for a while.
         new_state["cooldown_until"] = time.time() + limits.cooldown_seconds
-        if not work_selected:
+        if mid_cycle_control_stop:
+            # Takes priority over every other reason below — a global
+            # pause/stop mid-cycle is a MORE specific, MORE useful
+            # explanation than "no eligible work" or "budget exhausted",
+            # regardless of which (if any) action kind was selected first.
+            no_work_reason = mid_cycle_control_stop
+        elif not work_selected:
             if budget_left() <= 0:
                 no_work_reason = "runtime budget exhausted before any work could start"
             else:
@@ -1111,6 +1178,63 @@ def main(argv: Optional[list] = None) -> int:
 
     registry_dir = Path(args.registry_dir) if args.registry_dir else REGISTRY_DIR
 
+    # -- Priority Phase 4: the global control layer -------------------------
+    # Checked BEFORE the worker lock, BEFORE opening the store, BEFORE
+    # building the digest — "pause must actually prevent new expensive
+    # work from starting, not just change a UI label." A paused/stopped
+    # heartbeat still produces a real, persisted telemetry row (Phase 6's
+    # invariant holds even here) but touches nothing else and sends no
+    # Telegram message (see _paused_result's own docstring).
+    control_state = ctrl.get_state()
+    if not ctrl.research_allowed(control_state):
+        worker_id = _new_worker_id()
+        started_wall = now_ist()
+        result = _paused_result(
+            started_wall=started_wall, worker_id=worker_id, limits=limits,
+            mode=control_state["mode"], control_reason=control_state.get("reason") or "")
+        _persist_run(result)
+        if not args.quiet_on_success:
+            print(f"research worker: global control mode is {control_state['mode']} — "
+                  f"skipping this heartbeat entirely (no store opened, no lock taken).")
+        return 0
+
+    # -- STABLE + CONTROLLED: the Resource Governor --------------------------
+    # A second, independent axis from the control layer above — "is a human
+    # allowing this" vs "can the machine currently afford this." CRITICAL
+    # skips the heartbeat entirely, the same shape as a PAUSED/STOPPED skip
+    # (telemetry persisted, nothing else touched). CONSTRAINED/PRESSURED
+    # don't skip the heartbeat — they throttle it, by shrinking `limits`
+    # through the worker's OWN existing per-kind caps (no new stop/kill
+    # mechanism needed; see control/resources.py's module docstring on the
+    # THROTTLE-before-DEFER-before-PAUSE ladder).
+    resource_state = rg.get_resource_state()
+    if not rg.expensive_work_allowed(resource_state):
+        worker_id = _new_worker_id()
+        started_wall = now_ist()
+        result = _paused_result(
+            started_wall=started_wall, worker_id=worker_id, limits=limits,
+            mode="RESOURCE_GOVERNOR_CRITICAL",
+            control_reason="; ".join(resource_state["reasons"]) or "resource state is CRITICAL")
+        _persist_run(result)
+        if not args.quiet_on_success:
+            print(f"research worker: resource state is CRITICAL — skipping this "
+                  f"heartbeat entirely ({'; '.join(resource_state['reasons'])}).")
+        return 0
+    if rg.should_throttle(resource_state):
+        throttled = replace(
+            limits,
+            max_discovery_attempts=rg.allowed_concurrency(
+                limits.max_discovery_attempts, resource_state),
+            max_experiments=rg.allowed_concurrency(limits.max_experiments, resource_state),
+            max_promotions=rg.allowed_concurrency(limits.max_promotions, resource_state),
+            max_substrate_creations=rg.allowed_concurrency(
+                limits.max_substrate_creations, resource_state),
+        )
+        if not args.quiet_on_success:
+            print(f"research worker: resource state is {resource_state['state']} — "
+                  f"throttling this heartbeat ({'; '.join(resource_state['reasons'])}).")
+        limits = throttled
+
     try:
         with worker_lock():
             try:
@@ -1126,8 +1250,21 @@ def main(argv: Optional[list] = None) -> int:
             worker_id = _new_worker_id()
             try:
                 try:
+                    # INTELLIGENT + EFFICIENT + TRACEABLE (outcome 2) — the
+                    # provider abstraction. Constructing this is inert (see
+                    # llm.build_configured_runner's own docstring): nothing
+                    # touches the AI budget, a provider, or the store until
+                    # run_worker_cycle() actually selects a DISCOVER action
+                    # and investigate() calls this closure. Defaults to the
+                    # exact pre-existing Claude CLI behavior when
+                    # RESEARCH_AI_PROVIDER is unset.
+                    configured_runner = llm.build_configured_runner(
+                        store=store, cycle_id=worker_id,
+                        purpose="hypothesis_generation",
+                        trigger="scheduled discovery attempt")
                     result = run_worker_cycle(
-                        store, now_ist(), limits=limits, registry_dir=registry_dir)
+                        store, now_ist(), limits=limits, registry_dir=registry_dir,
+                        runner=configured_runner)
                 except Exception as e:  # noqa: BLE001 — run_worker_cycle() is designed
                     # to catch everything itself; if it somehow doesn't, degrade to a
                     # recorded, notified error cycle rather than let this heartbeat

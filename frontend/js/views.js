@@ -4,7 +4,7 @@
 // banner) — one endpoint failing never stops the others on the same page
 // from rendering.
 
-import { apiGet } from "./api.js";
+import { apiGet, apiPost } from "./api.js";
 import {
   esc, money, num, pnlClass, dt, badge, table, errorState,
   brokerCard, accountStaleNotice, accountInfoNotes,
@@ -544,6 +544,328 @@ export async function renderStrategies() {
         "No backtest runs recorded yet."
       );
     }, "Backtest records unavailable")
+  );
+
+  return results;
+}
+
+// --------------------------------------------------------------------------
+// Control (outcome 1: RUNNING/PAUSED/SAFE_MODE/STOPPED) + Resource Governor
+// + AI provider/model (outcome 2) — the FIRST tab on this dashboard with a
+// real write path. Every action still requires a typed reason, mirroring
+// the backend's own validation (api/app.py rejects a blank reason with
+// 400 before this ever reaches control/runtime.py or control/ai_config.py).
+// --------------------------------------------------------------------------
+
+const CONTROL_MODES = ["RUNNING", "PAUSED", "SAFE_MODE", "STOPPED"];
+const AI_PROVIDERS = ["anthropic_cli", "openai"];
+
+function controlModeCardsHtml(status) {
+  const modeCls = { RUNNING: "good", PAUSED: "amber", SAFE_MODE: "amber", STOPPED: "bad" }[status.mode] || "";
+  const livePaused = !!status.live_trading_paused;
+  return `
+    <div class="card">
+      <div class="label">Organism State</div>
+      <div class="value ${modeCls}">${esc(status.mode || "—")}</div>
+      <div class="subtext">since ${dt(status.changed_at)} by ${esc(status.actor || "—")}</div>
+    </div>
+    <div class="card">
+      <div class="label">Research / Paper</div>
+      <div class="value ${status.research_allowed ? "good" : "bad"}">${status.research_allowed ? "Allowed" : "Blocked"}</div>
+      <div class="subtext">data ingestion: ${status.data_ingestion_allowed ? "on" : "off"}</div>
+    </div>
+    <div class="card">
+      <div class="label">Live Execution</div>
+      <div class="value ${livePaused ? "bad" : "good"}">${livePaused ? "PAUSED" : "Active pause-gate off"}</div>
+      <div class="subtext">${status.live_paused_by_global_control ? "paused by global control" : esc(status.live_trading_pause_reason || "no global-control pause set")}</div>
+    </div>
+  `;
+}
+
+function resourceCardHtml(resource) {
+  if (!resource) return "";
+  const cls = { HEALTHY: "good", CONSTRAINED: "amber", PRESSURED: "amber", CRITICAL: "bad" }[resource.state] || "";
+  const snap = resource.snapshot || {};
+  const pct = (r) => (r === null || r === undefined ? "—" : `${Math.round(r * 100)}%`);
+  return `
+    <div class="card">
+      <div class="label">Resource State</div>
+      <div class="value ${cls}">${esc(resource.state || "—")}</div>
+      <div class="subtext">${(resource.reasons || []).join("; ") || "no pressure detected"}</div>
+    </div>
+    <div class="card">
+      <div class="label">CPU load ratio</div>
+      <div class="value">${snap.load_ratio === null || snap.load_ratio === undefined ? "—" : num(snap.load_ratio, 2)}</div>
+      <div class="subtext">${snap.cpu_count || "—"} vCPU</div>
+    </div>
+    <div class="card">
+      <div class="label">Memory available</div>
+      <div class="value">${pct(snap.mem_available_ratio)}</div>
+    </div>
+    <div class="card">
+      <div class="label">Disk free</div>
+      <div class="value">${pct(snap.disk_free_ratio)}</div>
+    </div>
+  `;
+}
+
+function aiCardHtml(ai) {
+  if (!ai) return "";
+  const budget = ai.budget || {};
+  return `
+    <div class="card">
+      <div class="label">AI Provider / Model</div>
+      <div class="value">${esc(ai.effective_provider || "—")}</div>
+      <div class="subtext">${esc(ai.effective_model || "—")}</div>
+    </div>
+    <div class="card">
+      <div class="label">Tokens Today</div>
+      <div class="value">${num(budget.tokens_today, 0)} / ${num(budget.max_tokens_per_day, 0)}</div>
+    </div>
+    <div class="card">
+      <div class="label">Expensive Calls Today</div>
+      <div class="value">${num(budget.expensive_calls_today, 0)} / ${num(budget.max_expensive_calls_per_day, 0)}</div>
+      <div class="subtext">last call: ${dt(budget.last_call_at)}</div>
+    </div>
+  `;
+}
+
+function controlActionsHtml(currentMode) {
+  return `
+    <form id="control-mode-form" class="control-form">
+      <label>Set organism mode
+        <select name="mode">
+          ${CONTROL_MODES.map((m) => `<option value="${m}" ${m === currentMode ? "selected" : ""}>${m}</option>`).join("")}
+        </select>
+      </label>
+      <label>Reason (required)
+        <input type="text" name="reason" placeholder="why are you changing this?" required />
+      </label>
+      <button type="submit">Apply</button>
+      <span class="control-form-status"></span>
+    </form>
+  `;
+}
+
+function aiConfigFormHtml(ai) {
+  return `
+    <form id="ai-config-form" class="control-form">
+      <label>Provider
+        <select name="provider">
+          ${AI_PROVIDERS.map((p) => `<option value="${p}" ${p === ai.configured_provider ? "selected" : ""}>${p}</option>`).join("")}
+        </select>
+      </label>
+      <label>Model (optional — only used by openai)
+        <input type="text" name="model" placeholder="e.g. gpt-4o-mini" value="${esc(ai.configured_model || "")}" />
+      </label>
+      <label>Reason (required)
+        <input type="text" name="reason" placeholder="why switch?" required />
+      </label>
+      <button type="submit">Switch</button>
+      <span class="control-form-status"></span>
+    </form>
+  `;
+}
+
+function wireControlForm(currentStatus) {
+  const form = el("control-mode-form");
+  if (!form) return;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const statusEl = form.querySelector(".control-form-status");
+    const mode = form.mode.value;
+    const reason = form.reason.value;
+    statusEl.textContent = "applying...";
+    const result = await apiPost("/control/mode", { mode, reason, actor: "dashboard" });
+    if (result.ok) {
+      statusEl.textContent = `now ${result.data.mode}`;
+      renderControl();
+    } else {
+      statusEl.textContent = `failed: ${result.detail || result.error}`;
+    }
+  });
+}
+
+function wireAiConfigForm() {
+  const form = el("ai-config-form");
+  if (!form) return;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const statusEl = form.querySelector(".control-form-status");
+    const provider = form.provider.value;
+    const model = form.model.value || null;
+    const reason = form.reason.value;
+    statusEl.textContent = "applying...";
+    const result = await apiPost("/ai/config", { provider, model, reason, actor: "dashboard" });
+    if (result.ok) {
+      statusEl.textContent = `now ${result.data.effective_provider}`;
+      renderControl();
+    } else {
+      statusEl.textContent = `failed: ${result.detail || result.error}`;
+    }
+  });
+}
+
+export async function renderControl() {
+  const results = [];
+
+  const [controlRes, resourceRes, aiRes] = await Promise.all([
+    apiGet("/control/status"),
+    apiGet("/resources/status"),
+    apiGet("/ai/status"),
+  ]);
+  results.push({ ok: controlRes.ok, status: controlRes.status, error: controlRes.error });
+  results.push({ ok: resourceRes.ok, status: resourceRes.status, error: resourceRes.error });
+  results.push({ ok: aiRes.ok, status: aiRes.status, error: aiRes.error });
+
+  if (controlRes.ok) {
+    el("control-cards").innerHTML = controlModeCardsHtml(controlRes.data);
+    el("control-actions").innerHTML = controlActionsHtml(controlRes.data.mode);
+    wireControlForm(controlRes.data);
+
+    table(
+      el("control-history"),
+      [
+        { key: "changed_at", label: "When", cell: (r) => `<td>${dt(r.changed_at)}</td>` },
+        { key: "mode", label: "Mode", cell: (r) => `<td>${badge(r.mode, r.mode)}</td>` },
+        { key: "actor", label: "By" },
+        { key: "reason", label: "Reason" },
+      ],
+      [...(controlRes.data.history || [])].reverse().slice(0, 15),
+      "No mode changes recorded yet."
+    );
+  } else {
+    errorState(el("control-cards"), "Control status unavailable.");
+  }
+
+  el("resource-cards").innerHTML = resourceRes.ok
+    ? resourceCardHtml(resourceRes.data)
+    : `<div class="error-state">Resource status unavailable.</div>`;
+
+  if (aiRes.ok) {
+    el("ai-cards").innerHTML = aiCardHtml(aiRes.data);
+    el("ai-config-actions").innerHTML = aiConfigFormHtml(aiRes.data);
+    wireAiConfigForm();
+
+    table(
+      el("ai-config-history"),
+      [
+        { key: "changed_at", label: "When", cell: (r) => `<td>${dt(r.changed_at)}</td>` },
+        { key: "provider", label: "Provider" },
+        { key: "model", label: "Model", cell: (r) => `<td>${esc(r.model || "—")}</td>` },
+        { key: "reason", label: "Reason" },
+      ],
+      [...(aiRes.data.config_history || [])].reverse().slice(0, 10),
+      "No provider switches recorded yet."
+    );
+  } else {
+    errorState(el("ai-cards"), "AI status unavailable.");
+  }
+
+  return results;
+}
+
+// --------------------------------------------------------------------------
+// Artifacts — the unified explorer (outcome 2, Part D/E6/E7). List shows
+// metadata only; a detail view is fetched on demand when an artifact is
+// clicked (Part N: never load full prompt/response bodies into the list).
+// --------------------------------------------------------------------------
+
+const ARTIFACT_TYPES = [
+  "", "model_interaction", "detection", "hypothesis", "experiment_result",
+  "evidence", "opportunity_event", "note", "discovery_search", "experiment",
+  "system_event",
+];
+
+let artifactsCurrentType = "";
+
+function artifactTypeFilterHtml() {
+  return `
+    <label>Filter by type
+      <select id="artifact-type-filter">
+        ${ARTIFACT_TYPES.map(
+          (t) => `<option value="${t}" ${t === artifactsCurrentType ? "selected" : ""}>${t || "(all)"}</option>`
+        ).join("")}
+      </select>
+    </label>
+  `;
+}
+
+async function showArtifactDetail(artifactId) {
+  const panel = el("artifact-detail");
+  panel.innerHTML = `<div class="empty-state">loading ${esc(artifactId)}...</div>`;
+  const result = await apiGet(`/artifacts/${encodeURIComponent(artifactId)}`);
+  if (!result.ok) {
+    errorState(panel, `Could not load artifact ${artifactId} (${result.detail || result.error}).`);
+    return;
+  }
+  const a = result.data;
+  if (a.type === "model_interaction") {
+    const p = a.payload || {};
+    panel.innerHTML = `
+      <h3>Model Interaction — ${esc(a.id)}</h3>
+      <div class="stat-row">
+        <div class="stat"><div class="label">Provider</div><div class="value">${esc(p.provider)}</div></div>
+        <div class="stat"><div class="label">Model</div><div class="value">${esc(p.model)}</div></div>
+        <div class="stat"><div class="label">Status</div><div class="value">${badge(p.status, p.status)}</div></div>
+        <div class="stat"><div class="label">Purpose</div><div class="value">${esc(p.purpose)}</div></div>
+        <div class="stat"><div class="label">Trigger</div><div class="value">${esc(p.trigger)}</div></div>
+        <div class="stat"><div class="label">Latency</div><div class="value">${p.latency_seconds ?? "—"}s</div></div>
+        <div class="stat"><div class="label">Input tokens</div><div class="value">${p.input_tokens ?? "unknown"}</div></div>
+        <div class="stat"><div class="label">Output tokens</div><div class="value">${p.output_tokens ?? "unknown"}</div></div>
+      </div>
+      ${p.error ? `<div class="error-state">Error: ${esc(p.error)}</div>` : ""}
+      <h4>Prompt sent to the model${p.prompt && p.prompt.truncated ? " (truncated)" : ""}</h4>
+      <pre class="artifact-text">${esc((p.prompt && p.prompt.text) || "(none)")}</pre>
+      <h4>Response received${p.response && p.response.truncated ? " (truncated)" : ""}</h4>
+      <pre class="artifact-text">${esc((p.response && p.response.text) || "(none)")}</pre>
+    `;
+    return;
+  }
+  panel.innerHTML = `
+    <h3>${esc(a.type)} — ${esc(a.id)}</h3>
+    <div class="subtext">${dt(a.timestamp)} · source: ${esc(a.source || "—")}</div>
+    <pre class="artifact-text">${esc(JSON.stringify(a.payload, null, 2))}</pre>
+  `;
+}
+
+export async function renderArtifacts() {
+  const results = [];
+  el("artifact-filter").innerHTML = artifactTypeFilterHtml();
+  const filterSelect = el("artifact-type-filter");
+  filterSelect.addEventListener("change", () => {
+    artifactsCurrentType = filterSelect.value;
+    renderArtifacts();
+  });
+
+  const qs = artifactsCurrentType ? `?type=${encodeURIComponent(artifactsCurrentType)}&limit=100` : "?limit=100";
+  results.push(
+    await load(`/artifacts${qs}`, "artifact-list", (data) => {
+      const container = el("artifact-list");
+      if (!data.artifacts || data.artifacts.length === 0) {
+        container.innerHTML = `<div class="empty-state">No artifacts recorded yet for this filter.</div>`;
+        return;
+      }
+      table(
+        container,
+        [
+          { key: "timestamp", label: "When", cell: (r) => `<td>${dt(r.timestamp)}</td>` },
+          { key: "type", label: "Type", cell: (r) => `<td>${badge(r.type, r.type)}</td>` },
+          { key: "status", label: "Status", cell: (r) => `<td>${r.status ? badge(r.status, r.status) : "—"}</td>` },
+          { key: "summary", label: "Summary" },
+          {
+            key: "id",
+            label: "",
+            cell: (r) => `<td><button class="link-btn" data-artifact-id="${esc(r.id)}">view</button></td>`,
+          },
+        ],
+        data.artifacts,
+        "No artifacts recorded yet for this filter."
+      );
+      container.querySelectorAll("button[data-artifact-id]").forEach((btn) => {
+        btn.addEventListener("click", () => showArtifactDetail(btn.dataset.artifactId));
+      });
+    }, "Artifacts unavailable")
   );
 
   return results;

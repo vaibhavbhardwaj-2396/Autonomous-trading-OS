@@ -1,5 +1,8 @@
 """
-api/app.py — Phase 4 Slice Z: the read-only HTTP API.
+api/app.py — Phase 4 Slice Z: the dashboard HTTP API.
+Priority Phase 4 (2026-09) added the ONE write-capable route this API has
+ever had — see below, and see api/runtime_bridge.py for the full safety
+argument. Every other route remains exactly what it always was: read-only.
 
     GET /health                     — public, app liveness only
 
@@ -22,14 +25,52 @@ api/app.py — Phase 4 Slice Z: the read-only HTTP API.
     GET /paper/strategies             |  the live routes above on purpose —
     GET /paper/performance           /   never merged into /account etc.
 
-Every route is a thin function: parse query params -> call one api.data (or
-api.paper_data) function -> jsonify the result. No business logic, no
-write, no import of engine.execute / engine.guardrails.validate_order|
-save_state / engine.broker* / research.brain.hypothesis_intake.
-approve_and_lock / research.experiments.runner.run_experiment /
-research.experiments.strategy_backtest.run_backtest /
+    GET  /control/status            \\  Priority Phase 4 — the global
+    POST /control/mode                /  RUNNING/PAUSED/SAFE_MODE/STOPPED
+                                         control layer. POST changes ONLY
+                                         the mode (+ a required reason/
+                                         actor) — see api/runtime_bridge.py.
+                                         It can never place an order,
+                                         never touches capital, and can
+                                         only ever ADD a live-trading
+                                         pause, never remove one.
+
+    GET  /resources/status           —  outcome 1 — the Resource Governor's
+                                         current CPU/RAM/disk snapshot and
+                                         HEALTHY/CONSTRAINED/PRESSURED/
+                                         CRITICAL classification.
+
+    GET  /ai/status                  \\  outcome 2 — the AI provider
+    POST /ai/config                   /  abstraction. POST selects which
+                                         provider/model the NEXT research
+                                         AI call uses (+ required actor/
+                                         reason) — see control/ai_config.py.
+                                         Never calls a provider, never
+                                         touches research state or risk
+                                         gates.
+
+    GET  /artifacts                  \\  outcome 2 — the unified,
+    GET  /artifacts/<id>               /  read-only artifact explorer (model
+                                         interactions, detections,
+                                         hypotheses, experiments, evidence,
+                                         opportunity events, system events)
+                                         — see api/artifacts.py.
+
+tests/test_deployment_readiness.py and tests/test_broker_truth.py carry a
+narrow, explicit, named exception list for these write routes; every
+other route on this app is still mechanically checked to be GET-only.
+
+Every GET route is a thin function: parse query params -> call one
+api.data (or api.paper_data / api.artifacts / api.ai_status) function ->
+jsonify the result. No business logic, no import of engine.execute /
+engine.guardrails.validate_order|save_state / engine.broker* /
+research.brain.hypothesis_intake.approve_and_lock / research.experiments.
+runner.run_experiment / research.experiments.strategy_backtest.run_backtest /
 strategies.registry.save_version / paper.runner.run_paper_cycle anywhere in
-this file — grep for "import" to re-verify.
+this file — grep for "import" to re-verify. /control/mode and /ai/config
+are the two deliberate exceptions to "no write" (not to any of the imports
+above, which remain absent even from those routes) — see
+api/runtime_bridge.py and control/ai_config.py respectively.
 
 Run locally:  python -m api.app          (see docs/API.md for env setup)
 """
@@ -47,6 +88,11 @@ from werkzeug.exceptions import HTTPException  # noqa: E402
 
 from . import auth, config, data  # noqa: E402
 from . import paper_data  # noqa: E402 — Slice AA: read-only paper/shadow endpoints
+from . import runtime_bridge  # noqa: E402 — Priority Phase 4: global control layer
+from . import artifacts  # noqa: E402 — outcome 2: the unified artifact explorer
+from . import ai_status  # noqa: E402 — outcome 2: AI provider config + budget
+from control import runtime as ctrl  # noqa: E402
+from control import resources as rg  # noqa: E402 — outcome 1: the Resource Governor
 
 APP_NAME = "living-quant-api"
 APP_VERSION = "1.0.0"
@@ -84,7 +130,7 @@ def create_app() -> Flask:
         if origin and origin in config.cors_origins():
             resp.headers["Access-Control-Allow-Origin"] = origin
             resp.headers["Vary"] = "Origin"
-            resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
             resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
         return resp
 
@@ -99,6 +145,7 @@ def create_app() -> Flask:
     def _paper_data_unavailable(e: paper_data.PaperDataSourceError):
         app.logger.warning("paper data source unavailable: %s", e, exc_info=e.__cause__ or e)
         return jsonify({"error": "service_unavailable", "detail": str(e)}), 503
+
 
     @app.errorhandler(404)
     def _not_found(e):
@@ -260,6 +307,106 @@ def create_app() -> Flask:
     @auth.require_auth
     def paper_performance():
         return jsonify(paper_data.get_paper_performance())
+
+    # -- Global runtime control (Priority Phase 4) --------------------------
+    # The ONE write-capable surface on this API. See api/runtime_bridge.py
+    # for the full safety argument — this can only ever ADD a live-trading
+    # pause (via the pre-existing engine.journal.set_pause), never remove
+    # one; it can never place, size, or modify an order.
+
+    @app.route("/control/status", methods=["GET"])
+    @auth.require_auth
+    def control_status():
+        return jsonify(runtime_bridge.get_full_status())
+
+    @app.route("/control/mode", methods=["POST"])
+    @auth.require_auth
+    def control_mode():
+        body = request.get_json(silent=True) or {}
+        mode = body.get("mode")
+        reason = body.get("reason")
+        actor = body.get("actor") or "dashboard"
+        if not isinstance(mode, str) or mode not in ctrl.RUNTIME_MODES:
+            return jsonify({"error": "bad_request",
+                           "detail": f"'mode' must be one of {list(ctrl.RUNTIME_MODES)}"}), 400
+        if not isinstance(reason, str) or not reason.strip():
+            return jsonify({"error": "bad_request",
+                           "detail": "'reason' is required and must be non-empty"}), 400
+        if not isinstance(actor, str) or not actor.strip():
+            return jsonify({"error": "bad_request",
+                           "detail": "'actor' must be a non-empty string when given"}), 400
+        runtime_bridge.apply_mode_change(mode, reason=reason, actor=actor)
+        return jsonify(runtime_bridge.get_full_status())
+
+    # -- Resource Governor (outcome 1) --------------------------------------
+
+    @app.route("/resources/status", methods=["GET"])
+    @auth.require_auth
+    def resources_status():
+        return jsonify(rg.get_resource_state())
+
+    # -- AI provider/model configuration + budget (outcome 2) --------------
+    # POST /ai/config is the SECOND write-capable route this API has ever
+    # had (the first was /control/mode). It only ever selects which
+    # provider/model the NEXT research AI call should use — see
+    # control/ai_config.py's own docstring for why that is safe: it never
+    # calls a provider, never verifies one works, and cannot touch live
+    # trading, risk gates, or research state by construction (imports
+    # nothing from engine/ or research/brain/hypothesis_intake).
+
+    @app.route("/ai/status", methods=["GET"])
+    @auth.require_auth
+    def ai_status_route():
+        return jsonify(ai_status.get_ai_status())
+
+    @app.route("/ai/config", methods=["POST"])
+    @auth.require_auth
+    def ai_config_route():
+        from control import ai_config as ai_config_mod
+        body = request.get_json(silent=True) or {}
+        provider = body.get("provider")
+        model = body.get("model")
+        actor = body.get("actor") or "dashboard"
+        reason = body.get("reason")
+        if not isinstance(provider, str) or provider not in ai_config_mod.KNOWN_PROVIDERS:
+            return jsonify({"error": "bad_request",
+                           "detail": f"'provider' must be one of {list(ai_config_mod.KNOWN_PROVIDERS)}"}), 400
+        if model is not None and not isinstance(model, str):
+            return jsonify({"error": "bad_request", "detail": "'model' must be a string or null"}), 400
+        if not isinstance(reason, str) or not reason.strip():
+            return jsonify({"error": "bad_request",
+                           "detail": "'reason' is required and must be non-empty"}), 400
+        if not isinstance(actor, str) or not actor.strip():
+            return jsonify({"error": "bad_request",
+                           "detail": "'actor' must be a non-empty string when given"}), 400
+        ai_status.set_ai_provider(provider=provider, model=model, actor=actor, reason=reason)
+        return jsonify(ai_status.get_ai_status())
+
+    # -- Artifacts (outcome 2) — the unified, read-only artifact explorer --
+
+    @app.route("/artifacts", methods=["GET"])
+    @auth.require_auth
+    def artifacts_list():
+        artifact_type = request.args.get("type")
+        if artifact_type and artifact_type not in artifacts.ALL_ARTIFACT_TYPES:
+            return jsonify({"error": "bad_request",
+                           "detail": f"'type' must be one of {list(artifacts.ALL_ARTIFACT_TYPES)}"}), 400
+        limit, err = _int_query_param("limit", 50)
+        if err:
+            return err
+        offset, err = _int_query_param("offset", 0)
+        if err:
+            return err
+        return jsonify(artifacts.list_artifacts(
+            data.get_default_store(), type=artifact_type, limit=limit, offset=offset))
+
+    @app.route("/artifacts/<path:artifact_id>", methods=["GET"])
+    @auth.require_auth
+    def artifact_detail(artifact_id: str):
+        result = artifacts.get_artifact(data.get_default_store(), artifact_id)
+        if result is None:
+            return jsonify({"error": "not_found", "detail": f"no artifact {artifact_id!r}"}), 404
+        return jsonify(result)
 
     return app
 

@@ -65,18 +65,37 @@ check("A: api.wsgi.app is a Flask application instance", isinstance(api_wsgi.app
 
 _wsgi_rules = list(api_wsgi.app.url_map.iter_rules())
 _wsgi_routes = sorted({r.rule for r in _wsgi_rules if r.rule != "/static/<path:filename>"})
-check("A: api.wsgi.app has the expected route count (18: /health + 11 live + "
-      "6 paper/shadow — Slice AA)",
-      len(_wsgi_routes) == 18, str(_wsgi_routes))
+check("A: api.wsgi.app has the expected route count (25: /health + 11 live + "
+      "6 paper/shadow — Slice AA + 2 global control — Priority Phase 4 + "
+      "5 outcome 2/resource-governor routes: /resources/status, /ai/status, "
+      "/ai/config, /artifacts, /artifacts/<id>)",
+      len(_wsgi_routes) == 25, str(_wsgi_routes))
 check("A: /health is present on the WSGI entrypoint", "/health" in _wsgi_routes)
 check("A: /account is present on the WSGI entrypoint", "/account" in _wsgi_routes)
+
+# Priority Phase 4: /control/mode was the FIRST deliberate, named exception
+# to "every route on this app is GET-only" — see api/runtime_bridge.py (it
+# can only ever ADD a live-trading pause, never remove one, and never
+# places/sizes/modifies an order). Outcome 2 adds exactly one more:
+# /ai/config, which only ever selects which provider/model the NEXT
+# research AI call uses — see control/ai_config.py (never calls a provider,
+# never touches research state or risk gates). Every OTHER route, without
+# exception, is still mechanically proven GET-only below — this is a
+# narrow, explicit allow-list of exactly two (route, method) pairs, not a
+# loosening of the check itself.
+WRITE_ROUTE_EXCEPTIONS = {"/control/mode": {"POST"}, "/ai/config": {"POST"}}
+check("A: the write-route exception list names exactly two routes",
+      len(WRITE_ROUTE_EXCEPTIONS) == 2
+      and WRITE_ROUTE_EXCEPTIONS.get("/control/mode") == {"POST"}
+      and WRITE_ROUTE_EXCEPTIONS.get("/ai/config") == {"POST"})
 
 for rule in _wsgi_rules:
     if rule.rule == "/static/<path:filename>":
         continue
     methods = rule.methods - {"HEAD", "OPTIONS"}
-    check(f"A: {rule.rule} exposes only GET on the WSGI entrypoint (no POST/PUT/PATCH/DELETE)",
-          methods == {"GET"}, str(methods))
+    expected = WRITE_ROUTE_EXCEPTIONS.get(rule.rule, {"GET"})
+    check(f"A: {rule.rule} exposes only {sorted(expected)} on the WSGI entrypoint",
+          methods == expected, str(methods))
 
 # The WSGI entrypoint is a live Flask app -- it is fine (and how gunicorn
 # itself works) to exercise it through Flask's own test client, same as
@@ -86,9 +105,19 @@ for rule in _wsgi_rules:
 _wsgi_client = api_wsgi.app.test_client()
 for method in ("post", "put", "patch", "delete"):
     for route in _wsgi_routes:
+        allowed = WRITE_ROUTE_EXCEPTIONS.get(route, set())
         r = getattr(_wsgi_client, method)(route)
-        check(f"A: {method.upper()} {route} on api.wsgi:app is not a usable write endpoint (405/404)",
-              r.status_code in (404, 405), f"{r.status_code}")
+        if method.upper() in allowed:
+            # The route DOES have a handler for this method (that's the
+            # point of the exception) — but with no Authorization header
+            # supplied, it must still be refused, via 401 (auth), never a
+            # usable unauthenticated write.
+            check(f"A: {method.upper()} {route} without auth is refused (401), "
+                  f"never a usable unauthenticated write",
+                  r.status_code == 401, f"{r.status_code}")
+        else:
+            check(f"A: {method.upper()} {route} on api.wsgi:app is not a usable write endpoint (405/404)",
+                  r.status_code in (404, 405), f"{r.status_code}")
 
 check("A: GET /health on api.wsgi:app returns 200 with no auth (public liveness route)",
       _wsgi_client.get("/health").status_code == 200)

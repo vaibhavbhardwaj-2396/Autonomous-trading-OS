@@ -3,7 +3,10 @@
 // decides WHAT to fetch and how to render it.
 
 import { POLL_INTERVAL_MS, apiGet, apiBaseUrlForDisplay } from "./api.js";
-import { renderOverview, renderTrading, renderPaper, renderResearch, renderStrategies } from "./views.js";
+import {
+  renderOverview, renderTrading, renderPaper, renderResearch, renderStrategies,
+  renderControl, renderArtifacts,
+} from "./views.js";
 
 const VIEWS = {
   overview: renderOverview,
@@ -11,6 +14,8 @@ const VIEWS = {
   paper: renderPaper,
   research: renderResearch,
   strategies: renderStrategies,
+  control: renderControl,
+  artifacts: renderArtifacts,
 };
 
 let activeView = "overview";

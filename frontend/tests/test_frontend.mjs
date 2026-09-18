@@ -5,10 +5,10 @@
 //   node frontend/tests/test_frontend.mjs
 //
 // Covers the two files with real logic worth testing: format.js's pure
-// rendering helpers, and api.js's apiGet() response classification (network
-// failure / 401 / other non-2xx / malformed JSON / success) under a mocked
-// global fetch. views.js/app.js are DOM-orchestration glue over these and
-// are covered instead by the manual browser smoke test described in
+// rendering helpers, and api.js's apiGet()/apiPost() response classification
+// (network failure / 401 / other non-2xx / malformed JSON / success) under a
+// mocked global fetch. views.js/app.js are DOM-orchestration glue over these
+// and are covered instead by the manual browser smoke test described in
 // docs/API.md — there is no headless DOM here to drive them against.
 
 import assert from "node:assert/strict";
@@ -312,6 +312,56 @@ mockFetch(() => ({ ok: true, status: 200, json: async () => ({ cash: 1000, as_of
 
 check("apiBaseUrlForDisplay() strips a trailing slash and reflects config, never localhost by default",
   api.apiBaseUrlForDisplay() === "http://example.invalid:8787");
+
+// ---------------------------------------------------------------------------
+// api.js — apiPost()'s response classification (outcome 2's one write
+// path: /control/mode, /ai/config). Same classification logic as apiGet(),
+// mirrored here with the identical mocked-fetch technique above.
+// ---------------------------------------------------------------------------
+
+mockFetch(() => {
+  throw new Error("simulated network failure");
+});
+{
+  const r = await api.apiPost("/control/mode", { mode: "PAUSED", reason: "x" });
+  check("apiPost(): a thrown fetch() (network down) -> {ok:false, error:'network'}, never throws",
+    r.ok === false && r.error === "network");
+}
+
+mockFetch(() => ({ ok: true, status: 200, json: async () => ({ mode: "PAUSED" }) }));
+{
+  await api.apiPost("/control/mode", { mode: "PAUSED", reason: "test" });
+  check("apiPost(): sends 'Authorization: Bearer <configured token>'",
+    lastFetchCall.opts.headers.Authorization === "Bearer test-token-123");
+  check("apiPost(): sends Content-Type: application/json",
+    lastFetchCall.opts.headers["Content-Type"] === "application/json");
+  check("apiPost(): sends the given body as a JSON string",
+    JSON.parse(lastFetchCall.opts.body).mode === "PAUSED"
+    && JSON.parse(lastFetchCall.opts.body).reason === "test");
+  check("apiPost(): uses method POST, never GET", lastFetchCall.opts.method === "POST");
+}
+
+mockFetch(() => ({ ok: false, status: 401, json: async () => ({ error: "unauthorized" }) }));
+{
+  const r = await api.apiPost("/control/mode", { mode: "PAUSED", reason: "x" });
+  check("apiPost(): HTTP 401 -> {ok:false, status:401, error:'unauthorized'} — "
+    + "never a usable unauthenticated write",
+    r.ok === false && r.status === 401 && r.error === "unauthorized");
+}
+
+mockFetch(() => ({ ok: false, status: 400, json: async () => ({ error: "bad_request", detail: "'reason' is required" }) }));
+{
+  const r = await api.apiPost("/ai/config", { provider: "openai" });
+  check("apiPost(): HTTP 400 -> {ok:false, status:400, error:'http', detail:<from body>}",
+    r.ok === false && r.status === 400 && r.detail === "'reason' is required");
+}
+
+mockFetch(() => ({ ok: true, status: 200, json: async () => ({ mode: "PAUSED", reason: "x" }) }));
+{
+  const r = await api.apiPost("/control/mode", { mode: "PAUSED", reason: "x", actor: "test" });
+  check("apiPost(): a 2xx with a valid JSON body -> {ok:true, data:<parsed body>}",
+    r.ok === true && r.data.mode === "PAUSED");
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

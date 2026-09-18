@@ -80,6 +80,17 @@ class PaperStore:
         path = Path(path) if path is not None else paper_config.db_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(path), isolation_level=None)
+        # STABLE + CONTROLLED — explicit restatement of a value that was
+        # already in effect: sqlite3.connect() with no `timeout=` override
+        # already defaults to a 5000ms busy_timeout (see
+        # docs/RESEARCH_STORE_LOCKING.md's correction — this was first
+        # written up as "fixing a gap," which the regression test in
+        # tests/test_research_store_concurrency.py disproved). Made
+        # explicit anyway so it can't be silently lost to a future
+        # connect() change, and to match research/store.py's real,
+        # unmodified behavior in an obvious, greppable way rather than an
+        # implicit library default.
+        conn.execute("PRAGMA busy_timeout = 5000")
         conn.row_factory = sqlite3.Row
         conn.executescript(SCHEMA_PATH.read_text())
         store = cls(_conn=conn, path=path)
@@ -115,6 +126,7 @@ class PaperStore:
             raise FileNotFoundError(f"paper store not yet initialized: {resolved}")
         conn = sqlite3.connect(f"file:{resolved.as_posix()}?mode=ro", uri=True,
                                isolation_level=None)
+        conn.execute("PRAGMA busy_timeout = 5000")
         conn.row_factory = sqlite3.Row
         return cls(_conn=conn, path=resolved)
 

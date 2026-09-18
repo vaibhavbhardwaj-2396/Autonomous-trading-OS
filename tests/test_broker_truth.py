@@ -837,8 +837,20 @@ check("6. api/data.py still imports no engine.broker* / engine.execute after the
 APP_SRC = (ROOT / "api" / "app.py").read_text()
 _route_methods = re.findall(r"@app\.route\([^)]*methods\s*=\s*\[([^\]]*)\]", APP_SRC)
 _all_methods = {m.strip().strip('"\'').upper() for group in _route_methods for m in group.split(",")}
-check("7. every api/app.py route is declared GET-only",
-      _all_methods == {"GET"}, f"declared methods across all routes: {_all_methods}")
+# Priority Phase 4 (2026-09) added the FIRST deliberate write route this
+# API ever had, /control/mode — see api/runtime_bridge.py for the full
+# safety argument (it can only ever ADD a live-trading pause, never place
+# an order or remove one). Outcome 2 added exactly one more, /ai/config
+# (see control/ai_config.py — never calls a provider, never touches
+# research state or risk gates). Every other route remains GET-only; this
+# checks only the SET of distinct HTTP verbs declared anywhere in the
+# file (still {"GET", "POST"} regardless of how many routes use each), a
+# narrow, named exception to the check below, not a loosening of it —
+# tests/test_deployment_readiness.py §A independently re-proves this at
+# the route level (methods per rule, and names both exceptions explicitly).
+check("7. every api/app.py route is declared GET-only, except the two "
+      "deliberate POST routes (/control/mode, /ai/config)",
+      _all_methods == {"GET", "POST"}, f"declared methods across all routes: {_all_methods}")
 _app_code = _code_only(APP_SRC)
 check("7. api/app.py never calls propose_trade / place / a broker in code",
       not any(tok in _app_code for tok in ("propose_trade", "get_broker(", ".place(", "run_paper_cycle")),
@@ -852,12 +864,20 @@ check("7. /account route body is just jsonify(data.get_account()) — no side ef
 # approved dynamic-capital-model slice — docs/CAPITAL_MODEL.md,
 # tests/test_capital_model.py. This file asserts only that api/ stays a
 # read-only layer with no order path, which is checked above.)
+#
+# api/app.py itself is deliberately EXCLUDED from this specific diff check
+# as of Priority Phase 4 — it is expected to keep gaining new routes over
+# time (its own GET-only-ness is checked directly above, and independently
+# in tests/test_deployment_readiness.py). api/auth.py (the auth boundary)
+# and api/wsgi.py (the production entrypoint) have no legitimate reason to
+# change for ordinary feature work and remain a real, standing invariant.
 import subprocess  # noqa: E402
 _diff = subprocess.run(
     ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD", "--",
-     "api/app.py", "api/auth.py", "api/wsgi.py"],
+     "api/auth.py", "api/wsgi.py"],
     capture_output=True, text=True)
-check("the read-only API core (app.py / auth.py / wsgi.py) is unchanged by broker-truth work",
+check("the read-only API's auth boundary and WSGI entrypoint (auth.py / "
+      "wsgi.py) are unchanged by broker-truth work",
       _diff.stdout.strip() == "", f"changed: {_diff.stdout.strip()!r}")
 
 

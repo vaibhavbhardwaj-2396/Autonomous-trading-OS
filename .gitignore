@@ -6,7 +6,15 @@ __pycache__/
 node_modules/
 venv/
 .venv/
+venv_broken_*/
+venv_py312_check/
 .DS_Store
+
+# Stray local artifacts from this session's own debugging — never real
+# project files. Left in place (not deleted — rm is unavailable here) but
+# excluded from every future commit rather than accidentally included.
+api/control.py.superseded
+paper/paper_shadow.db.TEST_POLLUTION_delete_me
 memory/.hmm_model.pkl
 memory/.kite_session.json
 logs/
@@ -24,6 +32,40 @@ research/ai_failures.jsonl
 research/.worker.lock
 research/.worker_state.json
 research/.worker_state.json.tmp
+
+# Global runtime control state (control/runtime.py, Priority Phase 4) —
+# per-deployment operational state, same class as the research bookmarks
+# above, never versioned code.
+control/runtime_mode.json
+control/runtime_mode.json.tmp
+control/.runtime.lock
+
+# AI budget state (control/ai_budget.py, outcome 2) — same class as the
+# control state above.
+control/ai_budget_state.json
+control/ai_budget_state.json.tmp
+control/.ai_budget.lock
+
+# AI provider/model configuration (control/ai_config.py, outcome 2) —
+# per-deployment operational state, same class as the above.
+control/ai_config.json
+control/ai_config.json.tmp
+control/.ai_config.lock
+
+# Paper/shadow store and its overlap-prevention lock (STABLE + CONTROLLED,
+# outcome 1) — same class as research/*.db above: rebuildable simulation
+# state, never committed. This gap (paper/*.db was never gitignored at
+# all) was found the hard way — a test bug briefly bypassed its intended
+# lock isolation and created a real paper_shadow.db with one synthetic
+# test cycle (zero trades/orders — paper trading has no external side
+# effects, but the file still should never have been trackable).
+paper/*.db
+paper/*.db-wal
+paper/*.db-shm
+paper/.paper.lock
+
+# Recorder's overlap-prevention lock (same STABLE + CONTROLLED addition).
+research/.recorder.lock
 
 # Dashboard frontend config — per-deployment API base URL/token, never
 # committed (same convention as .env). Copy frontend/config.example.js.

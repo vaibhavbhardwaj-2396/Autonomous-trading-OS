@@ -97,6 +97,19 @@ def get_default_store() -> Store:
     if store is None:
         try:
             store = Store.open()
+            # STABLE + CONTROLLED — this is a belt-and-suspenders EXPLICIT
+            # restatement, not a fix: Store.open()'s sqlite3.connect() call
+            # has never overridden `timeout`, so it already gets Python's
+            # own 5000ms default busy_timeout with no code at all (see
+            # docs/RESEARCH_STORE_LOCKING.md — a "gap" was assumed here
+            # and then disproven by the regression test). research/store.py
+            # is on this deployment's permanent write-protection list, so
+            # this line lives here instead purely so the 5000ms figure is
+            # an explicit, greppable constant rather than an implicit
+            # library default a future refactor could silently remove
+            # (e.g. by adding `timeout=0` to some connect() call for an
+            # unrelated reason). See tests/test_research_store_concurrency.py.
+            store._conn.execute("PRAGMA busy_timeout = 5000")
         except Exception as e:
             raise DataSourceError("the research store is unavailable") from e
         _store_local.store = store

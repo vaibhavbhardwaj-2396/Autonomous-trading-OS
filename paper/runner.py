@@ -33,7 +33,9 @@ from __future__ import annotations
 import datetime as dt
 import json
 import traceback
-from typing import Any, Optional, Union
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator, Optional, Union
 
 from strategies import registry as sreg
 from strategies.core import StrategyVersionViolation
@@ -46,6 +48,54 @@ from .clock import Clock, resolve_clock
 from .context import HistoryProvider, PaperStrategyContext
 from .portfolio import PaperPortfolio
 from .store import PaperStore
+# Priority Phase 4 — the global control layer. control/runtime.py is a new,
+# neutral, top-level package importing nothing from engine/research/paper —
+# see its own docstring for why that keeps this a safe addition.
+from control import runtime as ctrl
+
+LOCK_PATH = Path(__file__).parent / ".paper.lock"
+
+
+# ---------------------------------------------------------------------------
+# STABLE + CONTROLLED — overlap prevention. run_paper_cycle() had no lock at
+# all: the existing idempotency check (cycle_id already COMPLETED) only
+# catches a SECOND run after the first finished, not two invocations racing
+# each other while the first is still IN_PROGRESS — that would double-process
+# signals and race on paper_shadow.db writes. Identical POSIX advisory-lock
+# pattern to research/brain/worker.py's worker_lock() and
+# research/recorder.py's recorder_lock(): the kernel releases it
+# automatically on process exit or crash, and a second concurrent invocation
+# returns a SKIPPED summary rather than raising, since run_paper_cycle()'s
+# whole contract is "always return a summary dict."
+# ---------------------------------------------------------------------------
+
+class PaperCycleBusy(RuntimeError):
+    """Another paper cycle invocation holds the lock — this one did nothing."""
+
+
+@contextmanager
+def paper_lock(path: Path = LOCK_PATH) -> Iterator[None]:
+    import fcntl
+    import os
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "w")
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as e:
+            raise PaperCycleBusy(str(e)) from e
+        try:
+            fh.write(f"{os.getpid()} {_iso(dt.datetime.now())}\n")
+            fh.flush()
+        except OSError:
+            pass
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fh.close()
 
 
 def _iso(value: Any) -> str:
@@ -104,60 +154,84 @@ def run_paper_cycle(
     AA spec section 20); only re-raises for a genuine, unexpected failure
     (e.g. the paper store itself cannot be opened), after first recording
     the cycle as FAILED and sending a best-effort Telegram alert.
+
+    Priority Phase 4: checked BEFORE anything else, including opening the
+    paper store — if the global control layer (control/runtime.py) says
+    paper/shadow is not currently allowed (PAUSED or STOPPED), this
+    returns a "SKIPPED" summary immediately and touches nothing.
     """
-    resolved_clock = resolve_clock(clock)
-    owns_store = store is None
-    store = store if store is not None else PaperStore.open()
-
-    resolved_cycle_id = cycle_id or default_cycle_id(cycle_label, resolved_clock)
-    now = _iso(resolved_clock())
-
-    existing = store.get_cycle(resolved_cycle_id)
-    if existing is not None and existing.get("status") == "COMPLETED":
-        # Idempotency: already done. Return the stored summary rather than
-        # reprocessing anything — see tests/test_paper_runner.py.
-        summary = json.loads(existing["summary_json"]) if existing.get("summary_json") else {}
-        summary["cycle_id"] = resolved_cycle_id
-        summary["idempotent_replay"] = True
-        if owns_store:
-            store.close()
-        return summary
-
-    store.start_cycle(resolved_cycle_id, now)
+    control_state = ctrl.get_state()
+    if not ctrl.paper_allowed(control_state):
+        return {
+            "cycle_id": cycle_id or default_cycle_id(cycle_label, resolve_clock(clock)),
+            "status": "SKIPPED",
+            "skip_reason": f"global control mode is {control_state['mode']}",
+        }
 
     try:
-        summary = _run_cycle_body(
-            store=store, cycle_id=resolved_cycle_id, clock=resolved_clock,
-            history_provider=history_provider, universe=universe,
-            registry_dir=registry_dir, eligibility_dir=eligibility_dir,
-            algorithm_registry=algorithm_registry,
-        )
-    except Exception as e:  # genuinely unexpected — record and re-raise
-        note = f"{type(e).__name__}: {e}"
-        store.fail_cycle(resolved_cycle_id, note, _iso(resolved_clock()))
-        if notify:
+        with paper_lock():
+            resolved_clock = resolve_clock(clock)
+            owns_store = store is None
+            store_ = store if store is not None else PaperStore.open()
+
+            resolved_cycle_id = cycle_id or default_cycle_id(cycle_label, resolved_clock)
+            now = _iso(resolved_clock())
+
+            existing = store_.get_cycle(resolved_cycle_id)
+            if existing is not None and existing.get("status") == "COMPLETED":
+                # Idempotency: already done. Return the stored summary rather
+                # than reprocessing anything — see tests/test_paper_runner.py.
+                summary = (json.loads(existing["summary_json"])
+                          if existing.get("summary_json") else {})
+                summary["cycle_id"] = resolved_cycle_id
+                summary["idempotent_replay"] = True
+                if owns_store:
+                    store_.close()
+                return summary
+
+            store_.start_cycle(resolved_cycle_id, now)
+
             try:
-                pnotify.notify_paper_cycle_failure(cycle_id=resolved_cycle_id, error=note)
-            except Exception:
-                pass  # best-effort — see paper/notify.py's module docstring
-        if owns_store:
-            store.close()
-        raise
+                summary = _run_cycle_body(
+                    store=store_, cycle_id=resolved_cycle_id, clock=resolved_clock,
+                    history_provider=history_provider, universe=universe,
+                    registry_dir=registry_dir, eligibility_dir=eligibility_dir,
+                    algorithm_registry=algorithm_registry,
+                )
+            except Exception as e:  # genuinely unexpected — record and re-raise
+                note = f"{type(e).__name__}: {e}"
+                store_.fail_cycle(resolved_cycle_id, note, _iso(resolved_clock()))
+                if notify:
+                    try:
+                        pnotify.notify_paper_cycle_failure(cycle_id=resolved_cycle_id, error=note)
+                    except Exception:
+                        pass  # best-effort — see paper/notify.py's module docstring
+                if owns_store:
+                    store_.close()
+                raise
 
-    finished_at = _iso(resolved_clock())
-    store.complete_cycle(resolved_cycle_id, summary, finished_at)
-    summary["cycle_id"] = resolved_cycle_id
-    summary["idempotent_replay"] = False
+            finished_at = _iso(resolved_clock())
+            store_.complete_cycle(resolved_cycle_id, summary, finished_at)
+            summary["cycle_id"] = resolved_cycle_id
+            summary["idempotent_replay"] = False
 
-    if notify:
-        try:
-            pnotify.notify_paper_cycle_summary(cycle_id=resolved_cycle_id, summary=summary)
-        except Exception:
-            pass  # best-effort
+            if notify:
+                try:
+                    pnotify.notify_paper_cycle_summary(cycle_id=resolved_cycle_id, summary=summary)
+                except Exception:
+                    pass  # best-effort
 
-    if owns_store:
-        store.close()
-    return summary
+            if owns_store:
+                store_.close()
+            return summary
+    except PaperCycleBusy:
+        # Another paper cycle invocation is already running — a clean,
+        # expected no-op (see paper_lock()'s own docstring).
+        return {
+            "cycle_id": cycle_id or default_cycle_id(cycle_label, resolve_clock(clock)),
+            "status": "SKIPPED",
+            "skip_reason": "another paper cycle instance holds the lock",
+        }
 
 
 def _run_cycle_body(

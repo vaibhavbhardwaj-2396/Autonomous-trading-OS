@@ -59,6 +59,14 @@ DATASET_NOTE = "research_note"
 DATASET_RESEARCH_AREA = "research_area_tag"
 DATASET_DISCOVERY_SEARCH = "research_discovery_search"
 DATASET_OPPORTUNITY_EVENT = "research_opportunity_event"
+# INTELLIGENT + EFFICIENT + TRACEABLE (outcome 2) — "what did the AI receive
+# and what came back," as a first-class, queryable record. Same pattern as
+# every dataset above: a new `dataset` value in the ALREADY-existing,
+# ALREADY-generic `observations` table (research/schema.sql — unmodified,
+# it was already designed for exactly this: "generic observations ...
+# agent decision context, LLM judgments"), not a new store or a new
+# schema. research/brain/llm.py is the only writer.
+DATASET_MODEL_INTERACTION = "research_model_interaction"
 
 MARKET_ENTITY = "_market"  # same convention research/sources already uses
 
@@ -309,6 +317,83 @@ def record_opportunity_event(
     }
     return store.append(
         dataset=DATASET_OPPORTUNITY_EVENT, entity=entity, event_time=now,
+        knowledge_time=now, source=source, payload=payload,
+    )
+
+
+MODEL_INTERACTION_TEXT_MAX = 20_000
+"""Bounds how much of a prompt/context/response this module will persist
+per call — the same "bounded diagnostic excerpt, not an unbounded archive"
+posture research/brain/investigator.py's AI_FAILURE_RAW_EXCERPT_MAX
+already uses, applied here for the identical reason: one pathological
+call (a runaway digest, a model that free-associates for pages) must
+never be able to grow this table without limit. 20KB is generous enough
+to show a real prompt/response in full in the overwhelming majority of
+cases while still being a hard, known ceiling."""
+
+
+def _bounded(text: Optional[str]) -> Optional[dict]:
+    if text is None:
+        return None
+    full_length = len(text)
+    truncated = full_length > MODEL_INTERACTION_TEXT_MAX
+    return {"text": text[:MODEL_INTERACTION_TEXT_MAX], "length": full_length,
+            "truncated": truncated}
+
+
+def record_model_interaction(
+    store: Store,
+    *,
+    provider: str,
+    model: str,
+    purpose: str,
+    trigger: str,
+    prompt: str,
+    response: Optional[str],
+    status: str,
+    cycle_id: Optional[str] = None,
+    context_summary: Optional[str] = None,
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
+    latency_seconds: Optional[float] = None,
+    error: Optional[str] = None,
+    entity: str = MARKET_ENTITY,
+    source: str = "research.brain.llm",
+    extra: Optional[dict] = None,
+) -> Optional[int]:
+    """Record one LLM call — regardless of provider — as an inspectable,
+    queryable artifact: "what was sent, what came back." This is the
+    backing store for outcome 2's Artifact Explorer / model-interaction
+    detail view; see docs/AI_PROVIDERS.md.
+
+    Deliberately generic across providers (never a provider-specific
+    field name) so a caller never needs a different code path to record
+    an Anthropic vs. an OpenAI call — `provider`/`model` are just data.
+    `status` is one of "ok" / "error" / "no_proposal" / "deferred" (budget
+    or resource governor declined the call before it was made — see
+    research/brain/llm.py); `error`, if given, is the human-readable
+    reason for "error"/"deferred". Never pass an API key or any other
+    secret in any field here — this becomes readable via the dashboard
+    API and this module has no way to redact after the fact.
+
+    `prompt`/`response`/`context_summary` are stored via `_bounded()` —
+    truncated defensively, never silently dropped, with the original
+    length and a `truncated` flag always recorded alongside so a caller
+    inspecting the artifact can tell the difference from a short one."""
+    now = now_ist()
+    payload = {
+        "provider": provider, "model": model, "purpose": purpose,
+        "trigger": trigger, "status": status, "cycle_id": cycle_id,
+        "prompt": _bounded(prompt), "response": _bounded(response),
+        "context_summary": _bounded(context_summary),
+        "input_tokens": input_tokens, "output_tokens": output_tokens,
+        "total_tokens": (input_tokens + output_tokens)
+                        if (input_tokens is not None and output_tokens is not None) else None,
+        "latency_seconds": latency_seconds, "error": error,
+        **(extra or {}),
+    }
+    return store.append(
+        dataset=DATASET_MODEL_INTERACTION, entity=entity, event_time=now,
         knowledge_time=now, source=source, payload=payload,
     )
 
