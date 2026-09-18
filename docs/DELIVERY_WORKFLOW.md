@@ -48,8 +48,10 @@ scripts/deploy_vps.sh --ref origin/main
 The script refuses to deploy during NSE market hours (weekdays, 09:15–15:45
 IST), unless an operator explicitly supplies `--allow-market-window` for an
 assessed urgent fix. It also refuses a VPS with tracked local modifications,
-checks that the exact SHA is on `origin/main`, runs guardrail/API tests on the
-VPS, and returns to the prior SHA if either test fails.
+checks that the exact SHA is on `origin/main`, runs the guardrail suite on the
+VPS, and returns to the prior SHA if that test fails. The full suite runs in
+GitHub CI: some API tests intentionally require an empty development history
+and therefore are not valid against a VPS carrying real operational history.
 
 For a dashboard/API change:
 

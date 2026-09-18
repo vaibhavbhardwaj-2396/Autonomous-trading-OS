@@ -49,7 +49,9 @@ done
 if [[ "$ALLOW_MARKET_WINDOW" != true ]]; then
   ist_day="$(TZ=Asia/Kolkata date +%u)"
   ist_time="$(TZ=Asia/Kolkata date +%H%M)"
-  if [[ "$ist_day" -le 5 && "$ist_time" -ge 0915 && "$ist_time" -lt 1545 ]]; then
+  # Force decimal interpretation: Bash otherwise treats a leading-zero time
+  # such as 0915 as invalid octal in an arithmetic comparison.
+  if (( 10#$ist_day <= 5 && 10#$ist_time >= 915 && 10#$ist_time < 1545 )); then
     echo "Refusing deployment during NSE market hours (09:15–15:45 IST)." >&2
     echo "Use --allow-market-window only for an urgent, assessed operational fix." >&2
     exit 3
@@ -98,14 +100,18 @@ if [[ "$install_deps" == true ]]; then
   venv/bin/python -m pip install -r requirements.txt || { rollback; exit 20; }
 fi
 
-# These provide a small, deterministic deployment gate. The full suite belongs
-# in GitHub CI; broker sync/order commands are deliberately absent here.
+# This is a deterministic production-safe gate. The full suite belongs in
+# GitHub CI. In particular, tests/test_api.py deliberately asserts an empty
+# local development history and is not valid against a VPS with real regime
+# history. Broker sync/order commands are deliberately absent here.
 venv/bin/python tests/test_guardrails.py || { rollback; exit 21; }
-venv/bin/python tests/test_api.py || { rollback; exit 22; }
 
 if [[ "$restart_api" == true ]]; then
   systemctl restart trading-api.service
   systemctl is-active --quiet trading-api.service
+  api_port="$(sed -n 's/^DASHBOARD_API_PORT=//p' deploy/api.env | tail -n 1)"
+  api_port="${api_port:-8787}"
+  curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:${api_port}/health" >/dev/null
 fi
 
 echo "DEPLOYED_SHA=$target_sha"
