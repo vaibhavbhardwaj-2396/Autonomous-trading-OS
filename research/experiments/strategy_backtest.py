@@ -45,12 +45,11 @@ module or its output claims a Strategy is "validated," "proven," or "ready"
 for anything downstream. That judgment (if it is ever made at all) is future
 governance work, explicitly out of scope here.
 
-Position/trade semantics (v0, deliberately minimal)
------------------------------------------------------
-A Strategy's Signal carries only strategy_id / strategy_version_id / symbol
-/ action / generated_at / optional strength / optional reasons — no stop, no
-target, no size. So this adapter's simulated trade model is the simplest
-one that is still honest about what a bare BUY/SELL signal stream means:
+Position/trade semantics
+------------------------
+A Strategy's Signal remains intentionally allocation-blind. Typed exit policy
+lives in the immutable StrategyVersion parameters, allowing this adapter to
+model risk without turning a Signal into an order:
 
     BUY  for a symbol with no open position   -> open one long position
     BUY  for a symbol already held             -> ignored (no pyramiding)
@@ -65,10 +64,10 @@ one that is still honest about what a bare BUY/SELL signal stream means:
                                                     makes for Contract-DSL
                                                     experiments)
 
-No stop-loss, no target, no trailing logic, no partial fills, no slippage
-model beyond the existing pure cost function below. This is a "prove the
-plumbing" backtest, not an execution simulator — see the module docstring's
-opening description and this slice's own explicit non-goals.
+Typed versions add stop-loss, target and maximum-hold exits. Entry and exit
+fills apply the declared two-sided slippage assumption before the existing
+equity cost model. There is still no trailing logic, partial fill or market
+impact claim; assumptions remain explicit in `cost_assumptions`.
 
 Position sizing uses a fixed research notional
 (STRATEGY_BACKTEST_POSITION_NOTIONAL below), the same "constant across every
@@ -138,6 +137,7 @@ from strategies.core import (
     Signal, Strategy, StrategyContext, StrategyVersion, StrategyVersionViolation,
 )
 from strategies import registry as sreg
+from strategies.spec import ALGORITHM_ID as CONTRACT_RULE_ID, ContractRuleStrategy
 
 # A fixed, research-only hypothetical position size — see the module
 # docstring's "Position sizing" section for why this is an independent
@@ -170,7 +170,7 @@ class UnknownAlgorithm(StrategyBacktestError):
 # closed answer for "I don't recognise that algorithm_id" today.
 # ---------------------------------------------------------------------------
 
-ALGORITHM_REGISTRY: dict[str, type] = {}
+ALGORITHM_REGISTRY: dict[str, type] = {CONTRACT_RULE_ID: ContractRuleStrategy}
 
 
 def register_algorithm(algorithm_id: str, strategy_cls: type) -> None:
@@ -277,12 +277,7 @@ def _resolve_universe(step: ReplayStep, universe: Union[str, list[str]]) -> list
 
 @dataclass
 class SimulatedTrade:
-    """One long round trip, opened by a BUY signal and closed by either a
-    SELL signal or the end of the backtest window. See the module
-    docstring's "Position/trade semantics" section for the full v0 model —
-    there is no representation here for a short, a partial fill, or a
-    stop/target exit, because nothing upstream of this dataclass (Signal
-    itself) carries that information yet."""
+    """One long round trip closed by signal, risk policy or window end."""
 
     symbol: str
     entry_time: Any
@@ -294,6 +289,8 @@ class SimulatedTrade:
     costs: float
     net_pnl: float
     exit_reason: str  # "signal_exit" | "backtest_end"
+    initial_risk: Optional[float] = None
+    r_multiple: Optional[float] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -335,10 +332,14 @@ def _close_trade(symbol: str, pos: dict, exit_price: float, exit_time: dt.dateti
     gross_pnl = (exit_price - entry_price) * qty
     costs = equity_round_trip(entry_price, qty, intraday=intraday).total
     net_pnl = gross_pnl - costs
+    stop_loss_pct = pos.get("stop_loss_pct")
+    initial_risk = (entry_price * qty * stop_loss_pct / 100) if stop_loss_pct else None
     return SimulatedTrade(
         symbol=symbol, entry_time=pos["entry_time"], exit_time=exit_time,
         entry_price=entry_price, exit_price=exit_price, quantity=qty,
         gross_pnl=gross_pnl, costs=costs, net_pnl=net_pnl, exit_reason=exit_reason,
+        initial_risk=initial_risk,
+        r_multiple=(net_pnl / initial_risk if initial_risk else None),
     )
 
 
@@ -346,11 +347,9 @@ def _compute_stats(trades: list[SimulatedTrade]) -> dict:
     """Mirrors research.experiments.evaluator's compute_verdict OUTPUT SHAPE
     for a consistent vocabulary across the Contract-DSL and Strategy
     backtest paths, but is computed independently — see the module
-    docstring's "Evidence integration" section for exactly why this is not
-    a call to evaluator.compute_verdict itself. expectancy_r is always None
-    in v0: an r-multiple needs a stop distance, and a bare Signal carries
-    none — recording a fabricated one would be worse than admitting it is
-    not knowable yet."""
+    docstring's "Evidence integration" section. Expectancy R is populated
+    only when the immutable version declares a stop distance; otherwise it
+    remains None rather than fabricating risk."""
     n = len(trades)
     if n == 0:
         return {"n_trades": 0, "win_rate": None, "gross_pnl": 0.0, "net_pnl": 0.0,
@@ -369,7 +368,9 @@ def _compute_stats(trades: list[SimulatedTrade]) -> dict:
         "net_pnl": sum(net_pnls),
         "total_costs": sum(costs),
         "avg_net_pnl": statistics.fmean(net_pnls),
-        "expectancy_r": None,
+        "expectancy_r": (statistics.fmean([t.r_multiple for t in trades
+                                            if t.r_multiple is not None])
+                         if any(t.r_multiple is not None for t in trades) else None),
         "t_stat": _t_stat(net_pnls),
     }
 
@@ -405,6 +406,7 @@ def run_backtest(
     as_of_time: dt.time = DEFAULT_AS_OF_TIME,
     intraday: bool = False,
     position_notional: float = STRATEGY_BACKTEST_POSITION_NOTIONAL,
+    slippage_bps: float = 5.0,
     record_note: bool = True,
 ) -> StrategyBacktestResult:
     """Run one StrategyVersion over historical Replay steps from `start` to
@@ -423,6 +425,10 @@ def run_backtest(
     from `version.algorithm_id` is instantiated once, with `version` itself,
     and called unchanged at every step.
     """
+    if not isinstance(slippage_bps, (int, float)) or not 0 <= slippage_bps <= 1000:
+        raise ValueError("slippage_bps must be in [0, 1000]")
+    if not isinstance(position_notional, (int, float)) or position_notional <= 0:
+        raise ValueError("position_notional must be positive")
     if isinstance(version, str):
         version = sreg.load_version(version, directory=registry_dir)
 
@@ -430,6 +436,11 @@ def run_backtest(
     version.verify()
     version.verify_implementation(strategy_cls)
     strategy = strategy_cls(version)
+    exit_policy = version.parameters.get("exit", {})
+    stop_loss_pct = exit_policy.get("stop_loss_pct")
+    target_pct = exit_policy.get("target_pct")
+    max_hold_days = exit_policy.get("max_hold_days")
+    slip = float(slippage_bps) / 10_000.0
 
     replay = Replay(store, as_of_time=as_of_time)
     steps = list(replay.walk(start, end))
@@ -439,10 +450,29 @@ def run_backtest(
     trades: list[SimulatedTrade] = []
     last_universe: list[str] = []
 
-    for step in steps:
+    for step_index, step in enumerate(steps):
         resolved_universe = _resolve_universe(step, universe)
         last_universe = resolved_universe
         context = ReplayStrategyContext(step)
+
+        # Risk exits are evaluated before new signals, so an entry cannot hit
+        # a stop/target on the same daily bar whose close created it.
+        for symbol, pos in list(open_positions.items()):
+            rows = step.view.prices(symbol, days=1)
+            if not rows or rows[-1].get("close") is None:
+                continue
+            market_price = float(rows[-1]["close"])
+            reason = None
+            if stop_loss_pct is not None and market_price <= pos["entry_price"] * (1 - stop_loss_pct / 100):
+                reason = "stop_loss"
+            elif target_pct is not None and market_price >= pos["entry_price"] * (1 + target_pct / 100):
+                reason = "target"
+            elif max_hold_days is not None and step_index - pos["entry_step_index"] >= max_hold_days:
+                reason = "max_hold"
+            if reason:
+                open_positions.pop(symbol)
+                trades.append(_close_trade(symbol, pos, market_price * (1 - slip),
+                                           step.as_of, reason, intraday))
 
         signals = strategy.generate_signal(context, list(resolved_universe))
         all_signals.extend(signals)
@@ -460,22 +490,24 @@ def run_backtest(
             if not bar_rows or bar_rows[-1].get("close") is None:
                 continue  # no priceable bar this step — skipped, never guessed
 
-            price = bar_rows[-1]["close"]
+            price = float(bar_rows[-1]["close"])
 
             if sig.action == "BUY":
                 if sig.symbol in open_positions:
                     continue  # already held — no pyramiding in v0
-                quantity = max(int(position_notional / price), 1)
+                fill_price = price * (1 + slip)
+                quantity = max(int(position_notional / fill_price), 1)
                 open_positions[sig.symbol] = {
-                    "entry_price": price, "entry_time": step.as_of,
-                    "quantity": quantity,
+                    "entry_price": fill_price, "entry_time": step.as_of,
+                    "entry_step_index": step_index, "quantity": quantity,
+                    "stop_loss_pct": stop_loss_pct,
                 }
             elif sig.action == "SELL":
                 pos = open_positions.pop(sig.symbol, None)
                 if pos is None:
                     continue  # no open long to close — no short-selling in v0
                 trades.append(_close_trade(
-                    sig.symbol, pos, price, step.as_of, "signal_exit", intraday))
+                    sig.symbol, pos, price * (1 - slip), step.as_of, "signal_exit", intraday))
 
     # Anything still open when the window ends is closed at the final step's
     # price rather than left dangling — the same documented simplification
@@ -486,7 +518,7 @@ def run_backtest(
             bar_rows = last_step.view.prices(symbol, days=1)
             if bar_rows and bar_rows[-1].get("close") is not None:
                 trades.append(_close_trade(
-                    symbol, pos, bar_rows[-1]["close"], last_step.as_of,
+                    symbol, pos, float(bar_rows[-1]["close"]) * (1 - slip), last_step.as_of,
                     "backtest_end", intraday))
 
     stats = _compute_stats(trades)
@@ -506,6 +538,8 @@ def run_backtest(
             "model": "engine.costs.equity_round_trip",
             "intraday": intraday,
             "position_notional": position_notional,
+            "slippage_bps_each_side": float(slippage_bps),
+            "exit_policy": exit_policy,
         },
         completed=True,
     )

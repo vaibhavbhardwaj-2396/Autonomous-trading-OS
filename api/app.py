@@ -16,6 +16,8 @@ argument. Every other route remains exactly what it always was: read-only.
     GET /research/evidence           |
     GET /research/areas              |
     GET /research/worker-status      |
+    GET /research/data-quality       |
+    GET /operations/status           |
     GET /strategies                  |
     GET /backtests                  /
 
@@ -92,11 +94,12 @@ from . import paper_data  # noqa: E402 — Slice AA: read-only paper/shadow endp
 from . import runtime_bridge  # noqa: E402 — Priority Phase 4: global control layer
 from . import artifacts  # noqa: E402 — outcome 2: the unified artifact explorer
 from . import ai_status  # noqa: E402 — outcome 2: AI provider config + budget
+from . import operations  # noqa: E402 — bounded, read-only subsystem health
 from control import runtime as ctrl  # noqa: E402
 from control import resources as rg  # noqa: E402 — outcome 1: the Resource Governor
 
 APP_NAME = "living-quant-api"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 
 def _int_query_param(name: str, default: Optional[int]) -> tuple[Optional[int], Optional[Response]]:
@@ -250,6 +253,16 @@ def create_app() -> Flask:
     @auth.require_auth
     def research_worker_status():
         return jsonify(data.get_research_worker_status())
+
+    @app.route("/research/data-quality", methods=["GET"])
+    @auth.require_auth
+    def research_data_quality():
+        return jsonify(data.get_data_quality())
+
+    @app.route("/operations/status", methods=["GET"])
+    @auth.require_auth
+    def operations_status():
+        return jsonify(operations.get_operations_status())
 
     # -- Strategies / backtests ---------------------------------------------
 

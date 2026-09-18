@@ -29,8 +29,9 @@ unresolved id.
 from __future__ import annotations
 
 from strategies.core import Strategy
+from strategies.spec import ALGORITHM_ID as CONTRACT_RULE_ID, ContractRuleStrategy
 
-ALGORITHM_REGISTRY: dict[str, type] = {}
+ALGORITHM_REGISTRY: dict[str, type] = {CONTRACT_RULE_ID: ContractRuleStrategy}
 
 
 class UnknownAlgorithm(RuntimeError):

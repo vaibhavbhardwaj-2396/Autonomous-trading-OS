@@ -105,7 +105,7 @@ class PaperPortfolio:
         return OrderOutcome(order=order, trade=None, is_new=order is not None)
 
     def process_signal(self, signal: Signal, history_df: Any, *, cycle_id: str,
-                       now: str) -> OrderOutcome:
+                       now: str, exit_reason: str = "signal_exit") -> OrderOutcome:
         """The one entry point the runner calls per Signal. Fully
         idempotent per (cycle_id, strategy_version_id, symbol, side,
         signal.generated_at) — see the module docstring and
@@ -129,7 +129,8 @@ class PaperPortfolio:
                                      signal_generated_at=signal_generated_at, now=now)
         else:  # SELL — Signal.__post_init__ already restricts action to BUY|SELL
             return self._process_sell(signal, fill.price, cycle_id=cycle_id,
-                                      signal_generated_at=signal_generated_at, now=now)
+                                      signal_generated_at=signal_generated_at, now=now,
+                                      exit_reason=exit_reason)
 
     # -- BUY -----------------------------------------------------------------
 
@@ -219,7 +220,8 @@ class PaperPortfolio:
     # -- SELL ------------------------------------------------------------------
 
     def _process_sell(self, signal: Signal, price: float, *, cycle_id: str,
-                      signal_generated_at: str, now: str) -> OrderOutcome:
+                      signal_generated_at: str, now: str,
+                      exit_reason: str = "signal_exit") -> OrderOutcome:
         open_lots = self.store.list_open_lots(
             strategy_version_id=signal.strategy_version_id, symbol=signal.symbol)
         if not open_lots:
@@ -256,7 +258,7 @@ class PaperPortfolio:
         trade = self.store.close_lot(
             oldest["id"], exit_order_id=order["paper_order_id"], exit_price=price,
             closed_at=now, gross_pnl=gross_pnl, costs=costs, net_pnl=net_pnl,
-            exit_reason="signal_exit", now=now,
+            exit_reason=exit_reason, now=now,
         )
         return OrderOutcome(order=order, trade=trade, is_new=True)
 

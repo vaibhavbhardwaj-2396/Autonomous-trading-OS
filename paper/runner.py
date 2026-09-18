@@ -39,6 +39,7 @@ from typing import Any, Iterator, Optional, Union
 
 from strategies import registry as sreg
 from strategies.core import StrategyVersionViolation
+from strategies.core import Signal
 
 from . import algorithms as palgo
 from . import config as paper_config
@@ -280,6 +281,35 @@ def _run_cycle_body(
 
         strategy = strategy_cls(version)
 
+        # Typed stop/target/time exits are portfolio concerns, not signal
+        # expression hacks. Evaluate one oldest open lot per symbol before
+        # entry signals, using only this cycle's bounded context.
+        exit_policy = version.parameters.get("exit", {})
+        for symbol in universe_list:
+            lots = store.list_open_lots(strategy_version_id=version_id, symbol=symbol)
+            if not lots:
+                continue
+            history_df = context.history(symbol, strategy.required_lookback or
+                                         paper_config.default_lookback_days())
+            reason = _paper_exit_reason(lots[0], history_df, context.as_of, exit_policy)
+            if reason is None:
+                continue
+            exit_signal = Signal(strategy_id=version.strategy_id,
+                                 strategy_version_id=version_id, symbol=symbol,
+                                 action="SELL", generated_at=context.as_of,
+                                 reasons=(reason,))
+            signals_evaluated += 1
+            outcome = portfolio.process_signal(exit_signal, history_df,
+                                               cycle_id=cycle_id, now=now,
+                                               exit_reason=reason)
+            if outcome.is_new and outcome.order and outcome.order["status"] == "FILLED":
+                orders_filled += 1
+                _maybe_notify_fill(exit_signal, outcome)
+            elif outcome.is_new and outcome.order:
+                orders_rejected += 1
+                _maybe_notify_rejection(exit_signal, outcome)
+            marked_symbols.add(symbol)
+
         try:
             signals = strategy.generate_signal(context, list(universe_list))
         except Exception as e:
@@ -339,6 +369,33 @@ def _run_cycle_body(
         "orders_rejected": orders_rejected,
         **perf,
     }
+
+
+def _paper_exit_reason(lot: dict, history_df: Any, as_of: dt.datetime,
+                       policy: dict) -> Optional[str]:
+    if not policy:
+        return None
+    from .fills import compute_fill
+    fill = compute_fill(history_df)
+    if fill is None:
+        return None
+    entry = float(lot["entry_price"])
+    price = float(fill.price)
+    stop = policy.get("stop_loss_pct")
+    target = policy.get("target_pct")
+    if stop is not None and price <= entry * (1 - float(stop) / 100):
+        return "stop_loss"
+    if target is not None and price >= entry * (1 + float(target) / 100):
+        return "target"
+    max_days = policy.get("max_hold_days")
+    if max_days is not None:
+        opened = dt.datetime.fromisoformat(str(lot["opened_at"]).replace("Z", "+00:00"))
+        current = as_of
+        if opened.tzinfo is None and current.tzinfo is not None:
+            opened = opened.replace(tzinfo=current.tzinfo)
+        if (current - opened).days >= int(max_days):
+            return "max_hold"
+    return None
 
 
 def _maybe_notify_fill(signal, outcome) -> None:

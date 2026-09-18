@@ -303,6 +303,34 @@ class Store:
             "prices": dict(px) if px else {},
         }
 
+    def quality_inventory(self, as_of: TimeLike) -> dict:
+        """Bounded point-in-time inventory for health checks and the UI.
+
+        Every row is knowledge-gated, so asking how the archive looked at a
+        historical instant cannot leak later arrivals into the answer.
+        """
+        gate = ts(as_of, end_of_day=True)
+        observations = self._conn.execute(
+            "SELECT dataset, COUNT(*) n, COUNT(DISTINCT entity) entities, "
+            "MAX(event_time) latest_event_time, MAX(knowledge_time) latest_knowledge_time "
+            "FROM observations WHERE knowledge_ts <= ? GROUP BY dataset ORDER BY dataset",
+            (gate,),).fetchall()
+        prices = self._conn.execute(
+            "SELECT COUNT(*) n, COUNT(DISTINCT symbol) entities, "
+            "MAX(session_date) latest_event_time, MAX(knowledge_time) latest_knowledge_time "
+            "FROM prices_eod WHERE knowledge_ts <= ?", (gate,),).fetchone()
+        triggers = {r[0] for r in self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'").fetchall()}
+        required_triggers = {"observations_no_update", "observations_no_delete",
+                             "prices_no_update", "prices_no_delete"}
+        return {
+            "as_of": iso(to_dt(as_of, end_of_day=True)),
+            "observations": [dict(r) for r in observations],
+            "prices_eod": dict(prices) if prices else {},
+            "append_only_enforced": required_triggers <= triggers,
+            "missing_append_only_triggers": sorted(required_triggers - triggers),
+        }
+
     # -- test support --------------------------------------------------------
 
     def _unsafe_connection(self) -> sqlite3.Connection:

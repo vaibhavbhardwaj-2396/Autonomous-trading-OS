@@ -111,7 +111,20 @@ if [[ "$restart_api" == true ]]; then
   systemctl is-active --quiet trading-api.service
   api_port="$(sed -n 's/^DASHBOARD_API_PORT=//p' deploy/api.env | tail -n 1)"
   api_port="${api_port:-8787}"
-  curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:${api_port}/health" >/dev/null
+  healthy=false
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if curl --fail --silent --show-error --max-time 5 \
+      "http://127.0.0.1:${api_port}/health" >/dev/null 2>&1; then
+      healthy=true
+      break
+    fi
+    sleep 1
+  done
+  if [ "$healthy" != true ]; then
+    echo "API did not become healthy after restart" >&2
+    systemctl status trading-api.service --no-pager >&2 || true
+    exit 1
+  fi
 fi
 
 echo "DEPLOYED_SHA=$target_sha"

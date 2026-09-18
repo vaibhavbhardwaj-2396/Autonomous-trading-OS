@@ -164,6 +164,8 @@ All protected endpoints require the bearer token above. All are `GET` only.
 | `GET /research/evidence` | `research.brain.digest.build_digest()`'s evidence section | PROMISING/WEAK/INCONCLUSIVE/CONTRADICTED verdicts |
 | `GET /research/areas` | `research.brain.research_areas.groups_as_dicts()` | hypothesis-to-area tags |
 | `GET /research/worker-status` | `research.brain.worker.worker_status()` | latest heartbeat, cooldown, errors, limits, and discovery queue-admission decision; telemetry-only read |
+| `GET /research/data-quality` | `research.data_quality.build_data_quality_report()` | point-in-time freshness, coverage and append-only integrity; explicit READY/DEGRADED/BLOCKED state |
+| `GET /operations/status` | bounded recorder JSONL, worker telemetry and read-only paper store | combined operational health; never starts work or creates a store |
 | `GET /strategies` | `strategies.registry.list_versions()` | registered StrategyVersions, `?limit=` |
 | `GET /backtests` | `research.memory`'s research-note log | backtest **completion notes** only, see below |
 

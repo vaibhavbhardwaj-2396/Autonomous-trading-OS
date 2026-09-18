@@ -458,6 +458,23 @@ export async function renderResearch() {
   );
 
   results.push(
+    await load("/research/data-quality", "research-quality", (data) => {
+      el("research-quality-cards").innerHTML = [
+        { label: "Readiness", value: data.status, cls: data.status === "READY" ? "good" : data.status === "DEGRADED" ? "amber" : "bad" },
+        { label: "Append-only store", value: data.append_only_enforced ? "Enforced" : "FAILED", cls: data.append_only_enforced ? "good" : "bad" },
+        { label: "Checked at", value: dt(data.as_of) },
+      ].map((card) => `<div class="card"><div class="label">${esc(card.label)}</div><div class="value ${card.cls || ""}">${esc(card.value)}</div></div>`).join("");
+      table(el("research-quality"), [
+        { key: "dataset", label: "Dataset" },
+        { key: "status", label: "Status", cell: (r) => `<td>${badge(r.status, r.status)}</td>` },
+        { key: "rows", label: "Rows", cell: (r) => `<td class="num">${num(r.rows, 0)}</td>` },
+        { key: "entities", label: "Entities", cell: (r) => `<td class="num">${num(r.entities, 0)}</td>` },
+        { key: "age_hours", label: "Age (h)", cell: (r) => `<td class="num">${r.age_hours == null ? "—" : num(r.age_hours, 1)}</td>` },
+      ], data.checks, "No data-quality requirements configured.");
+    }, "Data readiness unavailable")
+  );
+
+  results.push(
     await load("/research/drafts", "research-drafts", (data) => {
       table(
         el("research-drafts"),
@@ -721,14 +738,16 @@ function wireAiConfigForm() {
 export async function renderControl() {
   const results = [];
 
-  const [controlRes, resourceRes, aiRes] = await Promise.all([
+  const [controlRes, resourceRes, aiRes, operationsRes] = await Promise.all([
     apiGet("/control/status"),
     apiGet("/resources/status"),
     apiGet("/ai/status"),
+    apiGet("/operations/status"),
   ]);
   results.push({ ok: controlRes.ok, status: controlRes.status, error: controlRes.error });
   results.push({ ok: resourceRes.ok, status: resourceRes.status, error: resourceRes.error });
   results.push({ ok: aiRes.ok, status: aiRes.status, error: aiRes.error });
+  results.push({ ok: operationsRes.ok, status: operationsRes.status, error: operationsRes.error });
 
   if (controlRes.ok) {
     el("control-cards").innerHTML = controlModeCardsHtml(controlRes.data);
@@ -753,6 +772,18 @@ export async function renderControl() {
   el("resource-cards").innerHTML = resourceRes.ok
     ? resourceCardHtml(resourceRes.data)
     : `<div class="error-state">Resource status unavailable.</div>`;
+
+  if (operationsRes.ok) {
+    const op = operationsRes.data;
+    const worker = op.research_worker || {};
+    el("operations-cards").innerHTML = [
+      { label: "Research Worker", value: worker.last_heartbeat_at ? "Reporting" : "No heartbeat", cls: worker.last_heartbeat_at ? "good" : "amber", detail: dt(worker.last_heartbeat_at) },
+      { label: "Recorder", value: op.recorder.state, cls: op.recorder.state === "HEALTHY" ? "good" : op.recorder.state === "DEGRADED" ? "amber" : "bad", detail: dt(op.recorder.last_run && op.recorder.last_run.ts) },
+      { label: "Paper Cycle", value: op.paper.state, cls: op.paper.state === "FAILED" ? "bad" : op.paper.state === "COMPLETED" ? "good" : "amber", detail: dt(op.paper.last_cycle && op.paper.last_cycle.completed_at) },
+    ].map((card) => `<div class="card"><div class="label">${esc(card.label)}</div><div class="value ${card.cls}">${esc(card.value)}</div><div class="subtext">${esc(card.detail || "")}</div></div>`).join("");
+  } else {
+    errorState(el("operations-cards"), "Operational status unavailable.");
+  }
 
   if (aiRes.ok) {
     el("ai-cards").innerHTML = aiCardHtml(aiRes.data);

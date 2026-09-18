@@ -70,6 +70,7 @@ client = app.test_client()
 PROTECTED_GET_ROUTES = [
     "/account", "/positions", "/orders", "/trades", "/risk", "/regime",
     "/research/drafts", "/research/evidence", "/research/areas", "/research/worker-status",
+    "/research/data-quality", "/operations/status",
     "/strategies", "/backtests",
 ]
 
