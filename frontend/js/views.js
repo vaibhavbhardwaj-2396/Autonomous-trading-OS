@@ -8,7 +8,7 @@ import { apiGet, apiPost, setAdminToken, hasAdminToken } from "./api.js";
 import {
   esc, money, num, pnlClass, dt, badge, table, errorState,
   brokerCard, accountStaleNotice, accountInfoNotes,
-  accountTotalDisplay, unmanagedHoldingsDisplay, discoveryAdmissionDisplay,
+  accountTotalDisplay, accountSubtotalDisplay, unmanagedHoldingsDisplay, discoveryAdmissionDisplay,
 } from "./format.js";
 
 function el(id) {
@@ -125,10 +125,13 @@ function accountCardsHtml(acct, risk, regime) {
   const pnl = acct.pnl_today;
   const bc = brokerCard(acct);
   const at = accountTotalDisplay(acct);
+  const subtotal = accountSubtotalDisplay(acct);
   const cards = [
     { label: "Broker", value: bc.text, cls: bc.cls },
     { label: "Account Total", value: at.value, cls: at.unavailable ? "bad" : "",
       title: at.unavailable ? "verified broker account value is unavailable — not shown as cash" : "" },
+    ...(subtotal.partial ? [{ label: "Priced subtotal", value: subtotal.value, cls: "amber",
+      title: `${acct.unpriced_holding_count || 0} broker holding(s) are not currently quoteable; this is not the complete account total` }] : []),
     { label: "Broker Free Cash", value: money(acct.broker_free_cash) },
     { label: "Holdings Value", value: money(acct.holdings_market_value) },
     { label: "P&L Today", value: money(pnl), cls: pnlClass(pnl) },
@@ -159,7 +162,7 @@ function accountCardsHtml(acct, risk, regime) {
 function staleNoticeHtml(acct) {
   let html = "";
   const notice = accountStaleNotice(acct);
-  if (notice) html += `<div class="error-state" style="grid-column:1/-1">${esc(notice)}</div>`;
+  if (notice) html += `<div class="${acct.account_value_status === "incomplete" ? "warning-state" : "error-state"}" style="grid-column:1/-1">${esc(notice)}</div>`;
   for (const note of accountInfoNotes(acct)) {
     html += `<div class="empty-state" style="grid-column:1/-1;text-align:left">${esc(note)}</div>`;
   }
@@ -252,21 +255,19 @@ function tradingCardsHtml(acct, risk) {
   if (acct) {
     const bc = brokerCard(acct);
     const at = accountTotalDisplay(acct);
+    const subtotal = accountSubtotalDisplay(acct);
     const uh = unmanagedHoldingsDisplay(acct);
     // dynamic broker account
     cards.push({ label: "Broker", value: bc.text, cls: bc.cls });
     cards.push({ label: "Account Total", value: at.value, cls: at.unavailable ? "bad" : "",
       title: at.unavailable ? "verified broker account value is unavailable — not shown as cash" : "" });
+    if (subtotal.partial) cards.push({ label: "Priced Subtotal", value: subtotal.value, cls: "amber",
+      title: "current priced cash + holdings subtotal; not the complete account total" });
     cards.push({ label: "Broker Free Cash", value: money(acct.broker_free_cash) });
     cards.push({ label: "Holdings Value", value: money(acct.holdings_market_value) });
     cards.push({ label: "Unmanaged Holdings", value: uh.text,
       title: "your own INDmoney holdings — visible for reconciliation, never agent capital or tradeable" });
     cards.push({ label: "P&L Today", value: money(acct.pnl_today), cls: pnlClass(acct.pnl_today) });
-    // NOT the account value — the cap on what the autonomous agent may deploy
-    cards.push({ label: "Autonomous Mandate", value: money(acct.allocated_capital),
-      title: "the FIXED scaffold cap on capital the agent may deploy — not your account balance, "
-           + "not your portfolio value. Enforced by engine.execute/guardrails. A dynamic, "
-           + "broker-derived model replaces it in a later governed slice (docs/CAPITAL_MODEL.md)." });
   }
   if (risk) {
     // Field names here are engine.guardrails.status_summary()'s own, verbatim

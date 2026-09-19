@@ -179,15 +179,23 @@ check("views.js annotates the drawdown card when peak_capital_is_legacy",
 // --- account total / unmanaged holdings / sync timestamp --------------------
 const INCOMPLETE_ACCT = {
   account_value_status: "incomplete", total_value: null, broker_free_cash: 32.31,
+  partial_account_value: 61841.09, priced_holdings_subtotal: 61808.78,
+  unpriced_holding_count: 1,
   broker: { label: "INDmoney / INDstocks" }, broker_synced_at: "2026-09-10T15:00:00+05:30",
   unmanaged_holdings: { count: 26, value: null },
   account_warnings: ["Broker sync is current, but the account total could not be verified: 26 broker holding(s) present but the holdings valued at ~₹0. Free cash is shown; the account total is not."],
 };
+check("brokerCard() renders an incomplete current valuation as amber, not stale-red",
+  fmt.brokerCard(INCOMPLETE_ACCT).cls === "amber");
 const VERIFIED_ACCT = {
   account_value_status: "fresh", total_value: 63032.31, broker_free_cash: 32.31,
   broker: { label: "INDmoney / INDstocks" }, broker_synced_at: "2026-09-10T15:00:00+05:30",
   unmanaged_holdings: { count: 26, value: 63000 }, account_warnings: [],
 };
+check("accountSubtotalDisplay() exposes a clearly partial subtotal only for incomplete data",
+  fmt.accountSubtotalDisplay(INCOMPLETE_ACCT).partial === true
+  && fmt.accountSubtotalDisplay(INCOMPLETE_ACCT).value === fmt.money(61841.09)
+  && fmt.accountSubtotalDisplay(VERIFIED_ACCT).partial === false);
 
 check("accountTotalDisplay(): a verified total renders as money, not 'Unavailable'",
   fmt.accountTotalDisplay(VERIFIED_ACCT).value === fmt.money(63032.31)
@@ -233,9 +241,8 @@ check("views.js no longer renders an 'Agent Spendable Cash' card",
 check("views.js presents the dynamic broker account model (Account Total / Broker Free Cash / Holdings Value)",
   VIEWS_SRC.includes('"Account Total"') && VIEWS_SRC.includes('"Broker Free Cash"')
   && VIEWS_SRC.includes('"Holdings Value"'));
-check("allocated_capital appears ONLY as a clearly-labelled 'Autonomous Mandate', explained as not the account value",
-  VIEWS_SRC.includes('"Autonomous Mandate"')
-  && VIEWS_SRC.includes("not your account balance"));
+check("the legacy fixed-capital Autonomous Mandate card is absent from the UI",
+  !VIEWS_SRC.includes('"Autonomous Mandate"'));
 check("format.js no longer exports the fixed-capital portfolioValueDisplay helper",
   !FORMAT_SRC.includes("export function portfolioValueDisplay"));
 check("no hardcoded broker label string in frontend CODE (INDmoney/INDstocks only from the API payload)",

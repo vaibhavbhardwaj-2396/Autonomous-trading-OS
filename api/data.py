@@ -223,6 +223,7 @@ def get_account() -> dict:
     # unmigrated legacy state.
     portfolio_value = (bv["managed_equity"] if truth["capital_model"] == "managed"
                        else state.get("capital"))
+    snapshot_is_current = not truth["snapshot"]["stale"]
 
     return {
         "cash": state.get("cash_available"),
@@ -234,13 +235,18 @@ def get_account() -> dict:
         "total_value": truth["safe_total_value"],
         "broker_free_cash": truth["safe_broker_free_cash"],
         "holdings_market_value": truth["safe_holdings_market_value"],
+        # diagnostic subtotal: explicitly labelled partial and never substituted
+        # for total_value when one or more broker rows have no quote
+        "partial_account_value": snap.get("partial_account_value") if snapshot_is_current else None,
+        "priced_holdings_subtotal": snap.get("holdings_market_value") if snapshot_is_current else None,
+        "unpriced_holding_count": len(snap.get("unpriced_symbols") or []),
         "pnl_today": day.get("realized_pnl"),
         # --- managed book (dynamic model — managed cash + managed positions) -
         # each is a number only when the sync is fresh
         "managed_equity": truth["safe_managed_equity"],
         "managed_free_cash": truth["safe_managed_free_cash"],
         "managed_positions_market_value": truth["safe_managed_positions_market_value"],
-        # --- autonomous mandate (LEGACY scaffold cap — null once migrated) ---
+        # --- legacy compatibility only; the UI does not present this as capital ---
         "allocated_capital": state.get("allocated_capital"),
         "allocated_capital_set": truth["book_value"]["allocated_capital_set"],
         "realized_pnl_alltime": state.get("realized_pnl_alltime"),

@@ -100,7 +100,7 @@ export function brokerCard(acct) {
   return {
     label,
     status,
-    cls: status === "fresh" ? "good" : "bad",
+    cls: status === "fresh" ? "good" : status === "incomplete" ? "amber" : "bad",
     text: status === "fresh" ? label : `${label} · ${String(status).replace(/_/g, " ")}`,
   };
 }
@@ -141,6 +141,15 @@ export function accountTotalDisplay(acct) {
     return { value: money(acct.total_value), unavailable: false };
   }
   return { value: "Unavailable", unavailable: true };
+}
+
+/** A current but partial subtotal is useful diagnosis, never an account total. */
+export function accountSubtotalDisplay(acct) {
+  if (acct && acct.account_value_status === "incomplete"
+      && acct.partial_account_value !== null && acct.partial_account_value !== undefined) {
+    return { value: money(acct.partial_account_value), partial: true };
+  }
+  return { value: accountTotalDisplay(acct).value, partial: false };
 }
 
 /** "Unmanaged holdings" card: count, plus value only when the broker total

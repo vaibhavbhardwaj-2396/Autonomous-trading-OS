@@ -14,8 +14,8 @@ planned dynamic model.
 The dashboard used to show `capital` / `allocated_capital` (both ₹10k) as
 "Portfolio Value" / "Agent Book Value" — i.e. it told the user their
 portfolio was worth ₹10k while their INDmoney account holds ≈ ₹63k. That
-card is removed. `allocated_capital` now appears only as a small
-**"Autonomous Mandate"** card, explained as *not* the account value.
+card is removed. The legacy `allocated_capital` remains in the compatibility
+API shape for unmigrated fixtures but is not rendered as production capital.
 
 ## 2. Audit — where `allocated_capital` / `capital` are used
 
@@ -30,7 +30,7 @@ card is removed. `allocated_capital` now appears only as a small
 | `memory/state.json` **(FROZEN)** | stores `allocated_capital`, `capital`, `peak_capital`, `cash_available` | state |
 | `api/broker_truth.py:reconcile_book_value` | `expected_book_value = allocated + realized`; flags a `capital` figure poisoned with an account-total (`capital >> allocated`) | diagnostic (stale-state detector) |
 | `api/data.py:get_account` | exposes `allocated_capital`, `expected_book_value` in the payload | presentation |
-| `frontend/js/views.js` | **removed** the "Agent Book Value" / "Agent Allocated Capital" cards; `allocated_capital` now only the "Autonomous Mandate" card, explained | presentation |
+| `frontend/js/views.js` | removed all fixed-capital cards; incomplete broker valuations show an explicitly labelled priced subtotal, never a replacement total | presentation |
 | `paper/config.py` | `PAPER_INITIAL_CAPITAL` is *deliberately decoupled* — "never derived from `memory/state.json`'s real `allocated_capital`" | (not coupled) |
 
 **Verdict (superseded by §3):** the *mechanism* — the agent sizes/risks
