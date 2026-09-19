@@ -189,6 +189,12 @@ carries `broker` (`{id, label}` — the active broker, "INDmoney / INDstocks"),
 from the account total. Config: `BROKER`, `DASHBOARD_BROKER_SNAPSHOT_MAX_AGE_HOURS`,
 `DASHBOARD_BROKER_CUTOVER` in `deploy/api.env` (see `deploy/api.env.example`).
 
+When a current broker holding has no quote, `total_value` remains `null` and
+`account_value_status` is `incomplete`. `partial_account_value`,
+`priced_holdings_subtotal`, and `unpriced_holding_count` expose a clearly
+labelled diagnostic subtotal; clients must never treat it as the complete
+brokerage account value.
+
 ### Known v1 limitations (by design, not oversights)
 
 - **`/positions` has no `current_price`/`unrealized_pnl`.** The agent's own state doesn't

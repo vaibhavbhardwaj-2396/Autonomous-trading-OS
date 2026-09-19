@@ -113,6 +113,8 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 | `404d4ef` | roadmap continuation and frontend admission state |
 | `937b6a2` | integrated roadmap phases 0–10 release |
 | `56f9527` | daily broker auth/reconciliation, complete-valuation fail-close, separate Admin role, interactive UI and documentation refresh |
+| `5095929` | timezone-safe 07:15 IST broker refresh schedule |
+| `d1d9ad1` | remove the legacy benchmark card and show incomplete valuations as an amber, explicitly partial subtotal |
 
 This project operates around real money. Process compliance is more important
 than activity or profit; no-trade is always a valid result.
