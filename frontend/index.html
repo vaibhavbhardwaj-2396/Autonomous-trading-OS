@@ -8,8 +8,8 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>Living Quant <span class="tag">read-only observer</span></h1>
-    <div id="last-updated" class="subtext">not yet loaded</div>
+    <h1>Living Quant <span class="tag">autonomous research &amp; operations</span></h1>
+    <div class="topbar-actions"><span id="last-updated" class="subtext">not yet loaded</span><button id="refresh-now" class="ghost-btn">Refresh</button></div>
   </header>
 
   <div id="connection-banner"></div>
@@ -20,7 +20,7 @@
     <button data-view="paper">Paper</button>
     <button data-view="research">Research</button>
     <button data-view="strategies">Strategies</button>
-    <button data-view="control">Control</button>
+    <button data-view="control">🔒 Admin</button>
     <button data-view="artifacts">Artifacts</button>
   </nav>
 
@@ -152,6 +152,10 @@
 
     <!-- ============================== Control ============================== -->
     <section id="view-control" class="view">
+      <section class="panel admin-gate-panel">
+        <h2>Administrator Access</h2>
+        <div id="admin-access"></div>
+      </section>
       <section class="panel">
         <h2>Organism State</h2>
         <div id="control-cards" class="grid"></div>
@@ -210,7 +214,7 @@
   </main>
 
   <footer class="app-footer">
-    Living Quant Dashboard v1 · read-only · polls the API every few seconds · no write path exists
+    Living Quant Dashboard v2 · observer views are read-only · audited admin actions require a separate session credential
   </footer>
 
   <script src="config.js"></script>

@@ -43,21 +43,26 @@ def build(cycle: str, skip_scan: bool = False) -> str:
         lines.append("- **This is a circuit-breaker condition. Do not place any trade "
                      "this run.** Research and logging only.\n")
     else:
-        lines.append(
-            f"- **Agent mandate: ₹{sync['allocated_capital']:,.2f} allocated** → "
-            f"book value ₹{sync['agent_capital']:,.2f}"
-        )
+        lines.append(f"- **Managed equity: ₹{sync['agent_capital']:,.2f}** "
+                     "(broker free cash + governed managed positions)")
         lines.append(f"- Agent spendable cash: ₹{sync['agent_spendable_cash']:,.2f}")
         lines.append(
             f"- Agent's own positions: "
             f"{', '.join(sync['agent_positions']) if sync['agent_positions'] else 'none'}"
         )
         lines.append("")
-        lines.append(
-            f"- _Context only — the account also holds ₹{sync['account_total_value']:,.2f} "
-            f"total across {sync['unmanaged_count']} personal holdings "
-            f"(free cash ₹{sync['broker_free_cash']:,.2f})._"
-        )
+        if sync.get("account_total_value") is not None:
+            lines.append(
+                f"- _Context only — the complete broker account is worth "
+                f"₹{sync['account_total_value']:,.2f} across {sync['unmanaged_count']} "
+                f"personal holdings (free cash ₹{sync['broker_free_cash']:,.2f})._"
+            )
+        else:
+            lines.append(
+                f"- ⚠️ _Broker account valuation incomplete; priced subtotal "
+                f"₹{sync['partial_account_value']:,.2f}, free cash "
+                f"₹{sync['broker_free_cash']:,.2f}._"
+            )
         if sync.get("unmanaged_symbols"):
             lines.append(
                 f"- 🚫 **Off-limits — Vaibhav's own holdings, not the agent's to trade:** "

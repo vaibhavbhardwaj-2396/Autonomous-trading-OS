@@ -14,7 +14,7 @@ operator control plane. It deliberately stops before live strategy activation.
 | 7 | Strategy replay remains point-in-time and now declares costs, two-sided slippage, stop-loss, target and maximum-hold exits. Existing experiment contracts retain discovery/validation/holdout firewalls. |
 | 8 | The production algorithm is explicitly registered in both adapters. Paper cycles are bounded, locked, idempotent and reconcile typed exits through the paper ledger. |
 | 9 | Paper allocation/accounting is isolated from live state. The live `engine.guardrails` and mandate boundaries are unchanged and remain the only route to any future proposed order. |
-| 10 | Every operational endpoint is bearer-authenticated except liveness, CORS is allow-listed, writes are limited to audited mode/provider configuration, and the UI covers research, data, paper, resources, AI and system health. |
+| 10 | Every operational endpoint is bearer-authenticated except liveness, CORS is allow-listed, observer credentials cannot invoke the two audited mode/provider writes, the administrator credential is separate and session-only in the UI, and the UI covers broker, research, data, paper, resources, AI and system health. |
 
 The integrated acceptance test is `tests/test_phase_5_10.py`; existing focused
 test modules remain the authoritative regression suite for phases 1–4 and each

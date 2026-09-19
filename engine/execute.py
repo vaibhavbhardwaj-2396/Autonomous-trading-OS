@@ -84,6 +84,9 @@ def sync_from_broker() -> dict:
     holdings_mkt = sum(h.last_price * h.quantity for h in holdings if h.last_price > 0)
     positions_mkt = sum(p.last_price * abs(p.quantity) for p in positions if p.last_price > 0)
     account_total = broker_free_cash + holdings_mkt + positions_mkt
+    unpriced_symbols = sorted({p.symbol or "UNIDENTIFIED_HOLDING"
+                               for p in [*holdings, *positions] if p.last_price <= 0})
+    valuation_complete = not unpriced_symbols
 
     by_sym = {h.symbol: h for h in holdings}
     by_sym.update({p.symbol: p for p in positions})
@@ -95,8 +98,13 @@ def sync_from_broker() -> dict:
     now_iso = jr.now_ist().isoformat(timespec="seconds")
 
     state["broker_snapshot"] = {
-        "total_account_value": round(account_total, 2),
+        "broker": broker.name,
+        "total_account_value": round(account_total, 2) if valuation_complete else None,
+        "partial_account_value": round(account_total, 2),
         "free_cash": round(broker_free_cash, 2),
+        "holdings_market_value": round(holdings_mkt + positions_mkt, 2),
+        "valuation_complete": valuation_complete,
+        "unpriced_symbols": unpriced_symbols,
         "unmanaged_symbols": unmanaged,
         "synced_at": now_iso,
     }
@@ -183,6 +191,11 @@ def sync_from_broker() -> dict:
             f"No spendable cash: broker free cash is ₹{broker_free_cash:,.2f}. The agent "
             f"cannot open any position until cash is available in the account."
         )
+    if unpriced_symbols:
+        warnings.append(
+            "Broker valuation is incomplete; account total is withheld because no live "
+            f"price was returned for: {', '.join(unpriced_symbols)}"
+        )
     elif mgr is None and spendable < agent_notional_cash:
         warnings.append(
             f"Agent's book says ₹{agent_notional_cash:,.2f} free but the account only has "
@@ -199,7 +212,10 @@ def sync_from_broker() -> dict:
         "agent_spendable_cash": round(max(spendable, 0.0), 2),
         "agent_positions": sorted(agent_symbols),
         "broker_free_cash": round(broker_free_cash, 2),
-        "account_total_value": round(account_total, 2),
+        "account_total_value": round(account_total, 2) if valuation_complete else None,
+        "partial_account_value": round(account_total, 2),
+        "valuation_complete": valuation_complete,
+        "unpriced_symbols": unpriced_symbols,
         "managed_portfolio_value": round(managed_equity, 2),
         "managed_free_cash": round(managed_cash, 2),
         "managed_positions_market_value": round(managed_pos_mkt, 2),

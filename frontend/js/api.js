@@ -15,6 +15,18 @@ const CFG = window.DASHBOARD_CONFIG || {};
 const API_BASE_URL = (CFG.apiBaseUrl || "http://127.0.0.1:8787").replace(/\/+$/, "");
 const API_TOKEN = CFG.apiToken || "";
 export const POLL_INTERVAL_MS = CFG.pollIntervalMs || 15000;
+let adminToken = "";
+try { adminToken = sessionStorage.getItem("livingQuantAdminToken") || ""; } catch (_) {}
+
+export function setAdminToken(token) {
+  adminToken = String(token || "").trim();
+  try {
+    if (adminToken) sessionStorage.setItem("livingQuantAdminToken", adminToken);
+    else sessionStorage.removeItem("livingQuantAdminToken");
+  } catch (_) {}
+}
+
+export function hasAdminToken() { return Boolean(adminToken); }
 
 /**
  * GET `${API_BASE_URL}${path}`. Never throws — every failure mode (network
@@ -28,12 +40,14 @@ export const POLL_INTERVAL_MS = CFG.pollIntervalMs || 15000;
  *   {ok: false, status, error: "http", detail}              - any other non-2xx
  *   {ok: false, status, error: "bad_response"}               - 2xx but not valid JSON
  */
-export async function apiGet(path) {
+export async function apiGet(path, options = {}) {
   let resp;
   try {
     resp = await fetch(API_BASE_URL + path, {
       method: "GET",
-      headers: API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {},
+      headers: (options.admin ? adminToken : API_TOKEN)
+        ? { Authorization: `Bearer ${options.admin ? adminToken : API_TOKEN}` }
+        : {},
     });
   } catch (e) {
     return { ok: false, status: 0, error: "network" };
@@ -68,14 +82,16 @@ export async function apiGet(path) {
  * apiGet(). Used ONLY by the two control-action forms (organism mode,
  * AI provider) — see this file's own header comment.
  */
-export async function apiPost(path, body) {
+export async function apiPost(path, body, options = {}) {
   let resp;
   try {
     resp = await fetch(API_BASE_URL + path, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+        ...((options.admin ? adminToken : API_TOKEN)
+          ? { Authorization: `Bearer ${options.admin ? adminToken : API_TOKEN}` }
+          : {}),
       },
       body: JSON.stringify(body || {}),
     });

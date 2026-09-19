@@ -464,6 +464,7 @@ print("\n--- L: failed heartbeat telemetry is persisted (main()'s crash "
 # ===========================================================================
 
 _orig_run_cycle = w.run_worker_cycle
+_orig_resource_state_l = w.rg.get_resource_state
 
 
 def _exploding_cycle(*a, **k):
@@ -471,11 +472,13 @@ def _exploding_cycle(*a, **k):
 
 
 w.run_worker_cycle = _exploding_cycle
+w.rg.get_resource_state = lambda: {"state": "HEALTHY", "reasons": [], "snapshot": {}}
 try:
     rc_l = w.main(["--db", str(TMP / "l_crash.db"), "--registry-dir", str(fresh_registry("l")),
                   "--no-notify", "--quiet-on-success"])
 finally:
     w.run_worker_cycle = _orig_run_cycle
+    w.rg.get_resource_state = _orig_resource_state_l
 check("L1: main() returns exit code 1 for an unexpected crash, never a raw traceback",
       rc_l == 1, rc_l)
 _st_after_l = w.worker_status()

@@ -27,17 +27,29 @@ Preserve unrelated changes and never stage the local untracked AGENTS.md.
 | 7 | Realistic backtests, cost/slippage assumptions, holdout controls | **Complete** — point-in-time replay, holdout evidence gate, costs, two-sided slippage and stop/target/time exits |
 | 8 | Paper factory with reliable scheduling and reconciliation | **Complete** — registered algorithms, bounded/idempotent cycles, locking, accounting and typed exit reconciliation |
 | 9 | Portfolio/risk integration within protected guardrails | **Complete** — isolated paper portfolio plus unchanged, tested live guardrails; live activation remains Phase 11 |
-| 10 | Secure administration, complete UI workflows and operations | **Complete** — authenticated control plane, explicit CORS, audit history, resource/AI controls and operational UI |
+| 10 | Secure administration, complete UI workflows and operations | **Complete** — distinct observer/admin authentication, explicit CORS, audit history, resource/AI controls, broker health and interactive operational UI |
 | 11 | Human-gated live readiness and operational handoff | Pending; human gate remains required |
 
 These are phases, not assertions that an entire phase is done after one commit.
 Existing modules must be inspected and reused before adding new implementations.
 
-## Next work
+## Remaining plan (Phase 11)
 
-Phase 11 only: human-gated live readiness, shadow-performance review, explicit
-operator approval, canary sizing and rollback rehearsal. Completion of phases
-0–10 does **not** authorize a live order or remove any existing live pause.
+1. Restore bounded research/paper schedules only when the external AI budget is
+   intentionally available; today those token-consuming jobs remain paused.
+2. Repair optional/stale market-data sources until readiness is READY rather
+   than DEGRADED.
+3. Collect enough out-of-sample and paper observations for statistical review;
+   no strategy may skip this evidence gate.
+4. Retain continuous broker reconciliation and daily authentication evidence.
+5. Drill expired auth, quote omission, API outage, process crash, state
+   mismatch, stop failure and deployment rollback.
+6. Prepare one canary strategy/version with explicit risk and rollback limits.
+7. Require separate human approval for that exact canary, then observe it
+   before any expansion.
+
+Completion of phases 0–10 does **not** authorize a live order or remove any
+existing live pause.
 
 ## Unattended continuation
 

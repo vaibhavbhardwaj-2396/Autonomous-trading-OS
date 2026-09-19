@@ -157,10 +157,10 @@ holdings in the INDmoney app. `account_total_value` = the cash, nothing else.
 | Step | Where | What |
 |---|---|---|
 | free cash | `INDstocksBroker.funds()` | `GET /funds` → `data.detailed_avl_balance.eq_cnc` (confirmed 2026-09-02) → `32.31` ✓ |
-| holdings | `INDstocksBroker.holdings()` | `GET /portfolio/holdings` → rows of `symbol` / `total_qty` / `avg_price` — **no price field** (confirmed against docs 2026-09-02) → `Position(last_price=0.0)` |
-| positions | `INDstocksBroker.positions()` | `GET /portfolio/positions` → `symbol` / `net_qty` / `avg_price` / `product` / `segment` — **no price field** → `Position(last_price=0.0)` |
-| **account_total_value** | **`engine/execute.py:sync_from_broker` (FROZEN)** | `broker_free_cash + Σ(h.last_price·qty) + Σ(p.last_price·|qty|)` = `32.31 + Σ(0·qty) + 0` = **`32.31`** |
-| unmanaged_symbols | `engine/execute.py` (frozen) | `{h.symbol for h in holdings} ∪ {p.symbol …} − agent positions` → all 26 (correct, unchanged) |
+| holdings | `INDstocksBroker.holdings()` | `GET /portfolio/holdings`; identity is resolved by security id/ISIN/symbol against the instrument master, then LTP is attached |
+| positions | `INDstocksBroker.positions()` | `GET /portfolio/positions`; the same exact-identity pricing path is used |
+| **account_total_value** | **`engine/execute.py:sync_from_broker`** | cash + every priced holding/position; withheld when even one row is unpriced |
+| unmanaged_symbols | `engine/execute.py` | broker symbols minus agent positions; personal holdings remain visible and protected |
 
 **Why ₹32.31:** `engine/execute.py`'s account-total formula was written for
 **Kite**, whose `holdings()` response *does* carry `last_price` (see
@@ -168,13 +168,13 @@ holdings in the INDmoney app. `account_total_value` = the cash, nothing else.
 `INDstocksBroker.holdings()` returned `last_price=0.0` for every holding and the
 frozen formula valued them all at ₹0.
 
-**Fix (in `engine/broker_indstocks.py` — `execute.py` is untouched):**
+**Fix:**
 `holdings()` and `positions()` now attach a live `last_price` to each row via
-the **confirmed** `/market/quotes/ltp` endpoint (`self.quote()` — response shape
+the **confirmed** `/market/quotes/ltp` endpoint (response shape
 `{"data": {"NSE_<sid>": {"live_price": N}}}`, confirmed 2026-09-07), in one
-batched call. A symbol that can't be resolved or quoted keeps `last_price=0.0`
-(never a fabricated price). The frozen `account_total` formula then produces a
-real number whenever the quotes resolve.
+batched call. Broker rows missing a symbol are recovered through ISIN where
+possible. A row that cannot be resolved or quoted remains unpriced; a price is
+never fabricated.
 
 **Fail closed (`holdings_valuation()` in `api/broker_truth.py`):** the dashboard
 reads only `broker_snapshot`, so it computes
@@ -185,21 +185,17 @@ reads only `broker_snapshot`, so it computes
 **"Unavailable"**), `broker_free_cash` still shown (a single confirmed field),
 a warning is emitted. This catches the exact ₹32.31 case.
 
-**Known limitation:** `holdings_valuation()` can only detect a *fully* unpriced
-valuation (holdings ≈ ₹0). A *partial* one (e.g. 20 of 26 holdings priced) still
-looks plausible and is not detectable from the persisted snapshot. Closing that
-needs per-holding valuation recorded in `broker_snapshot` — an `engine.execute`
-change, which requires explicit approval.
+`engine.execute sync` persists `valuation_complete` and `unpriced_symbols`.
+A *partial* quote response therefore also fails closed:
+`total_account_value` is null and only `partial_account_value` is retained for
+diagnosis. The older cash-only heuristic remains for backward compatibility.
 
 ### Capture the real response shapes before relying on this in production
 
-The `/portfolio/holdings` and `/portfolio/positions` raw responses have **never
-been captured** — the current field list is from the official docs, and
-`scripts/indstocks_probe.py` still points at the *old* `/holdings` path. Run
-this on the VPS with a valid token and paste the (redacted) output so we can
-(a) confirm whether the holdings response already carries a market-value or LTP
-field (which would make the quote round-trip unnecessary), and (b) confirm the
-`/portfolio/positions` shape:
+The live production diagnosis confirmed `/portfolio/holdings` returns 25 rows,
+with 24 directly symbol-priced and one symbol-less row recoverable from ISIN in
+the instrument master. The adapter no longer depends on the obsolete paths in
+`scripts/indstocks_probe.py`. For a future redacted shape-only check, use:
 
 ```bash
 cd /root/trading-agent && venv/bin/python - <<'PY'
@@ -252,11 +248,9 @@ tradeable.
   (green when fresh, red + status when not).
 - **"Account Total"** card: the verified value, or the literal word
   **"Unavailable"** — cash is never shown mislabelled as an account total.
-- **"Broker Free Cash"** / **"Agent Allocated Capital"** / **"Agent Spendable
-  Cash"** as distinct cards (Trading tab); **"Unmanaged Holdings"** shows the
-  count, plus a value only when verified (else "value unverified").
-- "Agent Book Value" falls back to `expected_book_value` (with a ⚠) when
-  `book_value_reconciled` is false — so a poisoned `capital` is never shown.
+- **"Broker Free Cash"**, **"Holdings Value"** and **"Managed Equity"** are
+  distinct. The migrated production model has no fixed allocated-capital card.
+- A poisoned or incomplete broker total is never substituted with a book value.
 - A full-width notice above the cards, carrying the broker sync timestamp,
   whenever the data is stale, incomplete, or the book value is unreconciled.
 

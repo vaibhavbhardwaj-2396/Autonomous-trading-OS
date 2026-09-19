@@ -523,11 +523,10 @@ def holdings_valuation(state: dict) -> dict:
           "reason": str | None,
         }
 
-    LIMITATION: this can only catch a *fully* unpriced valuation (holdings
-    ≈ ₹0). A *partial* one (say 20 of 26 holdings priced) still yields a
-    plausible-looking `holdings_value` and is not detectable from the
-    persisted snapshot alone — closing that gap needs per-holding valuation
-    recorded in the snapshot, which is an `engine.execute` change.
+    Current snapshots explicitly persist `valuation_complete` and
+    `unpriced_symbols`, so a partially priced portfolio also fails closed.
+    The older cash-only heuristic remains for backward compatibility with
+    snapshots created before those fields existed.
     """
     snap = state.get("broker_snapshot") or {}
     total = _as_float(snap.get("total_account_value"))
@@ -535,6 +534,8 @@ def holdings_valuation(state: dict) -> dict:
     n_unmanaged = len(snap.get("unmanaged_symbols") or [])
     n_agent_positions = len(state.get("open_positions") or [])
     n_holdings = n_unmanaged + n_agent_positions
+    explicit_complete = snap.get("valuation_complete")
+    unpriced = list(snap.get("unpriced_symbols") or [])
 
     holdings_value = None
     if total is not None and free_cash is not None:
@@ -549,6 +550,13 @@ def holdings_valuation(state: dict) -> dict:
     }
     if n_holdings <= 0:
         return out  # no holdings — total is just cash, and that's genuinely complete
+
+    if explicit_complete is False or unpriced:
+        out["complete"] = False
+        out["reason"] = (f"{len(unpriced)} holding(s) have no live broker price: "
+                         f"{', '.join(unpriced[:8])}" +
+                         ("…" if len(unpriced) > 8 else ""))
+        return out
 
     floor = _holdings_value_floor()
     if holdings_value is None:

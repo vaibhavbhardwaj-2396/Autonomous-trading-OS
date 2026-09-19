@@ -144,6 +144,7 @@ Set:
 
 ```bash
 DASHBOARD_API_TOKEN=YOUR_API_TOKEN        # generate: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+DASHBOARD_ADMIN_TOKEN=YOUR_SEPARATE_ADMIN_TOKEN  # generate independently; never add to Netlify
 DASHBOARD_CORS_ORIGINS=https://your-dashboard-site.netlify.app
 DASHBOARD_API_HOST=127.0.0.1
 DASHBOARD_API_PORT=8787
@@ -161,8 +162,9 @@ chown root:tradingapi deploy/api.env
 chmod 640 deploy/api.env
 ```
 
-(`640` — the service reads it as group `tradingapi`; only root can write it. `docs/API.md`
-§8 has the exact Netlify environment variable this same token needs to match.)
+(`640` — the service reads it as group `tradingapi`; only root can write it.
+Only `DASHBOARD_API_TOKEN` is copied to Netlify. The admin token remains VPS-side
+and is entered interactively when an admin session is needed.)
 
 **After any code change to `api/`**, the running `trading-api.service` does **not**
 update itself — it must be redeployed (`git pull` + `sudo systemctl restart trading-api`,
@@ -385,12 +387,11 @@ gracefully, not indicate an outage.
 Restated plainly, because a deployment step is exactly where it's easiest to lose track of
 this:
 
-- **The API is read-only.** No endpoint anywhere in `api/` writes, places, modifies, or
-  cancels anything — `tests/test_api.py` section D proves this empirically (hashes every
-  real data file before and after hitting every endpoint) and section I proves every
-  non-GET method returns 404/405, never 200. `deploy/trading-api.service`'s own
-  `ProtectSystem=strict` + narrow `ReadWritePaths=` enforce the same boundary at the OS
-  level, independent of the application code.
+- **The API has no order path.** Account/research/paper endpoints are read-only.
+  Exactly two administrator-only writes change runtime mode or the future
+  research AI provider; both are audited and require a reason. They cannot
+  place, size, modify or cancel an order. `deploy/trading-api.service` also
+  applies `ProtectSystem=strict` with narrow writable paths.
 - **The dashboard cannot execute trades.** There is no order-entry control anywhere in
   `frontend/` — `docs/API.md`'s "STEP 6" requirements and this repo's own review of
   `frontend/js/views.js` confirm no such control was ever built.

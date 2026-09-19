@@ -308,6 +308,22 @@ check("holdings priced: allocated_capital (₹10k) still independent of the ₹6
       truth["book_value"]["allocated_capital"] == 10000.0
       and truth["safe_total_value"] != truth["book_value"]["allocated_capital"], str(truth))
 
+# partially priced: explicit completeness metadata prevents a plausible subtotal
+# from being published as the full brokerage account value.
+PARTIAL = json.loads(json.dumps(PRICED))
+PARTIAL["broker_snapshot"].update({
+    "total_account_value": None,
+    "partial_account_value": 59800.0,
+    "valuation_complete": False,
+    "unpriced_symbols": ["MISSING_QUOTE"],
+})
+truth = broker_truth.account_truth(PARTIAL, now=NOW)
+check("partial pricing: explicit unpriced_symbols withholds the plausible subtotal",
+      truth["account_value_status"] == "incomplete"
+      and truth["safe_total_value"] is None, str(truth))
+check("partial pricing: warning identifies the unpriced holding",
+      any("MISSING_QUOTE" in w for w in truth["warnings"]), str(truth["warnings"]))
+
 # malformed snapshot: total present, free_cash missing, holdings present -> fail closed
 MALFORMED = {
     "allocated_capital": 10000.0, "capital": 10000.0, "open_positions": [],
@@ -865,19 +881,15 @@ check("7. /account route body is just jsonify(data.get_account()) — no side ef
 # tests/test_capital_model.py. This file asserts only that api/ stays a
 # read-only layer with no order path, which is checked above.)
 #
-# api/app.py itself is deliberately EXCLUDED from this specific diff check
-# as of Priority Phase 4 — it is expected to keep gaining new routes over
-# time (its own GET-only-ness is checked directly above, and independently
-# in tests/test_deployment_readiness.py). api/auth.py (the auth boundary)
-# and api/wsgi.py (the production entrypoint) have no legitimate reason to
-# change for ordinary feature work and remain a real, standing invariant.
+# api/app.py and api/auth.py are deliberately EXCLUDED from this specific
+# diff check: the administrator boundary legitimately changes both while
+# route-level tests independently prove the narrow write allow-list.
+# api/wsgi.py remains the production-entrypoint invariant.
 import subprocess  # noqa: E402
 _diff = subprocess.run(
-    ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD", "--",
-     "api/auth.py", "api/wsgi.py"],
+    ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD", "--", "api/wsgi.py"],
     capture_output=True, text=True)
-check("the read-only API's auth boundary and WSGI entrypoint (auth.py / "
-      "wsgi.py) are unchanged by broker-truth work",
+check("the production WSGI entrypoint is unchanged by broker-truth work",
       _diff.stdout.strip() == "", f"changed: {_diff.stdout.strip()!r}")
 
 

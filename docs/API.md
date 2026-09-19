@@ -1,17 +1,12 @@
-# Dashboard API (v1, read-only)
+# Dashboard and Admin API
 
 Covers: running `api/` (the HTTP API) and `frontend/` (the dashboard) locally, how
 authentication and CORS are configured, the full endpoint list, what this API does and does
 not protect against, and how the pieces are meant to separate later onto a VPS + Netlify.
-**Nothing in this document has been deployed** — see "Future deployment" at the end.
-
-**v1 is read-only, structurally.** There is no endpoint anywhere in `api/` that writes,
-places an order, modifies risk, locks or approves a research Contract, promotes a
-StrategyVersion, or touches broker/engine state. `api/data.py`'s module docstring lists
-every write-capable function it deliberately never imports; `tests/test_api.py` section D
-proves this empirically by hashing every real data file/directory before and after hitting
-every endpoint, and section I proves POST/PUT/PATCH/DELETE against every route return 404
-or 405, never 200.
+The API and dashboard are deployed on the production VPS and Netlify. All
+account/research/paper routes are read-only. Exactly two audited configuration
+writes exist: runtime mode and research AI-provider selection. Both require the
+separate administrator token and neither can place or modify an order.
 
 ## 1. Running the API locally
 
@@ -25,6 +20,7 @@ Edit `.env` and set at minimum:
 
 ```bash
 DASHBOARD_API_TOKEN=some-long-random-string
+DASHBOARD_ADMIN_TOKEN=a-different-long-random-string
 DASHBOARD_CORS_ORIGINS=http://localhost:5173
 ```
 
@@ -119,12 +115,16 @@ for a four-tab dashboard.
 
 ## 3. Authentication
 
-A single shared bearer token, not a login system — this is a single-operator tool, and
-`api/auth.py`'s docstring explains the reasoning in full. Every protected endpoint requires:
+This single-operator system has two bearer-token roles. Data reads use:
 
 ```
 Authorization: Bearer <DASHBOARD_API_TOKEN>
 ```
+
+`DASHBOARD_ADMIN_TOKEN` is a separate credential for `GET /admin/status`,
+`POST /control/mode`, and `POST /ai/config`. The observer credential receives
+403 on both writes. The frontend never embeds the admin token; it is entered on
+the **🔒 Admin** tab and retained only in browser `sessionStorage`.
 
 - Missing or wrong token → `401 {"error": "unauthorized", ...}`. The response never echoes
   back what token was expected.
@@ -149,7 +149,7 @@ every browser treats as blocked. There is no wildcard (`*`) mode, ever, by desig
 
 ## 5. Endpoints
 
-All protected endpoints require the bearer token above. All are `GET` only.
+All data endpoints require either valid bearer token and are `GET` only.
 
 | Endpoint | Reads through | Notes |
 |---|---|---|
@@ -168,6 +168,9 @@ All protected endpoints require the bearer token above. All are `GET` only.
 | `GET /operations/status` | bounded recorder JSONL, worker telemetry and read-only paper store | combined operational health; never starts work or creates a store |
 | `GET /strategies` | `strategies.registry.list_versions()` | registered StrategyVersions, `?limit=` |
 | `GET /backtests` | `research.memory`'s research-note log | backtest **completion notes** only, see below |
+| `GET /admin/status` | auth boundary | verifies the separate admin token; returns no secret |
+| `POST /control/mode` | audited runtime control | changes only global mode; requires admin + reason |
+| `POST /ai/config` | audited AI configuration | changes only future research provider/model; requires admin + reason |
 
 Every response is deterministic JSON built from already-authoritative state; nothing here
 computes a statistic, a risk figure, or a verdict that doesn't already exist somewhere else
@@ -211,9 +214,9 @@ token:
   **Anyone who can view that page's JS can read the token.** Treat the dashboard's URL, once
   deployed, as roughly equivalent to the token itself — don't post it publicly, and rotate
   the token (`DASHBOARD_API_TOKEN`) if you ever suspect it leaked.
-- There is deliberately no write path for a leaked token to abuse — the worst a leaked token
-  exposes is read access to the same account/position/research summaries described above,
-  never an ability to trade, close a position, or touch research state.
+- A leaked observer token grants reads only. The separate administrator token
+  can invoke the two configuration writes above, but still cannot trade, close
+  a position, change guardrails, or approve/promote a strategy.
 - CORS is an allow-list, never a wildcard (see above). The API never leaks an internal
   exception message, stack trace, or filesystem path in a response body — `api/app.py`'s
   error handlers return generic messages and log the real detail server-side only

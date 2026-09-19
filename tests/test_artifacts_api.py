@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 os.environ["DASHBOARD_API_TOKEN"] = "test-secret-token-do-not-leak"
+os.environ["DASHBOARD_ADMIN_TOKEN"] = "test-admin-token-do-not-leak"
 os.environ["DASHBOARD_CORS_ORIGINS"] = "http://localhost:5173"
 
 from api import artifacts  # noqa: E402
@@ -194,6 +195,7 @@ print("\n--- C: the real Flask routes ---")
 
 TOKEN = os.environ["DASHBOARD_API_TOKEN"]
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+ADMIN_AUTH = {"Authorization": f"Bearer {os.environ['DASHBOARD_ADMIN_TOKEN']}"}
 app = api_app_mod.create_app()
 client = app.test_client()
 
@@ -204,8 +206,19 @@ for route in NEW_GET_ROUTES:
     check(f"C1: GET {route} without auth is refused (401)", r_noauth.status_code == 401)
 
 r_noauth = client.post("/ai/config", json={"provider": "openai", "reason": "x"})
-check("C2: POST /ai/config without auth is refused (401), never a usable "
-      "unauthenticated write", r_noauth.status_code == 401)
+check("C2: POST /ai/config without admin auth is refused (403), never a usable "
+      "unauthenticated write", r_noauth.status_code == 403)
+check("C2b: the observer token cannot use the admin write route",
+      client.post("/ai/config", headers=AUTH,
+                  json={"provider": "openai", "reason": "x"}).status_code == 403)
+check("C2c: the observer token cannot change global runtime mode",
+      client.post("/control/mode", headers=AUTH,
+                  json={"mode": "PAUSED", "reason": "x"}).status_code == 403)
+check("C2d: the administrator token verifies on the dedicated status route",
+      client.get("/admin/status", headers=ADMIN_AUTH).status_code == 200)
+check("C2e: authenticated admin mode changes still validate input before writing",
+      client.post("/control/mode", headers=ADMIN_AUTH,
+                  json={"mode": "NOT_A_MODE", "reason": "x"}).status_code == 400)
 
 r_resources = client.get("/resources/status", headers=AUTH)
 check("C3: GET /resources/status with auth returns 200 and a real "
@@ -231,12 +244,12 @@ r_missing = client.get("/artifacts/model_interaction:999999999", headers=AUTH)
 check("C7: GET /artifacts/<nonexistent id> returns 404", r_missing.status_code == 404)
 
 # /ai/config validation, mirroring /control/mode's own validation tests.
-r_bad_provider = client.post("/ai/config", headers=AUTH,
+r_bad_provider = client.post("/ai/config", headers=ADMIN_AUTH,
                              json={"provider": "not_a_provider", "reason": "x"})
 check("C8: POST /ai/config with an unknown provider returns 400",
       r_bad_provider.status_code == 400, r_bad_provider.get_json())
 
-r_no_reason = client.post("/ai/config", headers=AUTH, json={"provider": "openai"})
+r_no_reason = client.post("/ai/config", headers=ADMIN_AUTH, json={"provider": "openai"})
 check("C9: POST /ai/config with no reason returns 400 (reason required, "
       "same discipline as /control/mode)", r_no_reason.status_code == 400)
 
@@ -248,7 +261,7 @@ check("C9: POST /ai/config with no reason returns 400 (reason required, "
 # with provider=None".
 _real_ai_config_existed_before = ai_config.STATE_PATH.exists()
 _real_ai_config_before = ai_config.get_config()
-r_switch = client.post("/ai/config", headers=AUTH,
+r_switch = client.post("/ai/config", headers=ADMIN_AUTH,
                        json={"provider": "anthropic_cli", "reason": "api route test",
                              "actor": "test"})
 check("C10: POST /ai/config with valid input returns 200 and the new "
@@ -261,7 +274,7 @@ check("C10: POST /ai/config with valid input returns 200 and the new "
 # write, before and after.
 STATE_JSON = Path("memory/state.json")
 _state_hash_before = STATE_JSON.stat().st_mtime if STATE_JSON.exists() else None
-client.post("/ai/config", headers=AUTH, json={"provider": "openai", "reason": "isolation check"})
+client.post("/ai/config", headers=ADMIN_AUTH, json={"provider": "openai", "reason": "isolation check"})
 _state_hash_after = STATE_JSON.stat().st_mtime if STATE_JSON.exists() else None
 check("C11: POST /ai/config never touches memory/state.json (mtime unchanged)",
       _state_hash_before == _state_hash_after, (_state_hash_before, _state_hash_after))

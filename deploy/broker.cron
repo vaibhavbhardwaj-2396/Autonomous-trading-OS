@@ -1,0 +1,4 @@
+# Living Quant — broker authentication and read-only reconciliation.
+# INDstocks resets tokens at 07:00 IST. Refresh every calendar day so the
+# dashboard remains current on weekends too. This never invokes an order path.
+15 7 * * * cd /root/trading-agent && ./scripts/refresh_indstocks_session.sh >> logs/broker_refresh.log 2>&1

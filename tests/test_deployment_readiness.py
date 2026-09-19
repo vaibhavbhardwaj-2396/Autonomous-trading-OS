@@ -54,6 +54,7 @@ print("--- A: production WSGI entrypoint (api.wsgi:app) ---")
 # test module or the real shell environment, so behavior here reflects only
 # what api/wsgi.py itself does.
 os.environ.pop("DASHBOARD_API_TOKEN", None)
+os.environ.pop("DASHBOARD_ADMIN_TOKEN", None)
 os.environ.pop("DASHBOARD_CORS_ORIGINS", None)
 
 from api import wsgi as api_wsgi   # noqa: E402
@@ -65,11 +66,11 @@ check("A: api.wsgi.app is a Flask application instance", isinstance(api_wsgi.app
 
 _wsgi_rules = list(api_wsgi.app.url_map.iter_rules())
 _wsgi_routes = sorted({r.rule for r in _wsgi_rules if r.rule != "/static/<path:filename>"})
-check("A: api.wsgi.app has the expected route count (28: /health + 14 live/operational + "
+check("A: api.wsgi.app has the expected route count (29, including /admin/status: /health + 14 live/operational + "
       "6 paper/shadow — Slice AA + 2 global control — Priority Phase 4 + "
       "5 outcome 2/resource-governor routes: /resources/status, /ai/status, "
       "/ai/config, /artifacts, /artifacts/<id>; worker/data/operations telemetry)",
-      len(_wsgi_routes) == 28, str(_wsgi_routes))
+      len(_wsgi_routes) == 29, str(_wsgi_routes))
 check("A: /health is present on the WSGI entrypoint", "/health" in _wsgi_routes)
 check("A: /account is present on the WSGI entrypoint", "/account" in _wsgi_routes)
 
@@ -110,11 +111,11 @@ for method in ("post", "put", "patch", "delete"):
         if method.upper() in allowed:
             # The route DOES have a handler for this method (that's the
             # point of the exception) — but with no Authorization header
-            # supplied, it must still be refused, via 401 (auth), never a
+            # supplied, it must still be refused, via 403 (admin auth), never a
             # usable unauthenticated write.
-            check(f"A: {method.upper()} {route} without auth is refused (401), "
+            check(f"A: {method.upper()} {route} without auth is refused (403), "
                   f"never a usable unauthenticated write",
-                  r.status_code == 401, f"{r.status_code}")
+                  r.status_code == 403, f"{r.status_code}")
         else:
             check(f"A: {method.upper()} {route} on api.wsgi:app is not a usable write endpoint (405/404)",
                   r.status_code in (404, 405), f"{r.status_code}")
@@ -178,6 +179,11 @@ _restore(_saved)
 _saved = _with_env(DASHBOARD_API_TOKEN="  real-token  ")
 check("B: api_token() strips surrounding whitespace from a real token",
       api_config.api_token() == "real-token")
+_restore(_saved)
+
+_saved = _with_env(DASHBOARD_ADMIN_TOKEN="  admin-token  ")
+check("B: admin_token() strips surrounding whitespace from a real token",
+      api_config.admin_token() == "admin-token")
 _restore(_saved)
 
 _saved = _with_env(DASHBOARD_CORS_ORIGINS=None)
@@ -256,7 +262,7 @@ _SECRET_VAR_NAMES = [
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
     "INDSTOCKS_ACCESS_TOKEN", "INDSTOCKS_TOTP_SECRET", "INDSTOCKS_MPIN",
     "INDSTOCKS_CLIENT_ID", "PERPLEXITY_API_KEY",
-    "DASHBOARD_API_TOKEN", "DASHBOARD_CORS_ORIGINS",
+    "DASHBOARD_API_TOKEN", "DASHBOARD_ADMIN_TOKEN", "DASHBOARD_CORS_ORIGINS",
 ]
 _PLACEHOLDER_VALUES = {
     "", "your_vps_ip", "your_github_repo", "your_api_token",
@@ -415,6 +421,26 @@ check("E: docs/RESEARCH_DEPLOY.md marks the 01:00 research.overnight cron as ret
       re.search(r"research\.overnight.*(retired|RETIRED|superseded|no longer)",
                 (REPO_ROOT / "docs" / "RESEARCH_DEPLOY.md").read_text(), re.IGNORECASE
                 | re.DOTALL) is not None)
+
+
+# ===========================================================================
+print("\n--- F: daily INDstocks auth + read-only reconciliation schedule ---")
+# ===========================================================================
+
+_broker_cron = (REPO_ROOT / "deploy" / "broker.cron").read_text()
+_broker_script = (REPO_ROOT / "scripts" / "refresh_indstocks_session.sh").read_text()
+_broker_lines = [line.strip() for line in _broker_cron.splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")]
+check("F: exactly one canonical daily broker-refresh job is defined",
+      len(_broker_lines) == 1, str(_broker_lines))
+check("F: broker refresh runs daily after the 07:00 token reset",
+      _broker_lines and _broker_lines[0].startswith("15 7 * * * "), str(_broker_lines))
+check("F: refresh verifies automatic auth and immediately reconciles broker state",
+      "indstocks_auth.py --auto --verify" in _broker_script
+      and "engine.execute sync" in _broker_script)
+check("F: refresh is overlap-safe and contains no order/propose/close path",
+      "flock -n" in _broker_script
+      and not re.search(r"engine\.execute\s+(?:propose|close)|\.place\(", _broker_script))
 
 
 print(f"\n{'=' * 52}")

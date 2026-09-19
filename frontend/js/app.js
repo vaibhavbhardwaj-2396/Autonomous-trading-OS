@@ -39,6 +39,14 @@ function setupTabs() {
   });
 }
 
+function setupActions() {
+  document.addEventListener("click", (event) => {
+    const target = event.target.closest("[data-navigate]");
+    if (target) setActiveView(target.dataset.navigate);
+  });
+  document.getElementById("refresh-now")?.addEventListener("click", tick);
+}
+
 function updateBanner(results) {
   const banner = document.getElementById("connection-banner");
   const anyOk = results.some((r) => r.ok);
@@ -97,6 +105,7 @@ function startPolling() {
 }
 
 setupTabs();
+setupActions();
 healthCheckOnLoad();
 tick();
 startPolling();

@@ -59,6 +59,7 @@ class StubBroker(INDstocksBroker):
         self._responses = responses
         self._prices = prices or {}
         self._get_calls: list = []
+        self._identity_code_to_sym: dict[str, str] = {}
 
     def _get(self, path: str, params=None):
         self._get_calls.append((path, params))
@@ -66,7 +67,7 @@ class StubBroker(INDstocksBroker):
             codes = (params or {}).get("scrip-codes", "").split(",")
             data = {}
             for code in codes:
-                sym = self._code_to_sym.get(code)
+                sym = self._identity_code_to_sym.get(code) or self._code_to_sym.get(code)
                 if sym and sym in self._prices:
                     data[code] = {"live_price": self._prices[sym]}
             return {"status": "success", "data": data}
@@ -85,6 +86,15 @@ class StubBroker(INDstocksBroker):
         if symu in self._unresolvable:
             return None
         return f"sid{abs(hash(symu)) % 100000}"
+
+    def _holding_identity(self, row: dict):
+        """Use the same exact-id contract without loading a real CSV master."""
+        sym = str(row.get("symbol") or "").upper()
+        sid = self.security_id(sym) if sym else None
+        if not sid:
+            return sym, "", ""
+        self._identity_code_to_sym[f"NSE_{sid}"] = sym
+        return sym, "NSE", sid
 
     @property
     def _code_to_sym(self):
@@ -205,6 +215,12 @@ print("\n--- holdings(): empty / missing data -> [] ---")
 check("holdings() on {'data': []} -> []", StubBroker({"/portfolio/holdings": {"data": []}}).holdings() == [])
 check("holdings() on {} -> []", StubBroker({"/portfolio/holdings": {}}).holdings() == [])
 
+realish = INDstocksBroker()
+realish._ensure_instrument_master = lambda: (_ for _ in ()).throw(RuntimeError("master unavailable"))
+check("identity resolution degrades safely when the instrument master is unavailable",
+      realish._holding_identity({"symbol": "INFY", "isin": "INE009A01021"})
+      == ("INFY", "", ""))
+
 
 # ---------------------------------------------------------------------------
 print("\n--- positions(): net_qty/product/segment + live last_price ---")
@@ -255,9 +271,9 @@ _code = re.sub(r'"""[\s\S]*?"""', "", SRC)
 _imports = re.findall(r"^\s*(?:from|import)\s+([.\w]+)", _code, re.MULTILINE)
 check("engine/broker_indstocks.py imports nothing from research/ or paper/",
       not any(m.split(".")[0] in ("research", "paper") for m in _imports), str(_imports))
-check("holdings()/positions() price via the existing quote() only (no new endpoint constant)",
-      _code.count("/market/quotes/ltp") <= 1
-      and "_attach_live_prices" in _code, "pricing must reuse quote(), not a new path")
+check("holdings()/positions() use only the confirmed batched LTP endpoint",
+      1 <= _code.count("/market/quotes/ltp") <= 2
+      and "_attach_live_prices" in _code, "pricing must stay on the confirmed LTP path")
 
 # The broker adapter is a self-contained engine/ module: it must never grow an
 # import into research/ or paper/, and the live trading wrapper run_cycle.sh

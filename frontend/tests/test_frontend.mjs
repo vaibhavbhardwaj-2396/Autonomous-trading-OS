@@ -340,15 +340,23 @@ mockFetch(() => {
 
 mockFetch(() => ({ ok: true, status: 200, json: async () => ({ mode: "PAUSED" }) }));
 {
-  await api.apiPost("/control/mode", { mode: "PAUSED", reason: "test" });
-  check("apiPost(): sends 'Authorization: Bearer <configured token>'",
-    lastFetchCall.opts.headers.Authorization === "Bearer test-token-123");
+  api.setAdminToken("separate-admin-token");
+  await api.apiPost("/control/mode", { mode: "PAUSED", reason: "test" }, { admin: true });
+  check("apiPost(): admin writes send the separate session-only administrator token",
+    lastFetchCall.opts.headers.Authorization === "Bearer separate-admin-token");
   check("apiPost(): sends Content-Type: application/json",
     lastFetchCall.opts.headers["Content-Type"] === "application/json");
   check("apiPost(): sends the given body as a JSON string",
     JSON.parse(lastFetchCall.opts.body).mode === "PAUSED"
     && JSON.parse(lastFetchCall.opts.body).reason === "test");
   check("apiPost(): uses method POST, never GET", lastFetchCall.opts.method === "POST");
+}
+
+mockFetch(() => ({ ok: true, status: 200, json: async () => ({ account: true }) }));
+{
+  await api.apiGet("/account");
+  check("apiGet(): ordinary reads continue to use only the embedded observer token",
+    lastFetchCall.opts.headers.Authorization === "Bearer test-token-123");
 }
 
 mockFetch(() => ({ ok: false, status: 401, json: async () => ({ error: "unauthorized" }) }));

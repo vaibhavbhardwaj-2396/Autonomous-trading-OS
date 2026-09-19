@@ -1,8 +1,7 @@
 """
-api/app.py — Phase 4 Slice Z: the dashboard HTTP API.
-Priority Phase 4 (2026-09) added the ONE write-capable route this API has
-ever had — see below, and see api/runtime_bridge.py for the full safety
-argument. Every other route remains exactly what it always was: read-only.
+api/app.py — the dashboard and administrator HTTP API.
+All reads use the observer bearer token. The two narrowly scoped writes use
+the separate administrator token and cannot place or modify an order.
 
     GET /health                     — public, app liveness only
 
@@ -29,6 +28,7 @@ argument. Every other route remains exactly what it always was: read-only.
     GET /paper/performance           /   never merged into /account etc.
 
     GET  /control/status            \\  Priority Phase 4 — the global
+    GET  /admin/status               |  verifies administrator credentials
     POST /control/mode                /  RUNNING/PAUSED/SAFE_MODE/STOPPED
                                          control layer. POST changes ONLY
                                          the mode (+ a required reason/
@@ -338,8 +338,13 @@ def create_app() -> Flask:
     def control_status():
         return jsonify(runtime_bridge.get_full_status())
 
+    @app.route("/admin/status", methods=["GET"])
+    @auth.require_admin
+    def admin_status():
+        return jsonify({"authorized": True, "role": "administrator"})
+
     @app.route("/control/mode", methods=["POST"])
-    @auth.require_auth
+    @auth.require_admin
     def control_mode():
         body = request.get_json(silent=True) or {}
         mode = body.get("mode")
@@ -379,7 +384,7 @@ def create_app() -> Flask:
         return jsonify(ai_status.get_ai_status())
 
     @app.route("/ai/config", methods=["POST"])
-    @auth.require_auth
+    @auth.require_admin
     def ai_config_route():
         from control import ai_config as ai_config_mod
         body = request.get_json(silent=True) or {}

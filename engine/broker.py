@@ -43,6 +43,8 @@ class Position:
     last_price: float = 0.0
     product: str = ""
     segment: str = "EQUITY"
+    exchange: str = "NSE"
+    security_id: str = ""
 
 
 class Broker(ABC):

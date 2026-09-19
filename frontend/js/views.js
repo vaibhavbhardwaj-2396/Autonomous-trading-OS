@@ -4,7 +4,7 @@
 // banner) — one endpoint failing never stops the others on the same page
 // from rendering.
 
-import { apiGet, apiPost } from "./api.js";
+import { apiGet, apiPost, setAdminToken, hasAdminToken } from "./api.js";
 import {
   esc, money, num, pnlClass, dt, badge, table, errorState,
   brokerCard, accountStaleNotice, accountInfoNotes,
@@ -146,8 +146,8 @@ function accountCardsHtml(acct, risk, regime) {
   ];
   return staleNoticeHtml(acct) + cards
     .map(
-      (c) => `<div class="card"${c.title ? ` title="${esc(c.title)}"` : ""}><div class="label">${esc(c.label)}</div>
-        <div class="value ${c.cls || ""}">${c.value}</div></div>`
+      (c) => `<button class="card clickable-card" data-navigate="${c.label === "Regime" ? "research" : c.label.includes("Risk") ? "trading" : "trading"}"${c.title ? ` title="${esc(c.title)}"` : ""}><div class="label">${esc(c.label)}</div>
+        <div class="value ${c.cls || ""}">${c.value}</div></button>`
     )
     .join("");
 }
@@ -589,6 +589,39 @@ export async function renderStrategies() {
 const CONTROL_MODES = ["RUNNING", "PAUSED", "SAFE_MODE", "STOPPED"];
 const AI_PROVIDERS = ["anthropic_cli", "openai"];
 
+function adminGateHtml() {
+  if (hasAdminToken()) {
+    return `<div class="admin-access-row"><div><strong class="good-text">Administrator session unlocked</strong><div class="subtext">Administrative writes use a separate credential and remain audited.</div></div><button id="admin-lock" class="ghost-btn">Lock admin</button></div>`;
+  }
+  return `<form id="admin-unlock-form" class="control-form admin-unlock-form">
+    <div class="admin-lock-copy"><strong>Observer mode</strong><div class="subtext">Status remains visible. Enter the separate administrator token to enable control changes.</div></div>
+    <label>Administrator token<input type="password" name="token" autocomplete="current-password" required /></label>
+    <button type="submit">Unlock Admin</button><span class="control-form-status"></span>
+  </form>`;
+}
+
+function wireAdminGate() {
+  const lock = el("admin-lock");
+  if (lock) lock.addEventListener("click", () => { setAdminToken(""); renderControl(); });
+  const form = el("admin-unlock-form");
+  if (!form) return;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const status = form.querySelector(".control-form-status");
+    setAdminToken(form.token.value);
+    const verified = await apiGet("/admin/status", { admin: true });
+    if (verified.ok) renderControl();
+    else {
+      setAdminToken("");
+      status.textContent = "Access denied";
+    }
+  });
+}
+
+function lockedAdminActionHtml() {
+  return `<div class="admin-locked-note">🔒 Unlock Administrator Access above to change this setting.</div>`;
+}
+
 function controlModeCardsHtml(status) {
   const modeCls = { RUNNING: "good", PAUSED: "amber", SAFE_MODE: "amber", STOPPED: "bad" }[status.mode] || "";
   const livePaused = !!status.live_trading_paused;
@@ -705,7 +738,7 @@ function wireControlForm(currentStatus) {
     const mode = form.mode.value;
     const reason = form.reason.value;
     statusEl.textContent = "applying...";
-    const result = await apiPost("/control/mode", { mode, reason, actor: "dashboard" });
+    const result = await apiPost("/control/mode", { mode, reason, actor: "dashboard" }, { admin: true });
     if (result.ok) {
       statusEl.textContent = `now ${result.data.mode}`;
       renderControl();
@@ -725,7 +758,7 @@ function wireAiConfigForm() {
     const model = form.model.value || null;
     const reason = form.reason.value;
     statusEl.textContent = "applying...";
-    const result = await apiPost("/ai/config", { provider, model, reason, actor: "dashboard" });
+    const result = await apiPost("/ai/config", { provider, model, reason, actor: "dashboard" }, { admin: true });
     if (result.ok) {
       statusEl.textContent = `now ${result.data.effective_provider}`;
       renderControl();
@@ -738,21 +771,27 @@ function wireAiConfigForm() {
 export async function renderControl() {
   const results = [];
 
-  const [controlRes, resourceRes, aiRes, operationsRes] = await Promise.all([
+  el("admin-access").innerHTML = adminGateHtml();
+  wireAdminGate();
+
+  const [controlRes, resourceRes, aiRes, operationsRes, accountRes] = await Promise.all([
     apiGet("/control/status"),
     apiGet("/resources/status"),
     apiGet("/ai/status"),
     apiGet("/operations/status"),
+    apiGet("/account"),
   ]);
   results.push({ ok: controlRes.ok, status: controlRes.status, error: controlRes.error });
   results.push({ ok: resourceRes.ok, status: resourceRes.status, error: resourceRes.error });
   results.push({ ok: aiRes.ok, status: aiRes.status, error: aiRes.error });
   results.push({ ok: operationsRes.ok, status: operationsRes.status, error: operationsRes.error });
+  results.push({ ok: accountRes.ok, status: accountRes.status, error: accountRes.error });
 
   if (controlRes.ok) {
     el("control-cards").innerHTML = controlModeCardsHtml(controlRes.data);
-    el("control-actions").innerHTML = controlActionsHtml(controlRes.data.mode);
-    wireControlForm(controlRes.data);
+    el("control-actions").innerHTML = hasAdminToken()
+      ? controlActionsHtml(controlRes.data.mode) : lockedAdminActionHtml();
+    if (hasAdminToken()) wireControlForm(controlRes.data);
 
     table(
       el("control-history"),
@@ -776,7 +815,9 @@ export async function renderControl() {
   if (operationsRes.ok) {
     const op = operationsRes.data;
     const worker = op.research_worker || {};
+    const brokerFresh = accountRes.ok && accountRes.data.account_value_status === "fresh";
     el("operations-cards").innerHTML = [
+      { label: "Broker Snapshot", value: accountRes.ok ? accountRes.data.account_value_status : "Unavailable", cls: brokerFresh ? "good" : "bad", detail: accountRes.ok ? syncedAtLabel(accountRes.data) : "account endpoint unavailable" },
       { label: "Research Worker", value: worker.last_heartbeat_at ? "Reporting" : "No heartbeat", cls: worker.last_heartbeat_at ? "good" : "amber", detail: dt(worker.last_heartbeat_at) },
       { label: "Recorder", value: op.recorder.state, cls: op.recorder.state === "HEALTHY" ? "good" : op.recorder.state === "DEGRADED" ? "amber" : "bad", detail: dt(op.recorder.last_run && op.recorder.last_run.ts) },
       { label: "Paper Cycle", value: op.paper.state, cls: op.paper.state === "FAILED" ? "bad" : op.paper.state === "COMPLETED" ? "good" : "amber", detail: dt(op.paper.last_cycle && op.paper.last_cycle.completed_at) },
@@ -787,8 +828,9 @@ export async function renderControl() {
 
   if (aiRes.ok) {
     el("ai-cards").innerHTML = aiCardHtml(aiRes.data);
-    el("ai-config-actions").innerHTML = aiConfigFormHtml(aiRes.data);
-    wireAiConfigForm();
+    el("ai-config-actions").innerHTML = hasAdminToken()
+      ? aiConfigFormHtml(aiRes.data) : lockedAdminActionHtml();
+    if (hasAdminToken()) wireAiConfigForm();
 
     table(
       el("ai-config-history"),

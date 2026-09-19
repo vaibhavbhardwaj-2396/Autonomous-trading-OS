@@ -1,13 +1,13 @@
 """
 api/auth.py — a deliberately small bearer-token check.
 
-No identity system, no sessions, no user table: this is a single-operator
-read-only dashboard, so a single shared secret (the same posture
-scripts/kite_callback_server.py and every other credential in this repo
-already takes — see .env.example) is the appropriate amount of machinery,
-not a placeholder for something bigger.
+No identity database is required for this single-operator system. It has two
+explicit roles: an observer token for read routes and a distinct administrator
+token for the two audited configuration writes. The frontend never embeds or
+persists the administrator credential beyond the current browser session.
 
     Authorization: Bearer <DASHBOARD_API_TOKEN>
+    Authorization: Bearer <DASHBOARD_ADMIN_TOKEN>  # admin routes only
 
 Fails CLOSED: if the server has no token configured, every protected
 request is refused with 401 — there is no "auth disabled" mode. The
@@ -36,13 +36,19 @@ def _supplied_token() -> str:
 
 
 def is_authorized() -> bool:
-    configured = config.api_token()
+    configured = [t for t in (config.api_token(), config.admin_token()) if t]
     if not configured:
         return False
     supplied = _supplied_token()
     if not supplied:
         return False
-    return hmac.compare_digest(supplied, configured)
+    return any(hmac.compare_digest(supplied, candidate) for candidate in configured)
+
+
+def is_admin_authorized() -> bool:
+    configured = config.admin_token()
+    supplied = _supplied_token()
+    return bool(configured and supplied and hmac.compare_digest(supplied, configured))
 
 
 def require_auth(view):
@@ -64,4 +70,22 @@ def require_auth(view):
                             "detail": "a valid Authorization: Bearer token is required"}), 401
         return view(*args, **kwargs)
 
+    return wrapped
+
+
+def require_admin(view):
+    """Require the distinct admin token; the embedded observer token is refused."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if request.method == "OPTIONS":
+            return view(*args, **kwargs)
+        if not is_admin_authorized():
+            if not config.admin_token():
+                current_app.logger.warning(
+                    "Rejected admin request to %s: DASHBOARD_ADMIN_TOKEN is not configured.",
+                    request.path,
+                )
+            return jsonify({"error": "admin_unauthorized",
+                            "detail": "a valid administrator token is required"}), 403
+        return view(*args, **kwargs)
     return wrapped

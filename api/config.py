@@ -15,6 +15,7 @@ import os
 # configured" — every protected request is refused (fail closed), never
 # treated as "auth disabled".
 ENV_API_TOKEN = "DASHBOARD_API_TOKEN"
+ENV_ADMIN_TOKEN = "DASHBOARD_ADMIN_TOKEN"
 
 # Comma-separated list of origins allowed to make cross-origin requests
 # (e.g. "http://localhost:5173,https://bhardwajvaibhav.com"). Empty/unset
@@ -37,6 +38,12 @@ def api_token() -> str | None:
     """The configured bearer token, or None if none is set. Never logged,
     never included in any response."""
     token = os.environ.get(ENV_API_TOKEN, "").strip()
+    return token or None
+
+
+def admin_token() -> str | None:
+    """Separate credential for the two audited administrative write routes."""
+    token = os.environ.get(ENV_ADMIN_TOKEN, "").strip()
     return token or None
 
 

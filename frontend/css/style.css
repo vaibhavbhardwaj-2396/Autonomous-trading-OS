@@ -1,6 +1,7 @@
 :root {
   --bg: #0f1216;
   --panel: #161b22;
+  --panel-raised: #1b222c;
   --panel-border: #262d38;
   --text: #e6e9ef;
   --text-dim: #8b95a5;
@@ -48,6 +49,7 @@ header.topbar h1 .tag {
   margin-left: 8px;
   font-size: 12px;
 }
+.topbar-actions { display: flex; align-items: center; gap: 12px; }
 
 #connection-banner {
   padding: 8px 24px;
@@ -64,6 +66,11 @@ nav.tabs {
   gap: 4px;
   padding: 0 20px;
   border-bottom: 1px solid var(--panel-border);
+  position: sticky;
+  top: 49px;
+  z-index: 9;
+  background: rgba(15, 18, 22, 0.96);
+  overflow-x: auto;
 }
 
 nav.tabs button {
@@ -100,6 +107,19 @@ main { padding: 20px 24px 60px; max-width: 1200px; margin: 0 auto; }
   padding: 14px 16px;
 }
 
+button.card {
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+.clickable-card { cursor: pointer; transition: transform .15s ease, border-color .15s ease, background .15s ease; }
+.clickable-card:hover { transform: translateY(-2px); border-color: var(--accent); background: var(--panel-raised); }
+.clickable-card:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .card .label {
   color: var(--text-dim);
   font-size: 11px;
@@ -123,6 +143,11 @@ section.panel {
   margin-bottom: 20px;
   overflow: hidden;
 }
+.admin-gate-panel { border-color: rgba(79, 140, 255, .55); }
+.admin-access-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; }
+.admin-lock-copy { min-width: 250px; flex: 1; }
+.admin-locked-note { padding: 14px 16px; color: var(--text-dim); border-top: 1px solid var(--panel-border); background: rgba(79, 140, 255, .04); }
+.good-text { color: var(--good); }
 
 section.panel > h2 {
   font-size: 13px;
@@ -265,7 +290,8 @@ footer.app-footer {
   text-transform: uppercase;
 }
 .control-form select,
-.control-form input[type="text"] {
+.control-form input[type="text"],
+.control-form input[type="password"] {
   font-family: inherit;
   font-size: 13px;
   padding: 6px 8px;
@@ -304,6 +330,16 @@ footer.app-footer {
   cursor: pointer;
 }
 .link-btn:hover { background: var(--panel-border); }
+.ghost-btn {
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  padding: 6px 11px;
+  cursor: pointer;
+}
+.ghost-btn:hover { border-color: var(--accent); background: rgba(79, 140, 255, .08); }
 
 .artifact-text {
   white-space: pre-wrap;
@@ -316,6 +352,20 @@ footer.app-footer {
   font-size: 12px;
   max-height: 420px;
   overflow-y: auto;
+}
+
+@media (max-width: 720px) {
+  header.topbar { padding: 12px 14px; }
+  header.topbar h1 .tag { display: none; }
+  nav.tabs { padding: 0 8px; top: 46px; }
+  nav.tabs button { min-height: 44px; white-space: nowrap; }
+  main { padding: 14px 12px 48px; }
+  .grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+  .card { padding: 12px; }
+  .card .value { font-size: 17px; }
+  .control-form { align-items: stretch; }
+  .control-form label, .control-form input, .control-form select, .control-form button { width: 100%; }
+  .admin-access-row { align-items: flex-start; flex-direction: column; }
 }
 
 #artifact-filter {

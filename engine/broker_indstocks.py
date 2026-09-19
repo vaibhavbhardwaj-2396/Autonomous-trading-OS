@@ -5,10 +5,10 @@ API: https://api.indstocks.com — token in the `Authorization` header, no Beare
 
 Two things differ meaningfully from Kite and shape this module:
 
-1. **Tokens expire every 24 hours** and are minted by logging into the INDstocks web UI,
-   not by an OAuth redirect. There is no callback to automate, so the daily token arrives
-   via Telegram (`token <value>`) and is stored by scripts/indstocks_auth.py. Simpler
-   infrastructure than Kite — no Caddy, no domain, no callback server.
+1. **Tokens expire every 24 hours.** `scripts/indstocks_auth.py --auto` performs the
+   supported TOTP/MPIN login and stores the short-lived token. The VPS schedule refreshes
+   it daily and immediately runs a read-only broker reconciliation; a manual token remains
+   a recovery path, not the normal operating mode.
 
 2. **Orders take a `security_id`, not a trading symbol.** So there's a symbol → id
    resolution step, cached locally. If the instrument master can't resolve a symbol, the
@@ -72,6 +72,7 @@ class INDstocksBroker(Broker):
     def __init__(self) -> None:
         self._token: Optional[str] = None
         self._instruments: dict = {}
+        self._instrument_rows: list[dict] = []
 
     # -- auth ------------------------------------------------------------------
 
@@ -143,6 +144,7 @@ class INDstocksBroker(Broker):
 
         import csv
         table: dict[str, str] = {}
+        identities: list[dict] = []
         with INSTRUMENT_MASTER_CACHE.open(newline="") as f:
             for row in csv.DictReader(f):
                 exch = str(row.get("EXCH", "")).upper()
@@ -150,7 +152,38 @@ class INDstocksBroker(Broker):
                 sid = row.get("SECURITY_ID")
                 if exch and sym and sid:
                     table[f"{exch}:{sym}"] = str(sid)
+                    identities.append({"exchange": exch, "symbol": sym,
+                                       "security_id": str(sid),
+                                       "isin": str(row.get("ISIN") or "").upper()})
         self._instruments = table
+        self._instrument_rows = identities
+
+    def _holding_identity(self, row: dict) -> tuple[str, str, str]:
+        """Resolve broker holding identity from its own id/ISIN, never guess."""
+        symbol = str(row.get("symbol") or "").upper()
+        sid = str(row.get("security_id") or "")
+        exchange = str(row.get("exchange") or row.get("exch") or "").upper()
+        isin = str(row.get("isin") or "").upper()
+        if sid and exchange:
+            return symbol, exchange, sid  # exact identity supplied by the broker
+        try:
+            self._ensure_instrument_master()
+        except Exception:
+            # Degrade to unpriced/incomplete rather than abort the whole sync.
+            return symbol, exchange, sid
+        matches = [r for r in self._instrument_rows
+                   if (sid and r["security_id"] == sid and
+                       (not symbol or r["symbol"] == symbol))]
+        if not matches and isin:
+            matches = [r for r in self._instrument_rows if r["isin"] == isin]
+        if not matches and symbol:
+            matches = [r for r in self._instrument_rows if r["symbol"] == symbol]
+        if not matches:
+            return symbol, "", sid
+        # Prefer NSE for symbols available on both exchanges; otherwise use
+        # the exact sole identity from the master.
+        chosen = next((r for r in matches if r["exchange"] == "NSE"), matches[0])
+        return chosen["symbol"], chosen["exchange"], chosen["security_id"]
 
     def security_id(self, symbol: str, exchange: str = "NSE") -> Optional[str]:
         """Resolve a trading symbol to the id orders are placed against.
@@ -222,11 +255,28 @@ class INDstocksBroker(Broker):
         """
         if not positions:
             return positions
+        code_to_positions: dict[str, list[Position]] = {}
+        for position in positions:
+            if position.security_id and position.exchange:
+                code = f"{position.exchange}_{position.security_id}"
+                code_to_positions.setdefault(code, []).append(position)
         try:
-            prices = self.quote(sorted({p.symbol for p in positions if p.symbol}))
+            data = self._get("/market/quotes/ltp",
+                             {"scrip-codes": ",".join(code_to_positions)}) if code_to_positions else {}
+            rows = data.get("data", {})
+            for code, grouped in code_to_positions.items():
+                price = (rows.get(code) or {}).get("live_price")
+                if price is not None and float(price) > 0:
+                    for position in grouped:
+                        position.last_price = float(price)
+        except Exception:
+            pass
+        unresolved = [p for p in positions if p.last_price <= 0 and p.symbol]
+        try:
+            prices = self.quote(sorted({p.symbol for p in unresolved}))
         except Exception:
             prices = {}
-        for p in positions:
+        for p in unresolved:
             px = prices.get(p.symbol)
             if px is not None and px > 0:
                 p.last_price = float(px)
@@ -247,12 +297,14 @@ class INDstocksBroker(Broker):
             qty = _to_int(h.get("total_qty"))
             if qty <= 0:
                 continue
+            symbol, exchange, security_id = self._holding_identity(h)
             out.append(Position(
-                symbol=str(h.get("symbol") or "").upper(),
+                symbol=symbol,
                 quantity=qty,
                 average_price=_to_float(h.get("avg_price")),
                 last_price=0.0,
                 product="CNC",
+                exchange=exchange or "NSE", security_id=security_id,
             ))
         return self._attach_live_prices(out)
 
@@ -268,13 +320,16 @@ class INDstocksBroker(Broker):
             qty = _to_int(p.get("net_qty"))
             if qty == 0:
                 continue
+            symbol, exchange, security_id = self._holding_identity(p)
             out.append(Position(
-                symbol=str(p.get("symbol") or "").upper(),
+                symbol=symbol,
                 quantity=qty,
                 average_price=_to_float(p.get("avg_price")),
                 last_price=0.0,
                 product=str(p.get("product") or ""),
                 segment=str(p.get("segment") or "EQUITY"),
+                exchange=exchange or str(p.get("exchange") or "NSE").upper(),
+                security_id=security_id,
             ))
         return self._attach_live_prices(out)
 
