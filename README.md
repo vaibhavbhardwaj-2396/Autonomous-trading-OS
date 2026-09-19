@@ -112,7 +112,7 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 | `de28ff0` | production API deployment readiness |
 | `404d4ef` | roadmap continuation and frontend admission state |
 | `937b6a2` | integrated roadmap phases 0–10 release |
-| current release | daily broker auth/reconciliation, complete-valuation fail-close, separate Admin role, interactive UI and documentation refresh |
+| `56f9527` | daily broker auth/reconciliation, complete-valuation fail-close, separate Admin role, interactive UI and documentation refresh |
 
 This project operates around real money. Process compliance is more important
 than activity or profit; no-trade is always a valid result.
