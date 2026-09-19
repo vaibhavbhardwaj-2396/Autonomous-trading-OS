@@ -429,8 +429,11 @@ print("\n--- F: daily INDstocks auth + read-only reconciliation schedule ---")
 
 _broker_cron = (REPO_ROOT / "deploy" / "broker.cron").read_text()
 _broker_script = (REPO_ROOT / "scripts" / "refresh_indstocks_session.sh").read_text()
-_broker_lines = [line.strip() for line in _broker_cron.splitlines()
-                 if line.strip() and not line.lstrip().startswith("#")]
+_broker_active = [line.strip() for line in _broker_cron.splitlines()
+                  if line.strip() and not line.lstrip().startswith("#")]
+_broker_lines = [line for line in _broker_active if not line.startswith("CRON_TZ=")]
+check("F: the canonical schedule pins Asia/Kolkata rather than trusting host timezone",
+      "CRON_TZ=Asia/Kolkata" in _broker_active, str(_broker_active))
 check("F: exactly one canonical daily broker-refresh job is defined",
       len(_broker_lines) == 1, str(_broker_lines))
 check("F: broker refresh runs daily after the 07:00 token reset",
