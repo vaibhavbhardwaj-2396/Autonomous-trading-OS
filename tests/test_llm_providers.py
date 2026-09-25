@@ -265,6 +265,41 @@ try:
 finally:
     llm._openai_call = _orig_openai_call
 
+# B6c: only a retryable OpenAI failure may fall back, and the successful
+# fallback model is auditable. No second attempt occurs for auth/config errors.
+calls_b6c = []
+_orig_get_config_b6c = llm.ai_config.get_config
+def _fallback_call(prompt, *, model):
+    calls_b6c.append(model)
+    if len(calls_b6c) == 1:
+        raise llm.ProviderError("simulated rate limit", retryable=True)
+    return ('{"no_proposal": true, "reason": "fallback ok"}',
+            {"input_tokens": 25, "output_tokens": 5})
+llm._openai_call = _fallback_call
+llm.ai_config.get_config = lambda **kw: {
+    "provider": "openai", "model": "gpt-primary",
+    "role_mappings": {"test": "gpt-primary"},
+    "fallback": {"enabled": True, "model": "gpt-fallback"},
+}
+try:
+    runner_b6c = llm.build_configured_runner(
+        store=store_b, cycle_id="cyc-b6c", purpose="test", trigger="test",
+        provider=llm.PROVIDER_OPENAI)
+    out_b6c = runner_b6c("prompt")
+    rows_b6c = [r for r in rm.query_research_log(store_b, rm.DATASET_MODEL_INTERACTION,
+                                                 entity=rm.MARKET_ENTITY)
+                 if r["payload"]["cycle_id"] == "cyc-b6c"]
+    check("B6c: a retryable primary failure makes exactly one configured fallback attempt",
+          calls_b6c == ["gpt-primary", "gpt-fallback"], calls_b6c)
+    check("B6d: fallback success is returned and both attempts are auditable",
+          "fallback ok" in out_b6c and len(rows_b6c) == 2
+          and rows_b6c[0]["payload"]["status"] == "error"
+          and rows_b6c[1]["payload"]["status"] == "ok"
+          and rows_b6c[1]["payload"]["model"] == "gpt-fallback", rows_b6c)
+finally:
+    llm._openai_call = _orig_openai_call
+    llm.ai_config.get_config = _orig_get_config_b6c
+
 # B7: an InvestigatorError from the CLI runner still propagates as
 # InvestigatorError (unchanged type) and is recorded as an error artifact.
 inv._default_runner = lambda p: (_ for _ in ()).throw(
@@ -336,8 +371,8 @@ def _fake_urlopen(req, timeout=None):
     captured_request["body"] = json.loads(req.data.decode("utf-8"))
     captured_request["timeout"] = timeout
     return _FakeHTTPResponse(json.dumps({
-        "choices": [{"message": {"content": '{"no_proposal": true, "reason": "ok"}'}}],
-        "usage": {"prompt_tokens": 77, "completion_tokens": 33},
+        "output_text": '{"no_proposal": true, "reason": "ok"}',
+        "usage": {"input_tokens": 77, "output_tokens": 33},
     }).encode("utf-8"))
 
 
@@ -350,10 +385,10 @@ try:
     check("C2: the Authorization header carries the API key as a Bearer token",
           captured_request["headers"].get("Authorization") == "Bearer sk-test-not-a-real-key",
           captured_request["headers"])
-    check("C3: the request body carries the given model and the prompt "
-          "as the user message",
+    check("C3: the Responses request carries the given model and prompt",
           captured_request["body"]["model"] == "gpt-4o-mini"
-          and captured_request["body"]["messages"][-1]["content"] == "hello world",
+          and captured_request["body"]["input"] == "hello world"
+          and captured_request["body"]["store"] is False,
           captured_request["body"])
     check("C4: the parsed response returns the model's content text",
           text == '{"no_proposal": true, "reason": "ok"}', text)

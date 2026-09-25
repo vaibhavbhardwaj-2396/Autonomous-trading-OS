@@ -51,7 +51,15 @@ LOCK_PATH = CONTROL_DIR / ".ai_config.lock"
 _IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 
 KNOWN_PROVIDERS = ("anthropic_cli", "openai")
-KNOWN_OPENAI_MODELS = ("gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4.1-mini")
+AI_ROLES = ("classification", "news_extraction", "observation_summarization",
+            "hypothesis_generation", "experiment_design", "evidence_critique",
+            "strategy_review", "daily_digest")
+DEFAULT_ROLE_MAPPINGS = {
+    "classification": "gpt-5.6-luna", "news_extraction": "gpt-5.6-luna",
+    "observation_summarization": "gpt-5.6-luna", "hypothesis_generation": "gpt-5.6-terra",
+    "experiment_design": "gpt-5.6-terra", "evidence_critique": "gpt-6-astra",
+    "strategy_review": "gpt-6-astra", "daily_digest": "deterministic",
+}
 
 
 def _now_iso() -> str:
@@ -64,7 +72,9 @@ class InvalidAIConfig(ValueError):
 
 def _default_config() -> dict:
     return {"provider": None, "model": None, "changed_at": None, "actor": None,
-            "reason": None, "history": []}
+            "reason": None, "history": [], "role_mappings": dict(DEFAULT_ROLE_MAPPINGS),
+            "fallback": {"enabled": True, "model": "gpt-5.6-luna",
+                         "optional_provider": "anthropic_cli"}}
 
 
 def get_config(*, path: Path = STATE_PATH) -> dict:
@@ -79,7 +89,9 @@ def get_config(*, path: Path = STATE_PATH) -> dict:
     if not isinstance(data, dict):
         return _default_config()
     base = _default_config()
-    base.update(data)
+    base.update({k: v for k, v in data.items() if k not in ("role_mappings", "fallback")})
+    base["role_mappings"].update(data.get("role_mappings") or {})
+    base["fallback"].update(data.get("fallback") or {})
     return base
 
 
@@ -95,6 +107,7 @@ MAX_HISTORY = 20
 
 def set_config(
     *, provider: str, model: Optional[str] = None, actor: str, reason: str,
+    role_mappings: Optional[dict] = None, fallback: Optional[dict] = None,
     path: Path = STATE_PATH, lock_path: Path = LOCK_PATH,
 ) -> dict:
     """Persist a new provider/model choice. Validated, flock-protected,
@@ -110,6 +123,12 @@ def set_config(
         raise InvalidAIConfig("actor is required")
     if not reason or not reason.strip():
         raise InvalidAIConfig("reason is required")
+    mappings = {**get_config(path=path).get("role_mappings", {}), **(role_mappings or {})}
+    if set(mappings) - set(AI_ROLES) or any(not isinstance(v, str) or not v.strip() for v in mappings.values()):
+        raise InvalidAIConfig("role_mappings contains an unknown role or blank model")
+    fallback_cfg = {**get_config(path=path).get("fallback", {}), **(fallback or {})}
+    if not isinstance(fallback_cfg.get("enabled"), bool):
+        raise InvalidAIConfig("fallback.enabled must be boolean")
 
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_fh = open(lock_path, "w")
@@ -127,6 +146,7 @@ def set_config(
         new_state = {
             "provider": provider, "model": model, "changed_at": _now_iso(),
             "actor": actor, "reason": reason, "history": history,
+            "role_mappings": mappings, "fallback": fallback_cfg,
         }
         _save(new_state, path=path)
         return new_state

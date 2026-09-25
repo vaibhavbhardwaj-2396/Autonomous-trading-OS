@@ -32,7 +32,7 @@ def get_ai_status() -> dict:
     from research.brain import llm  # local import: avoid api/ importing
     # research.brain at module load time for every route, only when asked
     effective_provider = llm.current_provider_name()
-    effective_model = llm.current_model_name(effective_provider)
+    effective_model = llm.current_model_name(effective_provider, "hypothesis_generation")
     return {
         "effective_provider": effective_provider,
         "effective_model": effective_model,
@@ -42,6 +42,8 @@ def get_ai_status() -> dict:
         "config_changed_by": cfg.get("actor"),
         "config_reason": cfg.get("reason"),
         "config_history": cfg.get("history") or [],
+        "role_mappings": cfg.get("role_mappings") or {},
+        "fallback": cfg.get("fallback") or {},
         "known_providers": list(llm.KNOWN_PROVIDERS),
         "provider_catalog": llm.provider_catalog(),
         "budget": {
@@ -57,7 +59,8 @@ def get_ai_status() -> dict:
     }
 
 
-def set_ai_provider(*, provider: str, model, actor: str, reason: str) -> dict:
+def set_ai_provider(*, provider: str, model, actor: str, reason: str,
+                    role_mappings=None, fallback=None) -> dict:
     """Raises control.ai_config.InvalidAIConfig for a bad provider/blank
     actor/blank reason — deliberately NOT caught here. api/app.py's route
     validates provider/actor/reason BEFORE calling this (the same
@@ -65,4 +68,5 @@ def set_ai_provider(*, provider: str, model, actor: str, reason: str) -> dict:
     already uses), so this should not raise in practice via the API;
     left unconverted rather than silently mapped to the wrong HTTP status
     if that assumption is ever wrong."""
-    return ai_config.set_config(provider=provider, model=model, actor=actor, reason=reason)
+    return ai_config.set_config(provider=provider, model=model, actor=actor, reason=reason,
+                                role_mappings=role_mappings, fallback=fallback)

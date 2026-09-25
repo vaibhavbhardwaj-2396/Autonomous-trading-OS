@@ -97,12 +97,15 @@ from . import artifacts  # noqa: E402 — outcome 2: the unified artifact explor
 from . import ai_status  # noqa: E402 — outcome 2: AI provider config + budget
 from . import operations  # noqa: E402 — bounded, read-only subsystem health
 from . import validation  # noqa: E402 — Phase 10.5 read-only campaign status
+from . import notifications as notification_api  # noqa: E402
+from . import runtime_status  # noqa: E402
+from control import notifications as notification_config  # noqa: E402
 from control import runtime as ctrl  # noqa: E402
 from control import resources as rg  # noqa: E402 — outcome 1: the Resource Governor
 from control import capacity as capacity_planner  # noqa: E402 — Phase 10.5 allocation plan
 
 APP_NAME = "living-quant-api"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 
 def _int_query_param(name: str, default: Optional[int]) -> tuple[Optional[int], Optional[Response]]:
@@ -267,6 +270,11 @@ def create_app() -> Flask:
     def operations_status():
         return jsonify(operations.get_operations_status())
 
+    @app.route("/runtime/status", methods=["GET"])
+    @auth.require_auth
+    def runtime_status_route():
+        return jsonify(runtime_status.get_runtime_status(data.get_default_store()))
+
     @app.route("/validation/status", methods=["GET"])
     @auth.require_auth
     def validation_status():
@@ -355,6 +363,35 @@ def create_app() -> Flask:
     def admin_status():
         return jsonify({"authorized": True, "role": "administrator"})
 
+    @app.route("/notifications/status", methods=["GET"])
+    @auth.require_auth
+    def notifications_status():
+        return jsonify(notification_api.get_status())
+
+    @app.route("/notifications/test", methods=["POST"])
+    @auth.require_admin
+    def notifications_test():
+        body = request.get_json(silent=True) or {}
+        result = notification_api.send_test(actor=body.get("actor") or "dashboard-admin")
+        return jsonify(result), (200 if result.get("status") == "delivered" else 503)
+
+    @app.route("/notifications/config", methods=["POST"])
+    @auth.require_admin
+    def notifications_config():
+        body = request.get_json(silent=True) or {}
+        reason = body.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            return jsonify({"error": "bad_request", "detail": "reason is required"}), 400
+        try:
+            notification_config.set_config(
+                enabled=body.get("enabled") if isinstance(body.get("enabled"), bool) else True,
+                categories=body.get("categories") if isinstance(body.get("categories"), dict) else {},
+                thresholds=body.get("thresholds") if isinstance(body.get("thresholds"), dict) else {},
+                actor=body.get("actor") or "dashboard-admin", reason=reason)
+        except ValueError as exc:
+            return jsonify({"error": "bad_request", "detail": str(exc)}), 400
+        return jsonify(notification_api.get_status())
+
     @app.route("/control/mode", methods=["POST"])
     @auth.require_admin
     def control_mode():
@@ -418,7 +455,9 @@ def create_app() -> Flask:
         if not isinstance(actor, str) or not actor.strip():
             return jsonify({"error": "bad_request",
                            "detail": "'actor' must be a non-empty string when given"}), 400
-        ai_status.set_ai_provider(provider=provider, model=model, actor=actor, reason=reason)
+        ai_status.set_ai_provider(provider=provider, model=model, actor=actor, reason=reason,
+                                  role_mappings=body.get("role_mappings"),
+                                  fallback=body.get("fallback"))
         return jsonify(ai_status.get_ai_status())
 
     # -- Artifacts (outcome 2) — the unified, read-only artifact explorer --

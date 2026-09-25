@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 import urllib.error
 import urllib.request
@@ -88,10 +89,10 @@ ENV_PROVIDER = "RESEARCH_AI_PROVIDER"
 ENV_OPENAI_MODEL = "RESEARCH_AI_OPENAI_MODEL"
 ENV_OPENAI_API_KEY = "OPENAI_API_KEY"
 DEFAULT_PROVIDER = PROVIDER_ANTHROPIC_CLI
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_OPENAI_MODEL = "gpt-5.6-terra"
 ANTHROPIC_CLI_MODEL_LABEL = "claude-code-cli"
 
-OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+OPENAI_ENDPOINT = "https://api.openai.com/v1/responses"
 OPENAI_TIMEOUT_SECONDS = 120
 OPENAI_SYSTEM_PREAMBLE = (
     "You are the Living Quant Research AI. Respond with a single JSON "
@@ -125,6 +126,10 @@ class ProviderError(RuntimeError):
     from investigate()'s point of view, which is the whole point of the
     abstraction."""
 
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
+
 
 def current_provider_name() -> str:
     """Precedence: RESEARCH_AI_PROVIDER env var (an explicit, ops-level
@@ -145,7 +150,7 @@ def current_provider_name() -> str:
     return persisted or DEFAULT_PROVIDER
 
 
-def current_model_name(provider_name: str) -> str:
+def current_model_name(provider_name: str, purpose: Optional[str] = None) -> str:
     """The model to use for `provider_name`, honoring the same precedence
     as current_provider_name(): env var > persisted config > built-in
     default. Only meaningful for openai today (the CLI provider's "model"
@@ -156,6 +161,9 @@ def current_model_name(provider_name: str) -> str:
     if env_override:
         return env_override
     persisted = ai_config.get_config()
+    mapped = (persisted.get("role_mappings") or {}).get(purpose or "")
+    if mapped and mapped != "deterministic":
+        return mapped
     if persisted.get("provider") == PROVIDER_OPENAI and persisted.get("model"):
         return persisted["model"]
     return DEFAULT_OPENAI_MODEL
@@ -189,14 +197,9 @@ def _openai_call(prompt: str, *, model: str) -> tuple:
             f"OpenAI. Set it in the server environment only (never in "
             f"frontend code, browser storage, logs, or committed config).")
 
-    body = json.dumps({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": OPENAI_SYSTEM_PREAMBLE},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-    }).encode("utf-8")
+    body = json.dumps({"model": model, "store": False,
+        "instructions": OPENAI_SYSTEM_PREAMBLE, "input": prompt,
+        "reasoning": {"effort": "low"}, "max_output_tokens": 4000}).encode("utf-8")
     req = urllib.request.Request(
         OPENAI_ENDPOINT, data=body,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -207,22 +210,29 @@ def _openai_call(prompt: str, *, model: str) -> tuple:
             parsed = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")[:500]
-        raise ProviderError(f"OpenAI API returned HTTP {e.code}: {detail}") from e
+        retryable = e.code in (408, 409, 429) or e.code >= 500
+        raise ProviderError(
+            f"OpenAI API returned HTTP {e.code}: {detail}", retryable=retryable
+        ) from e
     except urllib.error.URLError as e:
-        raise ProviderError(f"could not reach the OpenAI API: {e}") from e
+        raise ProviderError(f"could not reach the OpenAI API: {e}", retryable=True) from e
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise ProviderError(f"OpenAI API returned an unparseable response body: {e}") from e
 
     try:
-        text = parsed["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as e:
+        text = parsed.get("output_text")
+        if not text:
+            text = next(part["text"] for item in parsed.get("output", [])
+                        if item.get("type") == "message" for part in item.get("content", [])
+                        if part.get("type") == "output_text")
+    except (KeyError, IndexError, TypeError, StopIteration) as e:
         raise ProviderError(
             f"OpenAI API response did not have the expected shape "
-            f"(choices[0].message.content): {e}") from e
+            f"(Responses output_text): {e}") from e
 
     usage = parsed.get("usage") or {}
-    return text, {"input_tokens": usage.get("prompt_tokens"),
-                 "output_tokens": usage.get("completion_tokens")}
+    return text, {"input_tokens": usage.get("input_tokens"),
+                 "output_tokens": usage.get("output_tokens")}
 
 
 class AnthropicCLIProvider:
@@ -261,8 +271,13 @@ def get_provider(name: str) -> ModelProvider:
 
 def provider_catalog() -> list[dict]:
     """Non-secret provider metadata suitable for the admin UI."""
+    configured = {
+        PROVIDER_OPENAI: bool((os.environ.get(ENV_OPENAI_API_KEY) or "").strip()),
+        PROVIDER_ANTHROPIC_CLI: bool(shutil.which("claude")),
+    }
     return [{"provider": name, "auth_mode": provider.auth_mode,
-             "configured": (name != PROVIDER_OPENAI or bool(os.environ.get(ENV_OPENAI_API_KEY)))}
+             "configured": configured[name],
+             "status": "CONFIGURED_UNVERIFIED" if configured[name] else "NOT_CONFIGURED"}
             for name, provider in PROVIDER_REGISTRY.items()]
 
 
@@ -302,7 +317,9 @@ def build_configured_runner(
             return json.dumps({"no_proposal": True, "reason": f"AI budget: {deny_reason}"})
 
         t0 = time.monotonic()
-        model_name = current_model_name(provider_name)
+        model_name = current_model_name(provider_name, purpose)
+        actual_model = model_name
+        fallback_used = False
         try:
             response = get_provider(provider_name).invoke(prompt, model=model_name)
             text = response.text
@@ -319,12 +336,46 @@ def build_configured_runner(
             raise
         except ProviderError as e:
             latency = round(time.monotonic() - t0, 3)
+            fallback = ai_config.get_config().get("fallback") or {}
+            fallback_model = (fallback.get("model") or "").strip()
+            may_fallback = (
+                e.retryable and fallback.get("enabled") is True
+                and provider_name == PROVIDER_OPENAI and fallback_model
+                and fallback_model != model_name
+            )
             rm.record_model_interaction(
                 store, provider=provider_name, model=model_name, purpose=purpose,
                 trigger=trigger, prompt=prompt, response=None, status="error",
                 cycle_id=cycle_id, latency_seconds=latency, error=str(e),
+                extra={"prompt_version": "research-json-v1", "workflow": purpose,
+                       "retryable": e.retryable, "fallback_attempted": may_fallback,
+                       "fallback_model": fallback_model if may_fallback else None},
             )
-            raise inv.InvestigatorError(str(e), stage="invocation_error") from e
+            if not may_fallback:
+                raise inv.InvestigatorError(str(e), stage="invocation_error") from e
+            try:
+                t0 = time.monotonic()
+                response = get_provider(provider_name).invoke(prompt, model=fallback_model)
+                text = response.text
+                usage = {"input_tokens": response.input_tokens,
+                         "output_tokens": response.output_tokens}
+                actual_model = fallback_model
+                fallback_used = True
+            except ProviderError as fallback_error:
+                fallback_latency = round(time.monotonic() - t0, 3)
+                rm.record_model_interaction(
+                    store, provider=provider_name, model=fallback_model, purpose=purpose,
+                    trigger=trigger, prompt=prompt, response=None, status="error",
+                    cycle_id=cycle_id, latency_seconds=fallback_latency,
+                    error=str(fallback_error),
+                    extra={"prompt_version": "research-json-v1", "workflow": purpose,
+                           "retryable": fallback_error.retryable,
+                           "fallback_attempted": True, "fallback_from": model_name},
+                )
+                raise inv.InvestigatorError(
+                    f"primary model failed ({e}); fallback failed ({fallback_error})",
+                    stage="invocation_error",
+                ) from fallback_error
 
         latency = round(time.monotonic() - t0, 3)
         input_tokens = (usage or {}).get("input_tokens")
@@ -332,10 +383,13 @@ def build_configured_runner(
         total_tokens = (input_tokens or 0) + (output_tokens or 0) if usage else 0
         ai_budget.record_usage(tokens=total_tokens, expensive=True)
         rm.record_model_interaction(
-            store, provider=provider_name, model=model_name, purpose=purpose,
+            store, provider=provider_name, model=actual_model, purpose=purpose,
             trigger=trigger, prompt=prompt, response=text, status="ok",
             cycle_id=cycle_id, input_tokens=input_tokens, output_tokens=output_tokens,
             latency_seconds=latency,
+            extra={"prompt_version": "research-json-v1", "workflow": purpose,
+                   "fallback_used": fallback_used,
+                   "fallback_from": model_name if fallback_used else None},
         )
         return text
 

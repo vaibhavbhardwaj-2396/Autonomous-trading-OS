@@ -42,11 +42,20 @@ async function load(path, containerId, render, failureMessage) {
 export async function renderOverview() {
   const results = [];
 
-  const [acctRes, riskRes, regimeRes] = await Promise.all([
+  const [acctRes, riskRes, regimeRes, runtimeRes] = await Promise.all([
     apiGet("/account"),
     apiGet("/risk"),
     apiGet("/regime"),
+    apiGet("/runtime/status"),
   ]);
+  if (runtimeRes.ok) {
+    el("runtime-status-bar").innerHTML = (runtimeRes.data.indicators || []).map((s) => `<button class="status-pill" data-navigate="${esc(s.target)}"><strong>${esc(s.label)}</strong><span>${esc(s.state)}</span></button>`).join("");
+    el("active-work").innerHTML = `<ul class="active-work-list">${(runtimeRes.data.active_work || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
+    const labels = {observations:"OBSERVE", hypotheses:"HYPOTHESES", reported_experiments:"EXPERIMENTS", evidence:"ACCEPTED EVIDENCE", strategy_versions:"STRATEGIES", paper_trades:"PAPER"};
+    el("overview-flow").innerHTML = Object.entries(labels).map(([key,label], i) => `${i ? '<span class="flow-arrow">→</span>' : ''}<button class="flow-stage" data-navigate="${key === 'paper_trades' ? 'paper' : key === 'strategy_versions' ? 'strategies' : 'validation'}"><strong>${esc(label)}</strong><br>${num((runtimeRes.data.funnel || {})[key],0)}</button>`).join("");
+  } else {
+    errorState(el("runtime-status-bar"), "Runtime status unavailable.");
+  }
   if (acctRes.ok) {
     el("overview-cards").innerHTML = accountCardsHtml(
       acctRes.data,
@@ -59,6 +68,7 @@ export async function renderOverview() {
   results.push({ ok: acctRes.ok, status: acctRes.status, error: acctRes.error });
   results.push({ ok: riskRes.ok, status: riskRes.status, error: riskRes.error });
   results.push({ ok: regimeRes.ok, status: regimeRes.status, error: regimeRes.error });
+  results.push({ ok: runtimeRes.ok, status: runtimeRes.status, error: runtimeRes.error });
 
   results.push(
     await load("/positions", "overview-positions", (data) => {
@@ -839,18 +849,22 @@ export async function renderControl() {
   el("admin-access").innerHTML = adminGateHtml();
   wireAdminGate();
 
-  const [controlRes, resourceRes, aiRes, operationsRes, accountRes] = await Promise.all([
+  const [controlRes, resourceRes, aiRes, operationsRes, accountRes, notifyRes, runtimeRes] = await Promise.all([
     apiGet("/control/status"),
     apiGet("/resources/status"),
     apiGet("/ai/status"),
     apiGet("/operations/status"),
     apiGet("/account"),
+    apiGet("/notifications/status"),
+    apiGet("/runtime/status"),
   ]);
   results.push({ ok: controlRes.ok, status: controlRes.status, error: controlRes.error });
   results.push({ ok: resourceRes.ok, status: resourceRes.status, error: resourceRes.error });
   results.push({ ok: aiRes.ok, status: aiRes.status, error: aiRes.error });
   results.push({ ok: operationsRes.ok, status: operationsRes.status, error: operationsRes.error });
   results.push({ ok: accountRes.ok, status: accountRes.status, error: accountRes.error });
+  results.push({ ok: notifyRes.ok, status: notifyRes.status, error: notifyRes.error });
+  results.push({ ok: runtimeRes.ok, status: runtimeRes.status, error: runtimeRes.error });
 
   if (controlRes.ok) {
     el("control-cards").innerHTML = controlModeCardsHtml(controlRes.data);
@@ -896,6 +910,9 @@ export async function renderControl() {
     el("ai-config-actions").innerHTML = hasAdminToken()
       ? aiConfigFormHtml(aiRes.data) : lockedAdminActionHtml();
     if (hasAdminToken()) wireAiConfigForm();
+    table(el("ai-model-routing"), [
+      {key:"role",label:"Workflow"},{key:"model",label:"Model"}
+    ], Object.entries(aiRes.data.role_mappings || {}).map(([role,model]) => ({role,model})), "No role mappings configured.");
 
     table(
       el("ai-config-history"),
@@ -911,6 +928,21 @@ export async function renderControl() {
   } else {
     errorState(el("ai-cards"), "AI status unavailable.");
   }
+
+  if (notifyRes.ok) {
+    const n = notifyRes.data;
+    el("notification-cards").innerHTML = [
+      {label:"Telegram",value:n.configured ? "CONFIGURED" : "NOT CONFIGURED",cls:n.configured?"good":"bad"},
+      {label:"Last Success",value:n.last_successful_message ? dt(n.last_successful_message.timestamp) : "Never",cls:n.last_successful_message?"good":"amber"},
+      {label:"Sent Today",value:num(n.messages_sent_today,0),cls:""},
+    ].map(c => `<div class="card"><div class="label">${esc(c.label)}</div><div class="value ${c.cls}">${esc(c.value)}</div></div>`).join("");
+    el("notification-actions").innerHTML = hasAdminToken() ? `<form id="notification-test-form" class="control-form"><button type="submit">Send Test Notification</button><span class="control-form-status"></span></form>` : lockedAdminActionHtml();
+    el("notification-test-form")?.addEventListener("submit", async (e) => { e.preventDefault(); const s=e.target.querySelector(".control-form-status"); s.textContent="sending..."; const r=await apiPost("/notifications/test",{actor:"dashboard-admin"},{admin:true}); s.textContent=r.ok?"delivered":`failed: ${r.detail||r.error}`; if(r.ok) renderControl(); });
+    table(el("notification-history"), [{key:"timestamp",label:"When",cell:r=>`<td>${dt(r.timestamp)}</td>`},{key:"category",label:"Category"},{key:"message_type",label:"Type"},{key:"status",label:"Status",cell:r=>`<td>${badge(r.status,r.status)}</td>`},{key:"latency_ms",label:"Latency ms"}], [...(n.recent||[])].reverse(), "No audited notification attempts yet.");
+  }
+  if (runtimeRes.ok) table(el("runtime-matrix"), [
+    {key:"module",label:"Module"},{key:"expected_state",label:"Expected"},{key:"actual_state",label:"Actual"},{key:"last_successful_run",label:"Last success",cell:r=>`<td>${dt(r.last_successful_run)}</td>`},{key:"last_attempt",label:"Last attempt",cell:r=>`<td>${dt(r.last_attempt)}</td>`},{key:"queue_depth",label:"Queue"}
+  ], runtimeRes.data.runtime_matrix || [], "No runtime telemetry.");
 
   return results;
 }

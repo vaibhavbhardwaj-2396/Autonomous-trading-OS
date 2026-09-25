@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 
-def send_message(text: str) -> None:
+def send_message(text: str) -> dict:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -20,6 +20,10 @@ def send_message(text: str) -> None:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     resp = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=15)
     resp.raise_for_status()
+    payload = resp.json()
+    result = payload.get("result") or {}
+    return {"ok": bool(payload.get("ok")), "message_id": result.get("message_id"),
+            "date": result.get("date"), "chat_id_confirmed": bool((result.get("chat") or {}).get("id"))}
 
 
 if __name__ == "__main__":

@@ -53,6 +53,10 @@ control/.ai_budget.lock
 control/ai_config.json
 control/ai_config.json.tmp
 control/.ai_config.lock
+control/notification_config.json
+control/notification_config.json.tmp
+control/notification_audit.jsonl
+control/.notification_config.lock
 
 # Paper/shadow store and its overlap-prevention lock (STABLE + CONTROLLED,
 # outcome 1) — same class as research/*.db above: rebuildable simulation
