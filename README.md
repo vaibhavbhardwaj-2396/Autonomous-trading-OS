@@ -121,6 +121,9 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 
 | Commit | Delivered |
 |---|---|
+| `447ff8b` | production systemd permission boundary for audited control-plane state |
+| `1231342` | least-privilege notifier import fix and Telegram-only API environment |
+| `27b0759` | P0 runtime recovery, provider-neutral OpenAI gateway, audited Telegram delivery, runtime status UI and daily digest |
 | `ea3c6ca` | research queue backpressure |
 | `0302a00` | worker queue health telemetry |
 | `de28ff0` | production API deployment readiness |
