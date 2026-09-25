@@ -66,6 +66,11 @@ capacity allocation, exact paper-readiness blockers and historical campaign
 snapshots. Administrator secrets are never committed or embedded in the public
 frontend.
 
+The **Artifacts** tab provides server-side search, type filtering, stable
+sorting and bounded pagination across the research and control lineage. Full
+prompt/response bodies remain available only through the authenticated detail
+view, not the list response.
+
 ## Roadmap status
 
 | Phase | Outcome | Status |
@@ -123,6 +128,7 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 | `5095929` | timezone-safe 07:15 IST broker refresh schedule |
 | `d1d9ad1` | remove the legacy benchmark card and show incomplete valuations as an amber, explicitly partial subtotal |
 | `0a74edc` | Phase 10.5 capacity planner, validation ledger/API/UI, provider and broker capability registries, news features, architecture and AI-Trader comparison |
+| `97a4c17` | searchable, sortable and paginated artifact-lineage API and dashboard explorer |
 
 This project operates around real money. Process compliance is more important
 than activity or profit; no-trade is always a valid result.
