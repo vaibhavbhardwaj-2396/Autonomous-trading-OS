@@ -80,6 +80,7 @@ frontend/config.js
 # Dashboard API's own minimal secrets file (deploy/api.env.example is the
 # committed template; the real file is per-VPS, never committed).
 deploy/api.env
+deploy/notifications.env
 
 # Live capital state, trade/regime history, and broker session files —
 # exactly the list INSTALL.md already documents as "never overwritten by a

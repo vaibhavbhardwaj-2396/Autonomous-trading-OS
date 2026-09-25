@@ -8,7 +8,14 @@ import requests
 from dotenv import load_dotenv
 
 # Works whether invoked manually, from cron, or from systemd.
-load_dotenv(Path(__file__).parent.parent / ".env")
+# CLI/cron jobs normally run as root and may load the project's private env.
+# The dashboard API intentionally runs as an unprivileged user and cannot read
+# that file. Importing this module must still be safe there; systemd supplies a
+# separate Telegram-only EnvironmentFile for the authenticated admin action.
+try:
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except OSError:
+    pass
 
 
 def send_message(text: str) -> dict:

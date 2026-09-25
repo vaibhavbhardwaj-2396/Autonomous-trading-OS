@@ -42,6 +42,8 @@ worker must not be presented as active.
 
 - Audited notification preferences and delivery ledger, with no credentials in either.
 - Admin-only test action with message label `LIVING QUANT SYSTEM TEST`.
+- The API receives only `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` through the separate
+  gitignored `deploy/notifications.env`; it never receives the broker-bearing root `.env`.
 - Deterministic daily research digest at 20:00 IST.
 - Persistent Overview status bar, active-work panel, funnel, runtime matrix, model routing and
   notification health.

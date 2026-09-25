@@ -24,6 +24,10 @@ WorkingDirectory=/root/trading-agent
 # would mean a bug in this read-only API could leak broker/Telegram secrets
 # it never actually uses. See docs/DEPLOYMENT.md step 11/12.
 EnvironmentFile=/root/trading-agent/deploy/api.env
+# Telegram-only credentials for the authenticated notification test action.
+# Optional so the read-only API remains available when notifications have not
+# been configured. Never point this service at the broker-bearing root .env.
+EnvironmentFile=-/root/trading-agent/deploy/notifications.env
 Environment=HOME=/tmp
 # gunicorn's own --bind stays 127.0.0.1 (port taken from DASHBOARD_API_PORT,
 # set in deploy/api.env — see deploy/api.env.example, must be set, no
