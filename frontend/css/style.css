@@ -379,5 +379,11 @@ footer.app-footer {
 }
 
 #artifact-filter {
-  padding: 12px 16px 0;
+  padding: 12px 16px;
 }
+.artifact-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.artifact-toolbar label { display: flex; flex-direction: column; gap: 5px; color: var(--text-dim); font-size: 11px; text-transform: uppercase; }
+.artifact-toolbar input, .artifact-toolbar select { background: var(--bg); color: var(--text); border: 1px solid var(--panel-border); border-radius: 6px; padding: 7px 9px; }
+.artifact-toolbar button { padding: 7px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+.pager { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 12px 16px; color: var(--text-dim); }
+.pager button:disabled { opacity: .35; cursor: not-allowed; }

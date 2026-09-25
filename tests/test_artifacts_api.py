@@ -136,6 +136,31 @@ check("A5: pagination — two consecutive pages never overlap",
 check("A6: total_count is stable across pages of the same query",
       page1["total_count"] == page2["total_count"], (page1["total_count"], page2["total_count"]))
 
+searched = artifacts.list_artifacts(
+    store_a, query="unusual volume", registry_dir=reg_a)
+check("A6b: full-text search matches artifact metadata without exposing detail payloads",
+      searched["total_count"] == 1
+      and searched["artifacts"][0]["type"] == "hypothesis", searched)
+
+locked = artifacts.list_artifacts(
+    store_a, type="experiment", status="LOCKED", registry_dir=reg_a)
+check("A6c: status filtering is case-insensitive and composes with type filtering",
+      locked["total_count"] == 1 and locked["artifacts"][0]["id"] == "experiment:EXP-ART-1",
+      locked)
+
+by_type = artifacts.list_artifacts(
+    store_a, limit=500, sort="type", order="asc", registry_dir=reg_a)
+types = [a["type"] for a in by_type["artifacts"]]
+check("A6d: caller-selected ascending sort is deterministic",
+      types == sorted(types, key=str.casefold), types)
+
+for bad_kw in ({"sort": "payload"}, {"order": "sideways"}):
+    try:
+        artifacts.list_artifacts(store_a, registry_dir=reg_a, **bad_kw)
+        check(f"A6e: invalid artifact query option {bad_kw} is rejected", False)
+    except artifacts.DataSourceError:
+        check(f"A6e: invalid artifact query option {bad_kw} is rejected", True)
+
 mi_id = only_mi["artifacts"][0]["id"]
 detail = artifacts.get_artifact(store_a, mi_id, registry_dir=reg_a)
 check("A7: get_artifact() for a model_interaction returns the FULL prompt/response",
@@ -239,6 +264,18 @@ check("C5: GET /artifacts with auth returns 200 and a paginated shape",
 r_bad_type = client.get("/artifacts?type=not_a_real_type", headers=AUTH)
 check("C6: GET /artifacts?type=<bad> returns 400, not a 500 or a silent "
       "empty list", r_bad_type.status_code == 400, r_bad_type.get_json())
+
+r_query = client.get("/artifacts?q=research&sort=type&order=asc&limit=10", headers=AUTH)
+check("C6b: GET /artifacts accepts bounded search, sort, order, and pagination",
+      r_query.status_code == 200
+      and r_query.get_json()["sort"] == "type"
+      and r_query.get_json()["order"] == "asc"
+      and r_query.get_json()["limit"] == 10, r_query.get_json())
+
+check("C6c: GET /artifacts rejects an unknown sort field",
+      client.get("/artifacts?sort=payload", headers=AUTH).status_code == 400)
+check("C6d: GET /artifacts rejects an unknown order",
+      client.get("/artifacts?order=sideways", headers=AUTH).status_code == 400)
 
 r_missing = client.get("/artifacts/model_interaction:999999999", headers=AUTH)
 check("C7: GET /artifacts/<nonexistent id> returns 404", r_missing.status_code == 404)

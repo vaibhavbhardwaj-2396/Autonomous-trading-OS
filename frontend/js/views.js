@@ -928,16 +928,35 @@ const ARTIFACT_TYPES = [
 ];
 
 let artifactsCurrentType = "";
+let artifactsQuery = "";
+let artifactsSort = "timestamp";
+let artifactsOrder = "desc";
+let artifactsOffset = 0;
+const ARTIFACT_PAGE_SIZE = 25;
 
 function artifactTypeFilterHtml() {
   return `
-    <label>Filter by type
+    <form id="artifact-search-form" class="artifact-toolbar">
+    <label>Search
+      <input id="artifact-query" type="search" value="${esc(artifactsQuery)}" placeholder="id, summary, source, status" />
+    </label>
+    <label>Type
       <select id="artifact-type-filter">
         ${ARTIFACT_TYPES.map(
           (t) => `<option value="${t}" ${t === artifactsCurrentType ? "selected" : ""}>${t || "(all)"}</option>`
         ).join("")}
       </select>
     </label>
+    <label>Sort
+      <select id="artifact-sort">
+        ${["timestamp", "type", "status", "source", "summary"].map((s) => `<option value="${s}" ${s === artifactsSort ? "selected" : ""}>${s}</option>`).join("")}
+      </select>
+    </label>
+    <label>Order
+      <select id="artifact-order"><option value="desc" ${artifactsOrder === "desc" ? "selected" : ""}>descending</option><option value="asc" ${artifactsOrder === "asc" ? "selected" : ""}>ascending</option></select>
+    </label>
+    <button type="submit">Apply</button>
+    </form>
   `;
 }
 
@@ -985,12 +1004,24 @@ export async function renderArtifacts() {
   const filterSelect = el("artifact-type-filter");
   filterSelect.addEventListener("change", () => {
     artifactsCurrentType = filterSelect.value;
+    artifactsOffset = 0;
+    renderArtifacts();
+  });
+  el("artifact-search-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    artifactsQuery = el("artifact-query").value.trim();
+    artifactsSort = el("artifact-sort").value;
+    artifactsOrder = el("artifact-order").value;
+    artifactsOffset = 0;
     renderArtifacts();
   });
 
-  const qs = artifactsCurrentType ? `?type=${encodeURIComponent(artifactsCurrentType)}&limit=100` : "?limit=100";
+  const params = new URLSearchParams({ limit: ARTIFACT_PAGE_SIZE, offset: artifactsOffset,
+    sort: artifactsSort, order: artifactsOrder });
+  if (artifactsCurrentType) params.set("type", artifactsCurrentType);
+  if (artifactsQuery) params.set("q", artifactsQuery);
   results.push(
-    await load(`/artifacts${qs}`, "artifact-list", (data) => {
+    await load(`/artifacts?${params}`, "artifact-list", (data) => {
       const container = el("artifact-list");
       if (!data.artifacts || data.artifacts.length === 0) {
         container.innerHTML = `<div class="empty-state">No artifacts recorded yet for this filter.</div>`;
@@ -1015,6 +1046,9 @@ export async function renderArtifacts() {
       container.querySelectorAll("button[data-artifact-id]").forEach((btn) => {
         btn.addEventListener("click", () => showArtifactDetail(btn.dataset.artifactId));
       });
+      container.insertAdjacentHTML("beforeend", `<div class="pager"><span>${data.total_count ? `${data.offset + 1}–${data.offset + data.shown_count} of ${data.total_count}` : "0 results"}</span><button id="artifact-prev" class="ghost-btn" ${data.offset <= 0 ? "disabled" : ""}>Previous</button><button id="artifact-next" class="ghost-btn" ${data.truncated ? "" : "disabled"}>Next</button></div>`);
+      el("artifact-prev")?.addEventListener("click", () => { artifactsOffset = Math.max(0, artifactsOffset - ARTIFACT_PAGE_SIZE); renderArtifacts(); });
+      el("artifact-next")?.addEventListener("click", () => { artifactsOffset += ARTIFACT_PAGE_SIZE; renderArtifacts(); });
     }, "Artifacts unavailable")
   );
 

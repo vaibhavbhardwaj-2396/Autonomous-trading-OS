@@ -230,6 +230,11 @@ function stripComments(s) {
   return s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 const VIEWS_SRC = stripComments(readFileSync(join(HERE, "../js/views.js"), "utf8"));
+check("artifact explorer exposes server-side search, sorting, and pagination controls",
+  VIEWS_SRC.includes("artifact-search-form")
+  && VIEWS_SRC.includes("URLSearchParams")
+  && VIEWS_SRC.includes("artifact-prev")
+  && VIEWS_SRC.includes("artifact-next"));
 const FORMAT_SRC = stripComments(readFileSync(join(HERE, "../js/format.js"), "utf8"));
 
 check("views.js no longer renders an 'Agent Book Value' card",

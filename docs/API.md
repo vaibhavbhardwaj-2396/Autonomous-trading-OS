@@ -169,7 +169,7 @@ All data endpoints require either valid bearer token and are `GET` only.
 | `GET /validation/status` | append-only research memory, immutable registries, paper store and capacity planner | Phase 10.5 funnel, conversion rates, paper blockers and campaign history; `?history_limit=` |
 | `GET /resources/status` | ratio-based resource governor and capacity planner | measured CPU/memory/disk plus IDLE/LOW_LOAD/NORMAL/HIGH_LOAD/CRITICAL work allocation |
 | `GET /ai/status` | provider registry, persisted selection and budget state | effective provider/model, non-secret auth mode metadata and measured usage |
-| `GET /artifacts` | authoritative research/control stores | searchable artifact metadata with `?type=&limit=&offset=`; prompt/response bodies remain detail-only |
+| `GET /artifacts` | authoritative research/control stores | searchable artifact metadata with `?q=&type=&status=&source=&sort=timestamp\|type\|status\|source\|summary&order=asc\|desc&limit=&offset=`; `limit` is capped at 200 and prompt/response bodies remain detail-only |
 | `GET /artifacts/<id>` | authoritative artifact source | full authenticated detail for one artifact |
 | `GET /strategies` | `strategies.registry.list_versions()` | registered StrategyVersions, `?limit=` |
 | `GET /backtests` | `research.memory`'s research-note log | backtest **completion notes** only, see below |

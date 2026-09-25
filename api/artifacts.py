@@ -160,7 +160,9 @@ def _system_event_artifacts() -> list[dict]:
 
 def list_artifacts(
     store: Store, *, type: Optional[str] = None, limit: int = 50, offset: int = 0,
-    registry_dir: Optional[Path] = None,
+    registry_dir: Optional[Path] = None, query: Optional[str] = None,
+    status: Optional[str] = None, source: Optional[str] = None,
+    sort: str = "timestamp", order: str = "desc",
 ) -> dict:
     """Every artifact, newest first, optionally filtered to one `type`.
     Pagination (`limit`/`offset`) is applied AFTER merging every requested
@@ -181,12 +183,29 @@ def list_artifacts(
         elif t == "system_event":
             items += _system_event_artifacts()
 
-    items.sort(key=lambda a: a.get("timestamp") or "", reverse=True)
+    needle = (query or "").strip().casefold()
+    if needle:
+        items = [a for a in items if needle in " ".join(str(a.get(k) or "")
+                 for k in ("id", "type", "status", "source", "summary")).casefold()]
+    if status:
+        items = [a for a in items if str(a.get("status") or "").casefold()
+                 == status.strip().casefold()]
+    if source:
+        items = [a for a in items if str(a.get("source") or "").casefold()
+                 == source.strip().casefold()]
+    if sort not in ("timestamp", "type", "status", "source", "summary"):
+        raise DataSourceError(
+            "unknown artifact sort field — expected timestamp, type, status, source, or summary")
+    if order not in ("asc", "desc"):
+        raise DataSourceError("unknown artifact order — expected asc or desc")
+    items.sort(key=lambda a: str(a.get(sort) or "").casefold(), reverse=order == "desc")
     total = len(items)
     page = items[offset:offset + max(0, limit)]
     return {
         "artifacts": page, "shown_count": len(page), "total_count": total,
         "offset": offset, "limit": limit, "truncated": total > offset + len(page),
+        "query": query, "status_filter": status, "source_filter": source,
+        "sort": sort, "order": order,
         "as_of": iso(now_ist()),
     }
 

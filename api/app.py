@@ -436,8 +436,17 @@ def create_app() -> Flask:
         offset, err = _int_query_param("offset", 0)
         if err:
             return err
+        sort = request.args.get("sort") or "timestamp"
+        order = request.args.get("order") or "desc"
+        if sort not in ("timestamp", "type", "status", "source", "summary"):
+            return jsonify({"error": "bad_request", "detail": "invalid artifact sort field"}), 400
+        if order not in ("asc", "desc"):
+            return jsonify({"error": "bad_request", "detail": "artifact order must be asc or desc"}), 400
         return jsonify(artifacts.list_artifacts(
-            data.get_default_store(), type=artifact_type, limit=limit, offset=offset))
+            data.get_default_store(), type=artifact_type, limit=max(0, min(limit, 200)),
+            offset=max(0, offset), query=request.args.get("q"),
+            status=request.args.get("status"), source=request.args.get("source"),
+            sort=sort, order=order))
 
     @app.route("/artifacts/<path:artifact_id>", methods=["GET"])
     @auth.require_auth
