@@ -56,7 +56,7 @@ RestartSec=5
 # for read-only callers — see api/data.py's module docstring) and logs/
 # (gunicorn's own access/error log files above).
 ProtectSystem=strict
-ReadWritePaths=/root/trading-agent/research /root/trading-agent/logs
+ReadWritePaths=/root/trading-agent/research /root/trading-agent/logs /root/trading-agent/control
 NoNewPrivileges=true
 PrivateTmp=true
 

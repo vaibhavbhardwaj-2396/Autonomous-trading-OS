@@ -44,6 +44,8 @@ worker must not be presented as active.
 - Admin-only test action with message label `LIVING QUANT SYSTEM TEST`.
 - The API receives only `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` through the separate
   gitignored `deploy/notifications.env`; it never receives the broker-bearing root `.env`.
+  The systemd sandbox grants write access to `control/` only for the narrow, audited Admin
+  state files used by runtime, AI and notification preferences/delivery history.
 - Deterministic daily research digest at 20:00 IST.
 - Persistent Overview status bar, active-work panel, funnel, runtime matrix, model routing and
   notification health.
