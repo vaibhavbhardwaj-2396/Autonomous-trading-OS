@@ -5,7 +5,7 @@
 import { POLL_INTERVAL_MS, apiGet, apiBaseUrlForDisplay } from "./api.js";
 import {
   renderOverview, renderTrading, renderPaper, renderResearch, renderStrategies,
-  renderControl, renderArtifacts,
+  renderValidation, renderControl, renderArtifacts,
 } from "./views.js";
 
 const VIEWS = {
@@ -14,6 +14,7 @@ const VIEWS = {
   paper: renderPaper,
   research: renderResearch,
   strategies: renderStrategies,
+  validation: renderValidation,
   control: renderControl,
   artifacts: renderArtifacts,
 };

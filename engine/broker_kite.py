@@ -11,13 +11,24 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .broker import Broker, OrderResult, Position
+from .broker import Broker, BrokerCapabilities, OrderResult, Position
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 
 class KiteBroker(Broker):
     name = "kite"
+
+    def capabilities(self) -> BrokerCapabilities:
+        return BrokerCapabilities(
+            orders_read=True, trades_read=True, auth_mode="request_token_session",
+            requires_daily_auth=True)
+
+    def orders(self) -> list[dict]:
+        return list(self._kite().orders())
+
+    def trade_history(self) -> list[dict]:
+        return list(self._kite().trades())
 
     def _kite(self):
         from kite_auth import get_kite_client  # noqa

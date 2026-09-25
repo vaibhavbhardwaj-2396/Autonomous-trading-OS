@@ -26,6 +26,9 @@
 45   15   * * 1-5  cd /root/trading-agent && venv/bin/python -m research.recorder --cycle intraday   --quiet-on-success >> logs/recorder.log 2>&1
 30   18   * * 1-5  cd /root/trading-agent && venv/bin/python -m research.recorder --cycle evening    --quiet-on-success >> logs/recorder.log 2>&1
 
+# ---- Phase 10.5 validation ledger — read-only snapshot of funnel/capacity.
+45   18   * * 1-5  cd /root/trading-agent && venv/bin/python -m research.validation >> logs/validation_campaign.log 2>&1
+
 # ---- Continuous research worker (research/brain/worker.py, docs/RESEARCH_WORKER.md).
 # ---- One BOUNDED heartbeat per tick, then exit — cron is the heartbeat, the
 # ---- module is the brain. Defaults ARE the required bounds: max_discovery=1,

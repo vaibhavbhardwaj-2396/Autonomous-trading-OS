@@ -28,7 +28,7 @@ from typing import Optional
 
 import requests
 
-from .broker import Broker, OrderResult, Position
+from .broker import Broker, BrokerCapabilities, OrderResult, Position
 
 BASE_URL = "https://api.indstocks.com"
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -68,6 +68,11 @@ def _to_int(value, default: int = 0) -> int:
 
 class INDstocksBroker(Broker):
     name = "indstocks"
+
+    def capabilities(self) -> BrokerCapabilities:
+        return BrokerCapabilities(
+            orders_read=False, trades_read=False, auth_mode="totp_mpin_token",
+            requires_daily_auth=True)
 
     def __init__(self) -> None:
         self._token: Optional[str] = None

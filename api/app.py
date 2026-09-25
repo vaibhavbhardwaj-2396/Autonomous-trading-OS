@@ -17,6 +17,7 @@ the separate administrator token and cannot place or modify an order.
     GET /research/worker-status      |
     GET /research/data-quality       |
     GET /operations/status           |
+    GET /validation/status           |
     GET /strategies                  |
     GET /backtests                  /
 
@@ -95,11 +96,13 @@ from . import runtime_bridge  # noqa: E402 — Priority Phase 4: global control 
 from . import artifacts  # noqa: E402 — outcome 2: the unified artifact explorer
 from . import ai_status  # noqa: E402 — outcome 2: AI provider config + budget
 from . import operations  # noqa: E402 — bounded, read-only subsystem health
+from . import validation  # noqa: E402 — Phase 10.5 read-only campaign status
 from control import runtime as ctrl  # noqa: E402
 from control import resources as rg  # noqa: E402 — outcome 1: the Resource Governor
+from control import capacity as capacity_planner  # noqa: E402 — Phase 10.5 allocation plan
 
 APP_NAME = "living-quant-api"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 
 def _int_query_param(name: str, default: Optional[int]) -> tuple[Optional[int], Optional[Response]]:
@@ -264,6 +267,15 @@ def create_app() -> Flask:
     def operations_status():
         return jsonify(operations.get_operations_status())
 
+    @app.route("/validation/status", methods=["GET"])
+    @auth.require_auth
+    def validation_status():
+        limit, err = _int_query_param("history_limit", 30)
+        if err:
+            return err
+        return jsonify(validation.get_validation_status(
+            data.get_default_store(), history_limit=max(0, min(limit, 365))))
+
     # -- Strategies / backtests ---------------------------------------------
 
     @app.route("/strategies", methods=["GET"])
@@ -367,7 +379,10 @@ def create_app() -> Flask:
     @app.route("/resources/status", methods=["GET"])
     @auth.require_auth
     def resources_status():
-        return jsonify(rg.get_resource_state())
+        measured = rg.get_resource_state()
+        result = dict(measured)
+        result["capacity_plan"] = capacity_planner.plan(measured)
+        return jsonify(result)
 
     # -- AI provider/model configuration + budget (outcome 2) --------------
     # POST /ai/config is the SECOND write-capable route this API has ever

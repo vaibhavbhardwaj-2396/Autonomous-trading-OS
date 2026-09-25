@@ -38,7 +38,7 @@ import urllib.error
 import urllib.request
 import datetime as dt
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Protocol
 
 from ..store import Store, now_ist, iso
 
@@ -69,6 +69,14 @@ class SourceResult:
             return f"  ✗ {self.source:<18} FAILED  {self.error}"
         return (f"  ✓ {self.source:<18} {self.rows_new:>6} new "
                 f"/ {self.rows_seen:>6} seen  ({self.elapsed_s:.1f}s)")
+
+
+class NewsProvider(Protocol):
+    """Provider-neutral contract for point-in-time news/event ingestion."""
+
+    name: str
+
+    def fetch_events(self, *, first_seen: dt.datetime) -> list[dict]: ...
 
 
 def run_source(name: str, fn: Callable[[], dict]) -> SourceResult:

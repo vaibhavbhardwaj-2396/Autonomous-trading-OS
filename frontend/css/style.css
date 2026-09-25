@@ -232,6 +232,8 @@ td.neg { color: var(--bad); }
 .badge.rejected, .badge.skipped { background: rgba(139, 149, 165, 0.2); color: var(--text-dim); }
 
 .subtext { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+.blocker-list { margin: 0; padding: 16px 36px; color: var(--warn); }
+.blocker-list li { margin: 6px 0; }
 
 /* Paper/shadow — Slice AA. Everything on this tab must read as clearly
    simulated, never mistaken for the live Trading tab. */

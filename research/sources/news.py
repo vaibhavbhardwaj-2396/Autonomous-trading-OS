@@ -50,6 +50,25 @@ DEFAULT_FEEDS = {
 }
 
 _TAG = re.compile(r"<[^>]+>")
+_URGENT = re.compile(r"\b(breaking|urgent|halts?|default|fraud|probe|ban|merger|acquisition)\b", re.I)
+_POSITIVE = re.compile(r"\b(beats?|surges?|wins?|growth|profit|upgrade|approval)\b", re.I)
+_NEGATIVE = re.compile(r"\b(misses?|falls?|loss|downgrade|default|fraud|probe|ban)\b", re.I)
+
+
+def quantitative_features(title: str, description: str = "") -> dict:
+    """Cheap, deterministic event features; no model call and no hidden lookahead."""
+    text = f"{title} {description}".strip()
+    pos = len(_POSITIVE.findall(text))
+    neg = len(_NEGATIVE.findall(text))
+    polarity = 0.0 if pos + neg == 0 else round((pos - neg) / (pos + neg), 3)
+    return {
+        "schema_version": 1,
+        "polarity_lexical": polarity,
+        "urgency": 1.0 if _URGENT.search(text) else 0.0,
+        "headline_length": len(title),
+        "token_estimate": max(1, len(text.split())),
+        "method": "deterministic_lexicon_v1",
+    }
 
 
 def _text(node, tag: str) -> str:
@@ -92,6 +111,7 @@ def parse(xml_bytes: bytes, feed_name: str, first_seen: Optional[dt.datetime] = 
         # So identity has to be explicit here.
         ident = hashlib.sha1(f"{feed_name}|{link or title}".encode()).hexdigest()[:16]
 
+        description = _TAG.sub("", _text(item, "description"))[:600] or None
         rows.append({
             "dataset": DATASET,
             "entity": feed_name,
@@ -107,7 +127,10 @@ def parse(xml_bytes: bytes, feed_name: str, first_seen: Optional[dt.datetime] = 
                 "title": title,
                 "link": link or None,
                 "published_claimed": published.isoformat() if published else None,
-                "description": _TAG.sub("", _text(item, "description"))[:600] or None,
+                "description": description,
+                "provider": SOURCE,
+                "event_type": "market_news",
+                "features": quantitative_features(title, description or ""),
                 # Recorded so a later study knows the blur it inherited.
                 "poll_interval_minutes": poll_interval_minutes,
             },

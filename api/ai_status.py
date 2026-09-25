@@ -43,6 +43,7 @@ def get_ai_status() -> dict:
         "config_reason": cfg.get("reason"),
         "config_history": cfg.get("history") or [],
         "known_providers": list(llm.KNOWN_PROVIDERS),
+        "provider_catalog": llm.provider_catalog(),
         "budget": {
             "calls_today": budget_state.get("calls_today"),
             "expensive_calls_today": budget_state.get("expensive_calls_today"),

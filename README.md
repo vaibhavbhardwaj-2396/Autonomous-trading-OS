@@ -2,7 +2,8 @@
 
 Living Quant is a safety-gated research, strategy, backtest, paper-trading and
 operator-control system connected to an INDmoney / INDstocks brokerage account.
-Roadmap phases 0–10 are implemented. Phase 11 (human-approved live canary) is
+Roadmap phases 0–10 are implemented and Phase 10.5 is the active autonomous
+validation campaign. Phase 11 (human-approved live canary) is
 deliberately not complete and a green deployment never authorizes an order.
 
 Production:
@@ -60,7 +61,9 @@ this job. Canonical schedule: `deploy/broker.cron`.
 
 The UI includes direct card navigation, a manual refresh action, broker
 freshness in Operational Health, responsive layouts and explicit stale/error
-states. Administrator secrets are never committed or embedded in the public
+states. The **Validation** tab exposes research-to-paper funnel throughput,
+capacity allocation, exact paper-readiness blockers and historical campaign
+snapshots. Administrator secrets are never committed or embedded in the public
 frontend.
 
 ## Roadmap status
@@ -78,9 +81,13 @@ frontend.
 | 8 | paper factory, accounting and reconciliation | Complete |
 | 9 | portfolio/risk integration within protected guardrails | Complete |
 | 10 | secure Admin control plane and complete operator UI | Complete |
+| 10.5 | capacity-aware autonomous validation campaign | Active — software complete; collecting evidence |
 | 11 | live-readiness evidence, approval, canary and rollback rehearsal | Pending |
 
 Detailed evidence: [Phases 1–10 acceptance](docs/PHASE_1_10_ACCEPTANCE.md).
+Phase 10.5: [Validation campaign](docs/PHASE_10_5_VALIDATION.md),
+[architecture](docs/LIVING_QUANT_ARCHITECTURE.md), and
+[AI-Trader comparison](docs/AI_TRADER_COMPARISON.md).
 Current plan: [Implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md).
 
 ## Delivery and verification

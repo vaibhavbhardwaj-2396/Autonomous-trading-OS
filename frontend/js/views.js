@@ -580,6 +580,70 @@ export async function renderStrategies() {
 }
 
 // --------------------------------------------------------------------------
+// Phase 10.5 validation campaign — a read-only view over the durable funnel
+// ledger.  It never starts an experiment or paper cycle from the browser.
+// --------------------------------------------------------------------------
+
+const FUNNEL_LABELS = {
+  observations: "Observations", detections: "Detections", hypotheses: "Hypotheses",
+  locked_experiments: "Locked experiments", reported_experiments: "Reported experiments",
+  evidence: "Evidence summaries", strategy_versions: "Strategy versions",
+  backtests: "Backtests", paper_eligible: "Paper eligible", paper_cycles: "Paper cycles",
+  paper_trades: "Paper trades",
+};
+
+export async function renderValidation() {
+  const result = await apiGet("/validation/status?history_limit=30");
+  if (!result.ok) {
+    errorState(el("validation-cards"), "Validation campaign status unavailable.");
+    return [{ ok: false, status: result.status, error: result.error }];
+  }
+  const current = result.data.current || {};
+  const funnel = current.funnel || {};
+  const readiness = current.paper_readiness || {};
+  const economics = current.research_economics || {};
+  const capacity = current.capacity || {};
+  el("validation-cards").innerHTML = [
+    { label: "Campaign", value: `Phase ${current.phase || "10.5"}`, cls: "good", detail: dt(current.captured_at) },
+    { label: "Capacity", value: capacity.state || "—", cls: capacity.state === "CRITICAL" ? "bad" : capacity.state === "HIGH_LOAD" ? "amber" : "good", detail: `${capacity.legacy_resource_state || "—"} infrastructure` },
+    { label: "Paper readiness", value: readiness.ready ? "READY" : "BLOCKED", cls: readiness.ready ? "good" : "amber", detail: `${readiness.eligible_versions || 0} eligible version(s)` },
+    { label: "AI interactions", value: num(economics.calls, 0), detail: economics.mean_latency_seconds === null ? "latency unmeasured" : `${economics.mean_latency_seconds}s mean latency` },
+    { label: "Live promotion", value: (current.live_promotion || {}).state || "LOCKED", cls: "bad", detail: (current.live_promotion || {}).reason || "human gate required" },
+  ].map((card) => `<div class="card"><div class="label">${esc(card.label)}</div><div class="value ${card.cls || ""}">${esc(card.value)}</div><div class="subtext">${esc(card.detail || "")}</div></div>`).join("");
+
+  table(el("validation-funnel"), [
+    { key: "stage", label: "Stage" },
+    { key: "count", label: "Count", cell: (r) => `<td class="num">${num(r.count, 0)}</td>` },
+    { key: "conversion", label: "Conversion from prior", cell: (r) => `<td class="num">${r.conversion === null ? "—" : `${num(r.conversion * 100, 1)}%`}</td>` },
+  ], Object.keys(FUNNEL_LABELS).map((key, index, keys) => ({
+    stage: FUNNEL_LABELS[key], count: funnel[key] || 0,
+    conversion: index === 0 ? null : (current.conversion || {})[`${keys[index - 1]}_to_${key}`],
+  })), "No validation metrics available.");
+
+  table(el("validation-capacity"), [
+    { key: "work_class", label: "Work class" },
+    { key: "enabled", label: "Admission", cell: (r) => `<td>${badge(r.enabled ? "enabled" : "paused", r.enabled ? "normal" : "red")}</td>` },
+    { key: "concurrency", label: "Concurrency", cell: (r) => `<td class="num">${num(r.concurrency, 0)}</td>` },
+    { key: "cpu_share", label: "Policy share", cell: (r) => `<td class="num">${num((r.cpu_share || 0) * 100, 0)}%</td>` },
+    { key: "reason", label: "Reason" },
+  ], capacity.allocations || [], "No capacity plan available.");
+
+  const blockers = readiness.blockers || [];
+  el("validation-blockers").innerHTML = blockers.length
+    ? `<ul class="blocker-list">${blockers.map((b) => `<li>${esc(b)}</li>`).join("")}</ul>`
+    : `<div class="empty-state">No current Phase 10.5 blocker.</div>`;
+
+  table(el("validation-history"), [
+    { key: "captured_at", label: "Captured", cell: (r) => `<td>${dt(r.captured_at)}</td>` },
+    { key: "hypotheses", label: "Hypotheses", cell: (r) => `<td class="num">${num((r.funnel || {}).hypotheses, 0)}</td>` },
+    { key: "evidence", label: "Evidence", cell: (r) => `<td class="num">${num((r.funnel || {}).evidence, 0)}</td>` },
+    { key: "strategies", label: "Strategies", cell: (r) => `<td class="num">${num((r.funnel || {}).strategy_versions, 0)}</td>` },
+    { key: "paper", label: "Paper trades", cell: (r) => `<td class="num">${num((r.funnel || {}).paper_trades, 0)}</td>` },
+  ], [...(result.data.history || [])].reverse(), "No persisted campaign snapshots yet.");
+  return [{ ok: true, data: result.data }];
+}
+
+// --------------------------------------------------------------------------
 // Control (outcome 1: RUNNING/PAUSED/SAFE_MODE/STOPPED) + Resource Governor
 // + AI provider/model (outcome 2) — the FIRST tab on this dashboard with a
 // real write path. Every action still requires a typed reason, mirroring

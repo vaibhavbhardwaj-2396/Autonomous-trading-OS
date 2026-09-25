@@ -20,6 +20,7 @@
     <button data-view="paper">Paper</button>
     <button data-view="research">Research</button>
     <button data-view="strategies">Strategies</button>
+    <button data-view="validation">Validation</button>
     <button data-view="control">🔒 Admin</button>
     <button data-view="artifacts">Artifacts</button>
   </nav>
@@ -148,6 +149,31 @@
       <div class="readonly-note">
         Observation only — this dashboard cannot promote a StrategyVersion or run a backtest.
       </div>
+    </section>
+
+    <!-- ============================ Validation ============================ -->
+    <section id="view-validation" class="view">
+      <div class="paper-banner">
+        <span class="dot"></span>
+        <span>PHASE 10.5 — autonomous validation only. Live promotion remains locked.</span>
+      </div>
+      <div id="validation-cards" class="grid"></div>
+      <section class="panel">
+        <h2>Research → Paper Funnel</h2>
+        <div id="validation-funnel" class="table-wrap"></div>
+      </section>
+      <section class="panel">
+        <h2>Capacity Allocation</h2>
+        <div id="validation-capacity" class="table-wrap"></div>
+      </section>
+      <section class="panel">
+        <h2>Concrete Blockers</h2>
+        <div id="validation-blockers"></div>
+      </section>
+      <section class="panel">
+        <h2>Campaign History</h2>
+        <div id="validation-history" class="table-wrap"></div>
+      </section>
     </section>
 
     <!-- ============================== Control ============================== -->

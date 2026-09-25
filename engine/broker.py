@@ -47,10 +47,42 @@ class Position:
     security_id: str = ""
 
 
+@dataclass(frozen=True)
+class BrokerCapabilities:
+    """Discoverable adapter surface; unsupported features fail explicitly."""
+
+    account: bool = True
+    holdings: bool = True
+    positions: bool = True
+    quotes: bool = True
+    orders_read: bool = False
+    trades_read: bool = False
+    place_orders: bool = True
+    protective_stops: bool = True
+    cancel_orders: bool = True
+    auth_mode: str = "session"
+    requires_daily_auth: bool = False
+
+
 class Broker(ABC):
     """Minimal contract every broker implementation must satisfy."""
 
     name: str = "abstract"
+
+    def capabilities(self) -> BrokerCapabilities:
+        """Return adapter capabilities without making a broker request."""
+        return BrokerCapabilities()
+
+    def account(self) -> dict:
+        """Normalized read-only account view available on every adapter."""
+        return {"broker": self.name, "authenticated": self.is_authenticated(),
+                "available_cash": self.funds()}
+
+    def orders(self) -> list[dict]:
+        raise NotImplementedError(f"{self.name} adapter does not support order-history reads")
+
+    def trade_history(self) -> list[dict]:
+        raise NotImplementedError(f"{self.name} adapter does not support trade-history reads")
 
     @abstractmethod
     def is_authenticated(self) -> bool:

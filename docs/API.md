@@ -166,6 +166,11 @@ All data endpoints require either valid bearer token and are `GET` only.
 | `GET /research/worker-status` | `research.brain.worker.worker_status()` | latest heartbeat, cooldown, errors, limits, and discovery queue-admission decision; telemetry-only read |
 | `GET /research/data-quality` | `research.data_quality.build_data_quality_report()` | point-in-time freshness, coverage and append-only integrity; explicit READY/DEGRADED/BLOCKED state |
 | `GET /operations/status` | bounded recorder JSONL, worker telemetry and read-only paper store | combined operational health; never starts work or creates a store |
+| `GET /validation/status` | append-only research memory, immutable registries, paper store and capacity planner | Phase 10.5 funnel, conversion rates, paper blockers and campaign history; `?history_limit=` |
+| `GET /resources/status` | ratio-based resource governor and capacity planner | measured CPU/memory/disk plus IDLE/LOW_LOAD/NORMAL/HIGH_LOAD/CRITICAL work allocation |
+| `GET /ai/status` | provider registry, persisted selection and budget state | effective provider/model, non-secret auth mode metadata and measured usage |
+| `GET /artifacts` | authoritative research/control stores | searchable artifact metadata with `?type=&limit=&offset=`; prompt/response bodies remain detail-only |
+| `GET /artifacts/<id>` | authoritative artifact source | full authenticated detail for one artifact |
 | `GET /strategies` | `strategies.registry.list_versions()` | registered StrategyVersions, `?limit=` |
 | `GET /backtests` | `research.memory`'s research-note log | backtest **completion notes** only, see below |
 | `GET /admin/status` | auth boundary | verifies the separate admin token; returns no secret |

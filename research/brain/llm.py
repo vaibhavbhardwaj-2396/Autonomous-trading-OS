@@ -72,7 +72,8 @@ import os
 import time
 import urllib.error
 import urllib.request
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Callable, Optional, Protocol
 
 from . import investigator as inv
 from .. import memory as rm
@@ -97,6 +98,22 @@ OPENAI_SYSTEM_PREAMBLE = (
     "object only, exactly matching the instructions in the prompt. No "
     "prose, no markdown code fences, no explanation outside the object."
 )
+
+
+@dataclass(frozen=True)
+class ModelResponse:
+    text: str
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+
+
+class ModelProvider(Protocol):
+    """Provider-neutral boundary used by every research reasoning call."""
+
+    name: str
+    auth_mode: str
+
+    def invoke(self, prompt: str, *, model: str) -> ModelResponse: ...
 
 
 class ProviderError(RuntimeError):
@@ -208,6 +225,47 @@ def _openai_call(prompt: str, *, model: str) -> tuple:
                  "output_tokens": usage.get("completion_tokens")}
 
 
+class AnthropicCLIProvider:
+    name = PROVIDER_ANTHROPIC_CLI
+    auth_mode = "local_cli_session"
+
+    def invoke(self, prompt: str, *, model: str) -> ModelResponse:
+        text, usage = _anthropic_cli_call(prompt)
+        return ModelResponse(text=text)
+
+
+class OpenAIProvider:
+    name = PROVIDER_OPENAI
+    auth_mode = "environment_api_key"
+
+    def invoke(self, prompt: str, *, model: str) -> ModelResponse:
+        text, usage = _openai_call(prompt, model=model)
+        usage = usage or {}
+        return ModelResponse(text=text, input_tokens=usage.get("input_tokens"),
+                             output_tokens=usage.get("output_tokens"))
+
+
+PROVIDER_REGISTRY: dict[str, ModelProvider] = {
+    PROVIDER_ANTHROPIC_CLI: AnthropicCLIProvider(),
+    PROVIDER_OPENAI: OpenAIProvider(),
+}
+
+
+def get_provider(name: str) -> ModelProvider:
+    try:
+        return PROVIDER_REGISTRY[name]
+    except KeyError as exc:
+        raise ProviderError(
+            f"unknown {ENV_PROVIDER}={name!r} — expected one of {tuple(PROVIDER_REGISTRY)}") from exc
+
+
+def provider_catalog() -> list[dict]:
+    """Non-secret provider metadata suitable for the admin UI."""
+    return [{"provider": name, "auth_mode": provider.auth_mode,
+             "configured": (name != PROVIDER_OPENAI or bool(os.environ.get(ENV_OPENAI_API_KEY)))}
+            for name, provider in PROVIDER_REGISTRY.items()]
+
+
 def build_configured_runner(
     *, store, cycle_id: str, purpose: str, trigger: str,
     provider: Optional[str] = None,
@@ -246,14 +304,10 @@ def build_configured_runner(
         t0 = time.monotonic()
         model_name = current_model_name(provider_name)
         try:
-            if provider_name == PROVIDER_OPENAI:
-                text, usage = _openai_call(prompt, model=model_name)
-            elif provider_name == PROVIDER_ANTHROPIC_CLI:
-                text, usage = _anthropic_cli_call(prompt)
-            else:
-                raise ProviderError(
-                    f"unknown {ENV_PROVIDER}={provider_name!r} — expected one of "
-                    f"{KNOWN_PROVIDERS}")
+            response = get_provider(provider_name).invoke(prompt, model=model_name)
+            text = response.text
+            usage = {"input_tokens": response.input_tokens,
+                     "output_tokens": response.output_tokens}
         except inv.InvestigatorError as e:
             latency = round(time.monotonic() - t0, 3)
             rm.record_model_interaction(

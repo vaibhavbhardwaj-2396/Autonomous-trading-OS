@@ -32,6 +32,8 @@ research/ai_failures.jsonl
 research/.worker.lock
 research/.worker_state.json
 research/.worker_state.json.tmp
+research/validation_campaign.jsonl
+research/.validation_campaign.lock
 
 # Global runtime control state (control/runtime.py, Priority Phase 4) —
 # per-deployment operational state, same class as the research bookmarks

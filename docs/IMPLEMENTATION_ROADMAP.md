@@ -1,6 +1,6 @@
 # Implementation roadmap and continuation record
 
-Updated: 2026-09-19. User authorized implementing, testing, merging and
+Updated: 2026-09-25. User authorized implementing, testing, merging and
 deploying the agreed roadmap, with routine engineering decisions delegated.
 This is software delivery authorization, not authorization to override trading
 guardrails, change capital, resume live trading, or place orders.
@@ -28,10 +28,23 @@ Preserve unrelated changes and never stage the local untracked AGENTS.md.
 | 8 | Paper factory with reliable scheduling and reconciliation | **Complete** — registered algorithms, bounded/idempotent cycles, locking, accounting and typed exit reconciliation |
 | 9 | Portfolio/risk integration within protected guardrails | **Complete** — isolated paper portfolio plus unchanged, tested live guardrails; live activation remains Phase 11 |
 | 10 | Secure administration, complete UI workflows and operations | **Complete** — distinct observer/admin authentication, explicit CORS, audit history, resource/AI controls, broker health and interactive operational UI |
+| 10.5 | Autonomous validation campaign | **Active** — capacity planner, durable funnel ledger, provider/broker/news extension, validation API/UI and architecture are implemented; longitudinal evidence collection continues |
 | 11 | Human-gated live readiness and operational handoff | Pending; human gate remains required |
 
 These are phases, not assertions that an entire phase is done after one commit.
 Existing modules must be inspected and reused before adding new implementations.
+
+## Phase 10.5 evidence campaign
+
+The software boundary is documented in `docs/PHASE_10_5_VALIDATION.md`.
+`research.validation` records append-only snapshots of observations through
+paper results, conversion rates, AI economics, capacity allocation and exact
+blockers. The system must now accumulate real longitudinal evidence; software
+completion is not evidence that a strategy is robust.
+
+Paper remains correctly blocked until an immutable StrategyVersion earns an
+explicit paper-eligibility event. Phase 11 remains locked regardless of Phase
+10.5 results.
 
 ## Remaining plan (Phase 11)
 
