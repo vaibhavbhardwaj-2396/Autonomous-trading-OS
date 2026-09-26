@@ -83,6 +83,14 @@ CREATE TABLE IF NOT EXISTS prices_eod (
 CREATE UNIQUE INDEX IF NOT EXISTS px_key  ON prices_eod(symbol, session_date, source, adjusted);
 CREATE INDEX IF NOT EXISTS px_gate        ON prices_eod(symbol, knowledge_ts);
 CREATE INDEX IF NOT EXISTS px_session     ON prices_eod(session_date);
+-- Hot path for point-in-time replay.  Experiments repeatedly ask for the
+-- latest N unadjusted bars for one symbol at an as-of gate.  px_gate can
+-- filter the gate but SQLite must then sort every matching row by session;
+-- on the production history that made a bounded replay exceed 180 seconds.
+-- Keeping session_date ahead of knowledge_ts lets SQLite walk newest-first,
+-- apply the no-lookahead gate, and stop as soon as LIMIT N is satisfied.
+CREATE INDEX IF NOT EXISTS px_replay_lookup
+    ON prices_eod(symbol, adjusted, session_date DESC, knowledge_ts);
 
 -- ---------------------------------------------------------------------------
 -- Append-only enforcement. Not a convention -- a constraint.

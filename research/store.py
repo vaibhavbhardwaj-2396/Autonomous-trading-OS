@@ -485,7 +485,13 @@ class AsOfView:
         adjusted: bool = False,
         source: Optional[str] = None,
     ) -> list[dict]:
-        sql = ["SELECT * FROM prices_eod WHERE symbol = ? AND knowledge_ts <= ? "
+        # Force the replay-oriented index: SQLite otherwise prefers px_gate
+        # on large stores and builds a temporary B-tree for every newest-N
+        # lookup.  Replay performs this query many thousands of times, so the
+        # repeated sort dominates the experiment deadline.  The index is
+        # created idempotently by schema.sql whenever Store.open() runs.
+        sql = ["SELECT * FROM prices_eod INDEXED BY px_replay_lookup "
+               "WHERE symbol = ? AND knowledge_ts <= ? "
                "AND adjusted = ?"]
         args: list[Any] = [symbol.upper(), self._gate, 1 if adjusted else 0]
 

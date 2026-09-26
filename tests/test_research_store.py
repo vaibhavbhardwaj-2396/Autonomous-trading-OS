@@ -182,6 +182,21 @@ check("unadjusted series is unaffected by a later restated series",
 check("restated series is opt-in only",
       s3.view("2026-06-01").prices("ACME", adjusted=True)[0]["close"] == 50.0)
 
+indexes = {r[1] for r in s3._unsafe_connection().execute(
+    "PRAGMA index_list('prices_eod')").fetchall()}
+check("replay newest-N lookup index is installed", "px_replay_lookup" in indexes,
+      str(sorted(indexes)))
+plan = s3._unsafe_connection().execute(
+    "EXPLAIN QUERY PLAN SELECT * FROM prices_eod INDEXED BY px_replay_lookup "
+    "WHERE symbol = ? AND knowledge_ts <= ? AND adjusted = ? "
+    "ORDER BY session_date DESC LIMIT ?",
+    ("ACME", ts("2026-06-01"), 0, 2),
+).fetchall()
+plan_text = " ".join(str(tuple(row)) for row in plan)
+check("replay lookup avoids a temporary ORDER BY sort",
+      "px_replay_lookup" in plan_text and "TEMP B-TREE" not in plan_text,
+      plan_text)
+
 
 # ---------------------------------------------------------------------------
 print("\n--- THE NO-LOOKAHEAD DELETION TEST ---")
