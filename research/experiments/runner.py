@@ -218,7 +218,7 @@ def run_experiment(contract_id: str, store: Store, *, registry_dir: Path = REGIS
 
     try:
         t_stage = time.perf_counter()
-        trades = simulate(contract, store)
+        trades, execution_profile = simulate_profiled(contract, store)
         timings["simulation"] = round(time.perf_counter() - t_stage, 6)
         t_stage = time.perf_counter()
         for i, trade in enumerate(trades, start=1):
@@ -243,6 +243,11 @@ def run_experiment(contract_id: str, store: Store, *, registry_dir: Path = REGIS
                 extra={"contract_id": contract.id, "evidence_status": "BLOCKED_LINEAGE"})
         timings["evidence"] = round(time.perf_counter() - t_stage, 6)
         timings["total"] = round(time.perf_counter() - t_total, 6)
+        execution_profile["stages"].update({
+            "persistence": timings["persistence"],
+            "evaluation": timings["evaluation"],
+            "evidence": timings["evidence"],
+        })
 
         contract.status = "reported"
         summary = (f"Run completed: {verdict['n_trades']} trades, "
@@ -251,11 +256,13 @@ def run_experiment(contract_id: str, store: Store, *, registry_dir: Path = REGIS
         contract.save(registry_dir)
         rm.record_research_note(
             store, note=summary, source="research.experiments.runner",
-            extra={"contract_id": contract.id, "stage_timings_seconds": timings},
+            extra={"contract_id": contract.id, "stage_timings_seconds": timings,
+                   "execution_profile": execution_profile},
         )
         return {"status": "reported", "contract_id": contract.id,
                 "n_trades": len(trades), "verdict": verdict,
-                "evidence": evidence, "stage_timings_seconds": timings}
+                "evidence": evidence, "stage_timings_seconds": timings,
+                "execution_profile": execution_profile}
 
     except Exception as e:
         contract.status = "abandoned"
@@ -382,7 +389,7 @@ def _universe_for_step(step: ReplayStep, universe_name: str) -> list[str]:
 # goes through step.view (an AsOfView); nothing else is consulted.
 # ---------------------------------------------------------------------------
 
-def simulate(contract: Contract, store: Store) -> list[dict]:
+def _simulate_legacy(contract: Contract, store: Store) -> list[dict]:
     """Pure(ish) simulation: reads `contract`'s already-validated, already-
     whitelisted entry_rule/exit_rule/universe/evaluation window and the
     store's price/observation history; returns a list of trade dicts ready
@@ -483,3 +490,27 @@ def simulate(contract: Contract, store: Store) -> list[dict]:
                 close_trade(symbol, pos, bar_rows[-1]["close"], last_step.as_of, "evaluation_end")
 
     return trades
+
+
+def simulate_profiled(contract: Contract, store: Store) -> tuple[list[dict], dict]:
+    """Use the bounded bulk path when its equivalence preconditions hold.
+
+    Late/revised or event-frequency data falls back to the original exact
+    bitemporal replay.  The fallback is explicit in telemetry so production
+    never mistakes an expensive legacy execution for an optimized one.
+    """
+    from . import bulk_replay
+    try:
+        result = bulk_replay.simulate(contract, store)
+        return result.trades, result.profile
+    except bulk_replay.BulkReplayUnsupported as exc:
+        started = time.perf_counter()
+        trades = _simulate_legacy(contract, store)
+        return trades, {"engine": "legacy_point_in_time", "fallback_reason": str(exc),
+                        "wall_seconds": round(time.perf_counter() - started, 6),
+                        "stages": {"legacy_simulation": round(time.perf_counter() - started, 6)}}
+
+
+def simulate(contract: Contract, store: Store) -> list[dict]:
+    """Compatibility entry point returning only deterministic trades."""
+    return simulate_profiled(contract, store)[0]
