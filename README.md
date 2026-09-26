@@ -95,7 +95,8 @@ Phase 10.5: [Validation campaign](docs/PHASE_10_5_VALIDATION.md),
 [AI-Trader comparison](docs/AI_TRADER_COMPARISON.md).
 Current plan: [Implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md).
 Runtime recovery evidence: [P0 audit](docs/P0_RUNTIME_RECOVERY.md) and
-[AI cost optimization](docs/AI_COST_OPTIMIZATION.md).
+[AI cost optimization](docs/AI_COST_OPTIMIZATION.md). Final runtime-unblock
+evidence: [production report](docs/RUNTIME_UNBLOCK_REPORT.md).
 Canonical operator entry point: [Operations runbook](docs/OPERATIONS.md).
 
 ## Delivery and verification
@@ -122,6 +123,10 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 
 | Commit | Delivered |
 |---|---|
+| `6ce7bb3` | bounded per-session point-in-time price-window cache and streamed replay steps |
+| `5e7dff1` | production replay lookup index and query-plan regression proof |
+| `f421937` | canonical `prices_eod` data-readiness correction for deterministic draft review |
+| `9fd2c40` | hard experiment cancellation, restart recovery, lifecycle audit, evidence integration and deterministic draft-review pipeline |
 | `85eb8e9` | six-area UI, reconciled scheduler/watchdog state, audited component controls, unified activity, backlog velocity/bottleneck telemetry, production schedules and operations runbook |
 | `447ff8b` | production systemd permission boundary for audited control-plane state |
 | `1231342` | least-privilege notifier import fix and Telegram-only API environment |

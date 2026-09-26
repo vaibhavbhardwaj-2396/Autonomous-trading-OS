@@ -72,3 +72,12 @@ Release v1.5 introduces a process-group supervisor, hard deadline, stage timings
 execution states/failure reasons, stale-RUNNING restart reconciliation, canonical evidence
 creation after successful completion, and bounded deterministic draft review. See
 `docs/OPERATIONS.md` for the operator contract and recovery behavior.
+
+Production verification proved that the supervisor terminates the child process group at the
+180-second deadline, releases the worker, marks the contract `ABANDONED/TIMEOUT`, creates no
+scientific evidence, and leaves no orphan worker. The workload is legitimate but excessive for
+the current one-vCPU operational bound: a three-year Nifty 500 contract evaluates up to 500
+symbols per session and several point-in-time features per symbol. Replay lookup indexing and
+per-session window reuse reduced known database work but the controlled production contract
+still exceeded 180 seconds. `EXPERIMENTS` therefore remains deliberately paused; a safe timeout
+is not presented as successful research. See `docs/RUNTIME_UNBLOCK_REPORT.md` for exact results.
