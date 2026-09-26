@@ -118,6 +118,7 @@ from __future__ import annotations
 import json
 import operator as _op
 import datetime as dt
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -207,17 +208,41 @@ def run_experiment(contract_id: str, store: Store, *, registry_dir: Path = REGIS
     "THE EXECUTION BOUNDARY" section for why that's load-bearing, not
     stylistic.
     """
+    t_total = time.perf_counter()
+    t_stage = t_total
     contract = load_runnable_contract(contract_id, registry_dir)
+    timings = {"contract_validation": round(time.perf_counter() - t_stage, 6)}
 
     contract.status = "running"
     contract.save(registry_dir)
 
     try:
+        t_stage = time.perf_counter()
         trades = simulate(contract, store)
+        timings["simulation"] = round(time.perf_counter() - t_stage, 6)
+        t_stage = time.perf_counter()
         for i, trade in enumerate(trades, start=1):
             store.append_experiment_result(contract_id=contract.id, trade_seq=i, **trade)
+        timings["persistence"] = round(time.perf_counter() - t_stage, 6)
 
+        t_stage = time.perf_counter()
         verdict = evaluator.record_verdict(store, contract.id)
+        timings["evaluation"] = round(time.perf_counter() - t_stage, 6)
+        t_stage = time.perf_counter()
+        from . import comparison  # lazy: comparison imports this module's notional constant
+        try:
+            evidence = comparison.record_evidence(store, contract.id, registry_dir=registry_dir)
+        except comparison.ComparisonRejected as exc:
+            # Legacy/manually seeded contracts may lack hypothesis lineage.
+            # Their experiment remains scientifically completed, but the
+            # missing lineage is explicit and no evidence is fabricated.
+            evidence = None
+            rm.record_research_note(
+                store, note=f"Evidence not produced: {exc}",
+                source="research.experiments.runner",
+                extra={"contract_id": contract.id, "evidence_status": "BLOCKED_LINEAGE"})
+        timings["evidence"] = round(time.perf_counter() - t_stage, 6)
+        timings["total"] = round(time.perf_counter() - t_total, 6)
 
         contract.status = "reported"
         summary = (f"Run completed: {verdict['n_trades']} trades, "
@@ -226,10 +251,11 @@ def run_experiment(contract_id: str, store: Store, *, registry_dir: Path = REGIS
         contract.save(registry_dir)
         rm.record_research_note(
             store, note=summary, source="research.experiments.runner",
-            extra={"contract_id": contract.id},
+            extra={"contract_id": contract.id, "stage_timings_seconds": timings},
         )
         return {"status": "reported", "contract_id": contract.id,
-                "n_trades": len(trades), "verdict": verdict}
+                "n_trades": len(trades), "verdict": verdict,
+                "evidence": evidence, "stage_timings_seconds": timings}
 
     except Exception as e:
         contract.status = "abandoned"

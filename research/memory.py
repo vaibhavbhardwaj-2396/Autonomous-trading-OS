@@ -67,8 +67,23 @@ DATASET_OPPORTUNITY_EVENT = "research_opportunity_event"
 # agent decision context, LLM judgments"), not a new store or a new
 # schema. research/brain/llm.py is the only writer.
 DATASET_MODEL_INTERACTION = "research_model_interaction"
+DATASET_DRAFT_REVIEW = "research_draft_review"
 
 MARKET_ENTITY = "_market"  # same convention research/sources already uses
+
+
+def record_draft_review(store: Store, *, contract_id: str, hypothesis_id: Optional[str],
+                        outcome: str, reasons: list[str], checks: dict,
+                        source: str = "research.brain.draft_review") -> Optional[int]:
+    """Persist one deterministic pre-test decision; never scientific evidence."""
+    now = now_ist()
+    return store.append(
+        dataset=DATASET_DRAFT_REVIEW, entity=MARKET_ENTITY, event_time=now,
+        knowledge_time=now, source=source,
+        payload={"contract_id": contract_id, "hypothesis_id": hypothesis_id,
+                 "outcome": outcome, "reasons": reasons, "checks": checks,
+                 "scientific_evidence": False},
+    )
 
 
 def new_hypothesis_id() -> str:

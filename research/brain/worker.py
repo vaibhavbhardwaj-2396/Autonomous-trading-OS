@@ -218,6 +218,7 @@ class WorkerLimits:
     max_discovery_attempts: int = 1
     max_experiments: int = 1
     max_runtime_seconds: float = 300.0
+    experiment_deadline_seconds: float = 180.0
     max_concurrent_experiments: int = 1
     cooldown_seconds: float = 1800.0
     discovery_enabled: bool = True
@@ -247,6 +248,7 @@ class WorkerLimits:
         "max_discovery_attempts": "RESEARCH_WORKER_MAX_DISCOVERY_ATTEMPTS",
         "max_experiments": "RESEARCH_WORKER_MAX_EXPERIMENTS",
         "max_runtime_seconds": "RESEARCH_WORKER_MAX_RUNTIME_SECONDS",
+        "experiment_deadline_seconds": "RESEARCH_EXPERIMENT_DEADLINE_SECONDS",
         "max_concurrent_experiments": "RESEARCH_WORKER_MAX_CONCURRENT_EXPERIMENTS",
         "cooldown_seconds": "RESEARCH_WORKER_COOLDOWN_SECONDS",
         "discovery_enabled": "RESEARCH_WORKER_DISCOVERY_ENABLED",
@@ -270,7 +272,8 @@ class WorkerLimits:
         for name in ("draft_backlog_high_watermark", "runnable_experiment_high_watermark"):
             if getattr(self, name) < 1:
                 raise ValueError(f"WorkerLimits.{name} must be >= 1")
-        for name in ("max_runtime_seconds", "cooldown_seconds", "summary_interval_seconds"):
+        for name in ("max_runtime_seconds", "experiment_deadline_seconds",
+                     "cooldown_seconds", "summary_interval_seconds"):
             if getattr(self, name) < 0:
                 raise ValueError(f"WorkerLimits.{name} must be >= 0")
 
@@ -739,7 +742,10 @@ def run_worker_cycle(
 
         if action.kind == "RUN_EXPERIMENT":
             try:
-                outcome = sched.run_one_experiment(store, action.contract_id, registry_dir=registry_dir)
+                outcome = sched.run_one_experiment(
+                    store, action.contract_id, registry_dir=registry_dir,
+                    deadline_seconds=max(0.1, min(
+                        budget_left(), limits.experiment_deadline_seconds)))
             except Exception as e:  # noqa: BLE001
                 # An unexpected (non-runner) failure — the same signal that
                 # would have halted a batch run_scheduler() call early; stop
@@ -1180,6 +1186,7 @@ def main(argv: Optional[list] = None) -> int:
                          "derived for a high-priority opportunity with no runnable "
                          "experiment) this heartbeat (default 1; 0 disables it)")
     ap.add_argument("--max-runtime-seconds", type=float, default=None)
+    ap.add_argument("--experiment-deadline-seconds", type=float, default=None)
     ap.add_argument("--cooldown-seconds", type=float, default=None)
     ap.add_argument("--no-discovery", action="store_true",
                     help="skip the Research AI step this run (experiments only)")
@@ -1206,6 +1213,7 @@ def main(argv: Optional[list] = None) -> int:
         "max_promotions": args.max_promotions,
         "max_substrate_creations": args.max_substrate_creations,
         "max_runtime_seconds": args.max_runtime_seconds,
+        "experiment_deadline_seconds": args.experiment_deadline_seconds,
         "cooldown_seconds": args.cooldown_seconds,
     }
     if args.no_discovery:
@@ -1302,6 +1310,13 @@ def main(argv: Optional[list] = None) -> int:
                     _notify(f"🔴 Research worker: could not open the research store — "
                             f"{type(e).__name__}: {e}")
                 return 1
+
+            # Reconcile an experiment process lost to a prior worker/VPS
+            # restart before selecting any new work. A surviving child PID is
+            # left alone; a stale RUNNING Contract is abandoned with lineage.
+            from ..experiments import supervisor as experiment_supervisor
+            experiment_supervisor.recover_stale_running(
+                store, registry_dir=registry_dir)
 
             started_wall = now_ist()
             worker_id = _new_worker_id()

@@ -224,6 +224,11 @@ def clock_ban_violations(directory: Path) -> list[str]:
     if not directory.exists():
         return out
     for f in sorted(directory.rglob("*.py")):
+        # supervisor.py is operational process-control infrastructure, not a
+        # scientific computation: its wall clock defines deadlines and audit
+        # timestamps. The simulation it launches remains clock-banned.
+        if f.name == "supervisor.py":
+            continue
         for lineno, line in enumerate(f.read_text().splitlines(), 1):
             stripped = line.strip()
             if stripped.startswith("#") or not stripped:

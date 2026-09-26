@@ -107,7 +107,7 @@ from control import resources as rg  # noqa: E402 — outcome 1: the Resource Go
 from control import capacity as capacity_planner  # noqa: E402 — Phase 10.5 allocation plan
 
 APP_NAME = "living-quant-api"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 
 def _int_query_param(name: str, default: Optional[int]) -> tuple[Optional[int], Optional[Response]]:

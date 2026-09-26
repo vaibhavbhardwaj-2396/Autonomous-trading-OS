@@ -127,7 +127,7 @@ from typing import NamedTuple, Optional
 
 from ..contracts import REGISTRY_DIR
 from ..store import Store, now_ist, iso
-from ..experiments import runner
+from ..experiments import runner, supervisor
 from . import priority as prio
 
 MAX_EXPERIMENTS_PER_RUN = 3
@@ -213,6 +213,7 @@ class SchedulerRunResult(NamedTuple):
 
 def run_one_experiment(
     store: Store, contract_id: str, *, registry_dir: Path = REGISTRY_DIR,
+    deadline_seconds: Optional[float] = None,
 ) -> ExperimentOutcome:
     """Run exactly ONE already-selected, already-locked contract through the
     existing, unmodified `runner.run_experiment()` — the SAME per-contract
@@ -233,7 +234,13 @@ def run_one_experiment(
     exact same `runner.run_experiment()` call, nothing simulated here.
     """
     try:
-        result = runner.run_experiment(contract_id, store, registry_dir=registry_dir)
+        result = (supervisor.run_supervised(
+            contract_id, store, registry_dir=registry_dir,
+            deadline_seconds=deadline_seconds) if deadline_seconds is not None else
+            runner.run_experiment(contract_id, store, registry_dir=registry_dir))
+        if result.get("status") != "reported":
+            return ExperimentOutcome(contract_id=contract_id, outcome="abandoned",
+                                     detail=result.get("detail") or "experiment abandoned")
         return ExperimentOutcome(
             contract_id=contract_id, outcome="reported",
             detail=f"{result.get('n_trades', 0)} trade(s) recorded.")

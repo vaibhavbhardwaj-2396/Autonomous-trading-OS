@@ -60,3 +60,15 @@ Set `OPENAI_API_KEY` only in `/root/trading-agent/.env` (mode `600`) on the VPS,
 configuration, log it, store ChatGPT cookies, or automate a consumer ChatGPT browser session.
 After configuration, run one bounded discovery cycle and verify its model-interaction artifact,
 token usage and trace before re-enabling the recurring worker schedule.
+# Runtime unblock follow-up (26 September 2026)
+
+The experiment overrun was caused by a synchronous execution boundary: the worker checked
+its runtime budget only between actions, while replay simulation performed repeated
+point-in-time queries inside one uninterruptible action. Interrupting the SSH caller did not
+terminate the remote child, leaving a RUNNING Contract. The runtime limit was therefore an
+admission budget, not a cancellation guarantee.
+
+Release v1.5 introduces a process-group supervisor, hard deadline, stage timings, explicit
+execution states/failure reasons, stale-RUNNING restart reconciliation, canonical evidence
+creation after successful completion, and bounded deterministic draft review. See
+`docs/OPERATIONS.md` for the operator contract and recovery behavior.

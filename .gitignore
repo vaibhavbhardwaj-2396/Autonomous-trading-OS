@@ -62,6 +62,8 @@ control/component_state.json.tmp
 control/.component_state.lock
 control/watchdog_state.json
 control/watchdog_state.json.tmp
+research/experiment_executions.jsonl
+research/experiment_executions.jsonl.lock
 
 # Paper/shadow store and its overlap-prevention lock (STABLE + CONTROLLED,
 # outcome 1) — same class as research/*.db above: rebuildable simulation

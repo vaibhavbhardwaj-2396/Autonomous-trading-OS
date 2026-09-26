@@ -71,6 +71,27 @@ strategy versions. The bottleneck is therefore DRAFT-to-LOCKED review/promotion,
 collection. Backpressure blocks more AI discovery when downstream queues are full; it does
 not fabricate promotions or weaken evidence rules.
 
+### Experiment deadlines and recovery
+
+Each selected experiment runs in a dedicated process group with its own SQLite connection.
+`RESEARCH_EXPERIMENT_DEADLINE_SECONDS` defaults to 180 seconds and is capped again by the
+worker's remaining heartbeat budget. On expiry the supervisor records
+`CANCEL_REQUESTED/TIMEOUT`, terminates the whole process group, escalates to SIGKILL after
+five seconds, waits for release, deletes the result file, records the Contract as
+ABANDONED, and explicitly marks the failure as non-scientific. The worker lock remains in
+the parent and is released normally.
+
+Worker startup reconciles stale RUNNING Contracts. If the recorded child PID is not alive,
+the Contract becomes ABANDONED with `WORKER_CRASH`; it is never silently retried. Execution
+telemetry uses QUEUED, RUNNING, CANCEL_REQUESTED, COMPLETED, FAILED and ABANDONED with the
+failure vocabulary TIMEOUT, WORKER_CRASH, DATA_FAILURE, VALIDATION_FAILURE, RESOURCE_LIMIT
+and OTHER.
+
+Successful experiments record stage timings, an evaluator verdict and a canonical evidence
+summary. Operational failure never creates evidence. Draft review is deterministic-first:
+`python -m research.brain.draft_review --limit 10` records structural validity, exact/tested
+duplicates and price-data readiness before any AI review or lock attempt.
+
 ## Incident sequence
 
 1. Read `/system/status` and `/runtime/status`; identify desired, scheduler, heartbeat and
