@@ -401,12 +401,17 @@ class AsOfView:
     can actually fail.
     """
 
-    __slots__ = ("_conn", "as_of", "_gate")
+    __slots__ = ("_conn", "as_of", "_gate", "_price_cache")
 
     def __init__(self, conn: sqlite3.Connection, as_of: dt.datetime) -> None:
         object.__setattr__(self, "_conn", conn)
         object.__setattr__(self, "as_of", as_of)
         object.__setattr__(self, "_gate", int(as_of.timestamp()))
+        # One replay step commonly asks for the same symbol at several window
+        # sizes (z-score, close, one-day return).  Cache only inside this
+        # immutable as-of view; a new step gets a new cache, so data can never
+        # cross an information horizon.
+        object.__setattr__(self, "_price_cache", {})
 
     def __repr__(self) -> str:
         return f"<AsOfView as_of={self.as_of.isoformat()}>"
@@ -485,6 +490,13 @@ class AsOfView:
         adjusted: bool = False,
         source: Optional[str] = None,
     ) -> list[dict]:
+        cacheable = start is None and end is None and days is not None
+        cache_key = (symbol.upper(), bool(adjusted), source)
+        if cacheable:
+            cached = self._price_cache.get(cache_key)
+            if cached is not None and cached[0] >= int(days):
+                return cached[1][-int(days):]
+
         # Force the replay-oriented index: SQLite otherwise prefers px_gate
         # on large stores and builds a temporary B-tree for every newest-N
         # lookup.  Replay performs this query many thousands of times, so the
@@ -511,7 +523,10 @@ class AsOfView:
             args.append(int(days))
 
         rows = [dict(r) for r in self._conn.execute(" ".join(sql), args)]
-        return list(reversed(rows))
+        rows = list(reversed(rows))
+        if cacheable:
+            self._price_cache[cache_key] = (int(days), rows)
+        return rows
 
     def history(self, symbol: str, days: int = 260, adjusted: bool = False):
         """A DataFrame shaped exactly like engine.market_data.get_history returns:

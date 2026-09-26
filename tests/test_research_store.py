@@ -197,6 +197,17 @@ check("replay lookup avoids a temporary ORDER BY sort",
       "px_replay_lookup" in plan_text and "TEMP B-TREE" not in plan_text,
       plan_text)
 
+price_selects = []
+s3._unsafe_connection().set_trace_callback(
+    lambda sql: price_selects.append(sql) if sql.startswith("SELECT * FROM prices_eod") else None)
+cached_view = s3.view("2024-04-30")
+cached_view.prices("ACME", days=5)
+cached_view.prices("ACME", days=1)
+cached_view.prices("ACME", days=2)
+s3._unsafe_connection().set_trace_callback(None)
+check("one as-of view reuses a larger price window for smaller requests",
+      len(price_selects) == 1, str(price_selects))
+
 
 # ---------------------------------------------------------------------------
 print("\n--- THE NO-LOOKAHEAD DELETION TEST ---")

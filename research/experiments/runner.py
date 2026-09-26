@@ -396,10 +396,9 @@ def simulate(contract: Contract, store: Store) -> list[dict]:
     exit_rule = json.loads(contract.exit_rule)
 
     replay = Replay(store)
-    steps = list(replay.walk(contract.evaluation_start, contract.evaluation_end))
-
     open_positions: dict[str, dict] = {}
     trades: list[dict] = []
+    last_step: Optional[ReplayStep] = None
 
     def close_trade(symbol: str, pos: dict, exit_price: float, exit_time: dt.datetime,
                     exit_reason: str) -> None:
@@ -420,7 +419,11 @@ def simulate(contract: Contract, store: Store) -> list[dict]:
             "r_multiple": r_multiple, "exit_reason": exit_reason,
         })
 
-    for step in steps:
+    # Stream steps rather than retaining every AsOfView for the full
+    # evaluation window.  This keeps each step's safe price-query cache
+    # bounded to one session and lets it be reclaimed immediately.
+    for step in replay.walk(contract.evaluation_start, contract.evaluation_end):
+        last_step = step
         symbols = _universe_for_step(step, contract.universe)
 
         # -- exits first: never let an entry and an exit for the SAME symbol
@@ -473,8 +476,7 @@ def simulate(contract: Contract, store: Store) -> list[dict]:
     # Evaluation window ended with positions still open: close them at the
     # last step's close rather than leaving them dangling. This is a
     # documented simplification, not a silent one.
-    if steps:
-        last_step = steps[-1]
+    if last_step is not None:
         for symbol, pos in list(open_positions.items()):
             bar_rows = last_step.view.prices(symbol, days=1)
             if bar_rows and bar_rows[-1].get("close") is not None:
