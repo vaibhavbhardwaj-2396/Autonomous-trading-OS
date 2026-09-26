@@ -122,6 +122,7 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 
 | Commit | Delivered |
 |---|---|
+| `85eb8e9` | six-area UI, reconciled scheduler/watchdog state, audited component controls, unified activity, backlog velocity/bottleneck telemetry, production schedules and operations runbook |
 | `447ff8b` | production systemd permission boundary for audited control-plane state |
 | `1231342` | least-privilege notifier import fix and Telegram-only API environment |
 | `27b0759` | P0 runtime recovery, provider-neutral OpenAI gateway, audited Telegram delivery, runtime status UI and daily digest |
