@@ -23,7 +23,7 @@ def _reviewed_ids(store: Store) -> set[str]:
 
 def _price_count(store: Store, start: str, end: str) -> int:
     row = store._unsafe_connection().execute(
-        "SELECT COUNT(*) n FROM prices WHERE session_date >= ? AND session_date <= ?",
+        "SELECT COUNT(*) n FROM prices_eod WHERE session_date >= ? AND session_date <= ?",
         (start[:10], end[:10])).fetchone()
     return int(row["n"] if row else 0)
 
