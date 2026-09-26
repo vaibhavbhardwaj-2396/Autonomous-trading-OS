@@ -1,6 +1,6 @@
 """
 api/app.py — the dashboard and administrator HTTP API.
-All reads use the observer bearer token. The two narrowly scoped writes use
+All reads use the observer bearer token. Five narrowly scoped writes use
 the separate administrator token and cannot place or modify an order.
 
     GET /health                     — public, app liveness only
@@ -72,7 +72,7 @@ research.brain.hypothesis_intake.approve_and_lock / research.experiments.
 runner.run_experiment / research.experiments.strategy_backtest.run_backtest /
 strategies.registry.save_version / paper.runner.run_paper_cycle anywhere in
 this file — grep for "import" to re-verify. /control/mode and /ai/config
-are the two deliberate exceptions to "no write" (not to any of the imports
+are deliberate exceptions to "no write" (not to any of the imports
 above, which remain absent even from those routes) — see
 api/runtime_bridge.py and control/ai_config.py respectively.
 
@@ -99,13 +99,15 @@ from . import operations  # noqa: E402 — bounded, read-only subsystem health
 from . import validation  # noqa: E402 — Phase 10.5 read-only campaign status
 from . import notifications as notification_api  # noqa: E402
 from . import runtime_status  # noqa: E402
+from . import system_status, activity  # noqa: E402
+from control import components as component_control  # noqa: E402
 from control import notifications as notification_config  # noqa: E402
 from control import runtime as ctrl  # noqa: E402
 from control import resources as rg  # noqa: E402 — outcome 1: the Resource Governor
 from control import capacity as capacity_planner  # noqa: E402 — Phase 10.5 allocation plan
 
 APP_NAME = "living-quant-api"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 
 def _int_query_param(name: str, default: Optional[int]) -> tuple[Optional[int], Optional[Response]]:
@@ -275,6 +277,21 @@ def create_app() -> Flask:
     def runtime_status_route():
         return jsonify(runtime_status.get_runtime_status(data.get_default_store()))
 
+    @app.route("/system/status", methods=["GET"])
+    @auth.require_auth
+    def system_status_route():
+        return jsonify(system_status.get_status())
+
+    @app.route("/activity", methods=["GET"])
+    @auth.require_auth
+    def activity_route():
+        limit, err = _int_query_param("limit", 50)
+        if err: return err
+        offset, err = _int_query_param("offset", 0)
+        if err: return err
+        return jsonify(activity.get_activity(data.get_default_store(),
+            limit=max(0, min(limit, 200)), offset=max(0, offset), kind=request.args.get("kind")))
+
     @app.route("/validation/status", methods=["GET"])
     @auth.require_auth
     def validation_status():
@@ -410,6 +427,19 @@ def create_app() -> Flask:
                            "detail": "'actor' must be a non-empty string when given"}), 400
         runtime_bridge.apply_mode_change(mode, reason=reason, actor=actor)
         return jsonify(runtime_bridge.get_full_status())
+
+    @app.route("/control/component", methods=["POST"])
+    @auth.require_admin
+    def control_component():
+        body = request.get_json(silent=True) or {}
+        try:
+            result = component_control.set_state(
+                body.get("component"), body.get("desired_state"),
+                reason=body.get("reason") or "", actor=body.get("actor") or "dashboard-admin",
+                resume_policy=body.get("resume_policy") or "MANUAL")
+        except component_control.InvalidComponentState as exc:
+            return jsonify({"error":"bad_request", "detail":str(exc)}), 400
+        return jsonify(result)
 
     # -- Resource Governor (outcome 1) --------------------------------------
 

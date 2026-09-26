@@ -1,9 +1,9 @@
 // frontend/js/api.js — the ONLY place that talks to the network. Every view
-// module calls apiGet(path) (or, for the two deliberate control actions,
+// module calls apiGet(path) (or, for deliberate administrative actions,
 // apiPost(path, body)) and gets back a plain result object; nothing else
 // in this app constructs a URL, sets a header, or calls fetch() directly.
 //
-// outcome 2 note: apiPost exists for exactly two backend routes —
+// apiPost exists only for the backend's explicit administrator allow-list —
 // POST /control/mode (RUNNING/PAUSED/SAFE_MODE/STOPPED) and POST /ai/config
 // (provider/model selection) — both already validated, authenticated,
 // narrow write routes on the API itself (see api/app.py's own module

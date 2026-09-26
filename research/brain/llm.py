@@ -73,6 +73,7 @@ import shutil
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol
 
@@ -80,6 +81,14 @@ from . import investigator as inv
 from .. import memory as rm
 from control import ai_budget
 from control import ai_config
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
+except (ImportError, OSError):
+    # The dashboard service intentionally may not have permission to read
+    # the root-owned production credential file. The root worker does.
+    pass
 
 PROVIDER_ANTHROPIC_CLI = "anthropic_cli"
 PROVIDER_OPENAI = "openai"

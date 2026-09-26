@@ -303,6 +303,17 @@ class Store:
             "prices": dict(px) if px else {},
         }
 
+    def observation_counts_since(self, since: TimeLike) -> dict[str, int]:
+        """Counts by dataset using knowledge time, for operational velocity.
+
+        This is telemetry, not an experiment read. Experiments continue to use
+        only AsOfView; the method intentionally exposes counts, never payloads.
+        """
+        rows = self._conn.execute(
+            "SELECT dataset, COUNT(*) n FROM observations WHERE knowledge_ts >= ? "
+            "GROUP BY dataset", (ts(since),)).fetchall()
+        return {str(row["dataset"]): int(row["n"]) for row in rows}
+
     def quality_inventory(self, as_of: TimeLike) -> dict:
         """Bounded point-in-time inventory for health checks and the UI.
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import datetime as dt
 from collections import Counter
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,7 @@ from strategies import registry as strategy_registry
 
 from . import contracts
 from . import memory as rm
+from .brain import draft_backlog, research_areas
 from .store import Store, iso, now_ist
 
 ROOT = Path(__file__).resolve().parent
@@ -89,6 +91,9 @@ def build_snapshot(store: Store, *, resource_state: Optional[dict] = None,
     paper_counts, blockers = _paper_counts()
 
     statuses = Counter(c.status for c in contract_rows)
+    backlog = draft_backlog.build_backlog(
+        store, registry_dir=contract_dir or contracts.REGISTRY_DIR, limit=0)
+    areas = research_areas.groups_as_dicts(store)
     backtests = [r for r in rm.query_research_log(store, rm.DATASET_NOTE, limit=None)
                  if r.get("source") == "research.experiments.strategy_backtest"]
     funnel = {
@@ -116,13 +121,60 @@ def build_snapshot(store: Store, *, resource_state: Optional[dict] = None,
         conversions[f"{left}_to_{right}"] = (
             round(funnel[right] / denominator, 4) if denominator else None)
 
+    now = now_ist()
+    counts_24h = store.observation_counts_since(now - dt.timedelta(hours=24))
+    counts_7d = store.observation_counts_since(now - dt.timedelta(days=7))
+    delta_map = {
+        "observations": (sum(counts_24h.values()), sum(counts_7d.values())),
+        "events": (counts_24h.get("news_arrival", 0), counts_7d.get("news_arrival", 0)),
+        "hypotheses": (counts_24h.get(rm.DATASET_HYPOTHESIS, 0), counts_7d.get(rm.DATASET_HYPOTHESIS, 0)),
+        "evidence": (counts_24h.get(rm.DATASET_EVIDENCE, 0), counts_7d.get(rm.DATASET_EVIDENCE, 0)),
+        "ai_calls": (counts_24h.get(rm.DATASET_MODEL_INTERACTION, 0), counts_7d.get(rm.DATASET_MODEL_INTERACTION, 0)),
+    }
+    velocity = {name: {"24h": values[0], "7d": values[1]} for name, values in delta_map.items()}
+
+    backlog_status = {
+        "DRAFT": statuses["draft"],
+        "LOCKED": statuses["locked"],
+        "RUNNING": statuses["running"],
+        "EVALUATED": statuses["reported"],
+        "PROMISING": datasets.get("promising_result", 0),
+        "ROBUST": datasets.get("robust_result", 0),
+        "STRATEGY_CANDIDATE": len(versions),
+        "PAPER_ELIGIBLE": paper_counts["paper_eligible"],
+    }
+    if statuses["draft"]:
+        bottleneck = {
+            "stage": "DRAFT_TO_LOCKED",
+            "count": statuses["draft"],
+            "explanation": (
+                f"{statuses['draft']} draft contracts await review/promotion; "
+                f"{statuses['reported']} experiments have reached reported status."
+            ),
+        }
+    elif statuses["locked"] or statuses["running"]:
+        bottleneck = {"stage": "EXPERIMENT_EXECUTION",
+                      "count": statuses["locked"] + statuses["running"],
+                      "explanation": "Immutable contracts are waiting for deterministic evaluation."}
+    elif statuses["reported"] and not datasets.get(rm.DATASET_EVIDENCE, 0):
+        bottleneck = {"stage": "EVIDENCE_SYNTHESIS", "count": statuses["reported"],
+                      "explanation": "Reported experiments exist, but no evidence artifacts are recorded."}
+    else:
+        bottleneck = {"stage": "NONE", "count": 0,
+                      "explanation": "No material research-queue bottleneck is currently detected."}
+
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "captured_at": iso(now_ist()),
         "phase": "10.5",
         "live_promotion": {"state": "LOCKED", "reason": "Phase 11 requires an explicit human decision."},
         "funnel": funnel,
         "conversion": conversions,
+        "velocity": velocity,
+        "backlog": {"status_counts": backlog_status,
+                    "pending_review": backlog["total_count"],
+                    "bottleneck": bottleneck},
+        "research_families": {"count": len(areas), "areas": areas},
         "contract_status": dict(statuses),
         "research_economics": _model_economics(store),
         "capacity": capacity.plan(resource_state),

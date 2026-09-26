@@ -49,10 +49,10 @@ export async function renderOverview() {
     apiGet("/runtime/status"),
   ]);
   if (runtimeRes.ok) {
-    el("runtime-status-bar").innerHTML = (runtimeRes.data.indicators || []).map((s) => `<button class="status-pill" data-navigate="${esc(s.target)}"><strong>${esc(s.label)}</strong><span>${esc(s.state)}</span></button>`).join("");
+    el("runtime-status-bar").innerHTML = (runtimeRes.data.indicators || []).map((s) => `<button class="status-pill" data-navigate="${esc(s.target)}" title="${esc(s.detail || '')}"><strong>${esc(s.label)}</strong><span>${esc(s.state)}</span><small>${esc(s.detail || '')}</small></button>`).join("");
     el("active-work").innerHTML = `<ul class="active-work-list">${(runtimeRes.data.active_work || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
     const labels = {observations:"OBSERVE", hypotheses:"HYPOTHESES", reported_experiments:"EXPERIMENTS", evidence:"ACCEPTED EVIDENCE", strategy_versions:"STRATEGIES", paper_trades:"PAPER"};
-    el("overview-flow").innerHTML = Object.entries(labels).map(([key,label], i) => `${i ? '<span class="flow-arrow">→</span>' : ''}<button class="flow-stage" data-navigate="${key === 'paper_trades' ? 'paper' : key === 'strategy_versions' ? 'strategies' : 'validation'}"><strong>${esc(label)}</strong><br>${num((runtimeRes.data.funnel || {})[key],0)}</button>`).join("");
+    el("overview-flow").innerHTML = Object.entries(labels).map(([key,label], i) => `${i ? '<span class="flow-arrow">→</span>' : ''}<button class="flow-stage" data-navigate="${key === 'paper_trades' ? 'paper' : key === 'strategy_versions' ? 'strategies' : 'research'}"><strong>${esc(label)}</strong><br>${num((runtimeRes.data.funnel || {})[key],0)}</button>`).join("");
   } else {
     errorState(el("runtime-status-bar"), "Runtime status unavailable.");
   }
@@ -89,21 +89,20 @@ export async function renderOverview() {
   );
 
   results.push(
-    await load("/trades", "overview-activity", (data) => {
+    await load("/activity?limit=20", "overview-activity", (data) => {
       table(
         el("overview-activity"),
         [
-          { key: "symbol", label: "Symbol" },
-          { key: "exit_price", label: "Exit", cell: (r) => `<td class="num">${money(r.exit_price)}</td>` },
-          { key: "pnl", label: "P&L", cell: (r) => `<td class="num ${pnlClass(r.pnl)}">${money(r.pnl)}</td>` },
-          { key: "r_multiple", label: "R", cell: (r) => `<td class="num">${num(r.r_multiple)}</td>` },
-          { key: "reason", label: "Reason" },
-          { key: "ts", label: "Closed", cell: (r) => `<td>${dt(r.ts)}</td>` },
+          { key: "timestamp", label: "Time", cell: (r) => `<td>${dt(r.timestamp)}</td>` },
+          { key: "kind", label: "Area", cell: (r) => `<td>${badge(r.kind, r.kind)}</td>` },
+          { key: "summary", label: "Activity" },
+          { key: "status", label: "Status", cell: (r) => `<td>${badge(r.status, r.status)}</td>` },
+          { key: "artifact_id", label: "Artifact", cell: (r) => `<td>${r.artifact_id ? `<button class="link-btn" data-navigate="artifacts">${esc(r.artifact_id)}</button>` : '—'}</td>` },
         ],
-        (data.trades || []).slice(0, 8),
-        "No trades recorded yet."
+        data.activity || [],
+        "No operational or research activity has been recorded yet."
       );
-    }, "Trades unavailable")
+    }, "Activity feed unavailable")
   );
 
   results.push(
@@ -843,13 +842,40 @@ function wireAiConfigForm() {
   });
 }
 
+export async function renderSystem() {
+  const results = [];
+  results.push(await load("/system/status", "system-components", (data) => {
+    const wd = data.watchdog || {};
+    table(el("system-components"), [
+      {key:"component",label:"Component"},
+      {key:"desired_state",label:"Desired",cell:(r)=>`<td>${badge(r.desired_state,r.desired_state)}</td>`},
+      {key:"scheduler_state",label:"Scheduler"},
+      {key:"heartbeat_state",label:"Heartbeat"},
+      {key:"dependency_state",label:"Dependency"},
+      {key:"effective_state",label:"Effective",cell:(r)=>`<td>${badge(r.effective_state,r.effective_state)}</td>`},
+      {key:"reason",label:"Reason"},
+      {key:"last_success",label:"Last Success",cell:(r)=>`<td>${dt(r.last_success)}</td>`},
+    ], wd.components || [], "Watchdog has not produced its first runtime snapshot yet.");
+    const alerts = wd.alerts || [];
+    el("system-alerts").innerHTML = alerts.length ? `<ul class="alert-list">${alerts.map(a=>`<li><strong>${esc(a.code)}</strong> — ${esc(a.reason)}</li>`).join("")}</ul>` : `<div class="empty-state">No current watchdog alerts.</div>`;
+    const op = data.operations || {};
+    el("system-operations").innerHTML = [
+      {label:"Recorder",value:(op.recorder||{}).state||"UNKNOWN"},
+      {label:"Research heartbeat",value:dt((op.research_worker||{}).last_heartbeat_at)},
+      {label:"Paper",value:(op.paper||{}).state||"UNKNOWN"},
+      {label:"Phase 11",value:data.phase_11,cls:"amber"},
+    ].map(c=>`<div class="card"><div class="label">${esc(c.label)}</div><div class="value ${c.cls||''}">${esc(c.value)}</div></div>`).join("");
+  }, "System status unavailable"));
+  return results;
+}
+
 export async function renderControl() {
   const results = [];
 
   el("admin-access").innerHTML = adminGateHtml();
   wireAdminGate();
 
-  const [controlRes, resourceRes, aiRes, operationsRes, accountRes, notifyRes, runtimeRes] = await Promise.all([
+  const [controlRes, resourceRes, aiRes, operationsRes, accountRes, notifyRes, runtimeRes, systemRes] = await Promise.all([
     apiGet("/control/status"),
     apiGet("/resources/status"),
     apiGet("/ai/status"),
@@ -857,6 +883,7 @@ export async function renderControl() {
     apiGet("/account"),
     apiGet("/notifications/status"),
     apiGet("/runtime/status"),
+    apiGet("/system/status"),
   ]);
   results.push({ ok: controlRes.ok, status: controlRes.status, error: controlRes.error });
   results.push({ ok: resourceRes.ok, status: resourceRes.status, error: resourceRes.error });
@@ -865,6 +892,7 @@ export async function renderControl() {
   results.push({ ok: accountRes.ok, status: accountRes.status, error: accountRes.error });
   results.push({ ok: notifyRes.ok, status: notifyRes.status, error: notifyRes.error });
   results.push({ ok: runtimeRes.ok, status: runtimeRes.status, error: runtimeRes.error });
+  results.push({ ok: systemRes.ok, status: systemRes.status, error: systemRes.error });
 
   if (controlRes.ok) {
     el("control-cards").innerHTML = controlModeCardsHtml(controlRes.data);
@@ -885,6 +913,23 @@ export async function renderControl() {
     );
   } else {
     errorState(el("control-cards"), "Control status unavailable.");
+  }
+
+  if (systemRes.ok) {
+    const states = Object.values(systemRes.data.desired_components || {});
+    table(el("component-controls"), [
+      {key:"component",label:"Component"},
+      {key:"desired_state",label:"Desired",cell:r=>`<td>${badge(r.desired_state,r.desired_state)}</td>`},
+      {key:"reason",label:"Reason"},{key:"actor",label:"Actor"},
+      {key:"changed_at",label:"Changed",cell:r=>`<td>${dt(r.changed_at)}</td>`},
+      {key:"action",label:"Control",cell:r=>`<td>${hasAdminToken()?`<button class="component-toggle" data-component="${esc(r.component)}" data-next="${r.desired_state==='RUNNING'?'PAUSED':'RUNNING'}">${r.desired_state==='RUNNING'?'Pause':'Resume'}</button>`:'Admin token required'}</td>`},
+    ], states, "No component controls available.");
+    document.querySelectorAll(".component-toggle").forEach(btn=>btn.addEventListener("click",async()=>{
+      const reason=window.prompt(`Reason to ${btn.dataset.next.toLowerCase()} ${btn.dataset.component}:`);
+      if(!reason) return;
+      const result=await apiPost("/control/component",{component:btn.dataset.component,desired_state:btn.dataset.next,reason,actor:"dashboard-admin",resume_policy:"MANUAL"},{admin:true});
+      if(result.ok) renderControl(); else window.alert(result.detail||result.error);
+    }));
   }
 
   el("resource-cards").innerHTML = resourceRes.ok

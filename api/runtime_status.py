@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from control import runtime
+from control import runtime, watchdog
 from research.store import now_ist
 
 from . import ai_status, notifications, operations, validation
@@ -25,19 +25,25 @@ def get_runtime_status(store) -> dict:
     ai = ai_status.get_ai_status()
     telegram = notifications.get_status()
     control = runtime.get_state()
+    reconciled = watchdog.read_state()
+    effective = {r.get("component"): r for r in reconciled.get("components", [])}
     worker = op["research_worker"]
     worker_age = _age_hours(worker.get("last_heartbeat_at"))
     recorder_age = _age_hours((op["recorder"].get("last_run") or {}).get("finished_at") or
                               (op["recorder"].get("last_run") or {}).get("ts"))
     ai_connected = next((p.get("configured") for p in ai["provider_catalog"]
                          if p["provider"] == ai["effective_provider"]), False)
+    system_state = "HEALTHY" if reconciled.get("healthy") and control["mode"] == "RUNNING" else (
+        control["mode"] if control["mode"] != "RUNNING" else "DEGRADED")
+    research_state = (effective.get("RESEARCH_AI") or {}).get("effective_state") or (
+        "ACTIVE" if worker_age is not None and worker_age < 1 else "STALE")
     indicators = [
-        {"key":"system", "label":"SYSTEM", "state":"HEALTHY" if control["mode"] == "RUNNING" else control["mode"], "target":"control"},
-        {"key":"research", "label":"RESEARCH", "state":"ACTIVE" if worker_age is not None and worker_age < 1 else "PAUSED / STALE", "target":"research"},
+        {"key":"system", "label":"SYSTEM", "state":system_state, "detail":f"{len(reconciled.get('alerts', []))} watchdog alerts", "target":"system"},
+        {"key":"research", "label":"RESEARCH", "state":research_state, "detail":(effective.get("RESEARCH_AI") or {}).get("reason"), "target":"research"},
         {"key":"ai", "label":"AI", "state":f"{ai['effective_provider'].upper()} / {'CONNECTED' if ai_connected else 'NOT CONFIGURED'}", "target":"control"},
-        {"key":"data", "label":"DATA", "state":"HEALTHY" if op["recorder"]["state"] == "HEALTHY" and (recorder_age or 999) < 24 else op["recorder"]["state"], "target":"research"},
+        {"key":"data", "label":"DATA", "state":(effective.get("DATA") or {}).get("effective_state") or op["recorder"]["state"], "detail":(effective.get("DATA") or {}).get("reason"), "target":"research"},
         {"key":"broker", "label":"BROKER", "state":"SEE ACCOUNT", "target":"trading"},
-        {"key":"paper", "label":"PAPER", "state":"WAITING FOR STRATEGY" if not campaign["paper_readiness"]["ready"] else "READY", "target":"paper"},
+        {"key":"paper", "label":"PAPER", "state":"WAITING" if not campaign["paper_readiness"]["ready"] else ((effective.get("PAPER") or {}).get("effective_state") or "READY"), "detail":"No eligible StrategyVersion" if not campaign["paper_readiness"]["ready"] else (effective.get("PAPER") or {}).get("reason"), "target":"paper"},
         {"key":"telegram", "label":"TELEGRAM", "state":"HEALTHY" if telegram["last_successful_message"] else ("CONFIGURED / UNPROVEN" if telegram["configured"] else "NOT CONFIGURED"), "target":"control"},
     ]
     queue = ((worker.get("last_queue_health") or {}).get("backlog_count") or
@@ -47,13 +53,31 @@ def get_runtime_status(store) -> dict:
     if worker_age is not None and worker_age < 1: active.append(f"Research worker processing a queue of {queue}")
     else: active.append("Research AI worker is not scheduled; deterministic ingestion continues")
     if not campaign["paper_readiness"]["ready"]: active.append("Paper engine waiting for an explicitly eligible StrategyVersion")
-    matrix = [
-        {"module":"market recorder / news ingestion", "expected_state":"scheduled", "actual_state":op["recorder"]["state"], "last_successful_run":(op["recorder"].get("last_run") or {}).get("finished_at"), "last_attempt":(op["recorder"].get("last_run") or {}).get("finished_at"), "heartbeat":recorder_age, "last_error":op["recorder"].get("failed_sources"), "queue_depth":None, "dependencies":["public market/news sources"]},
-        {"module":"research allocator / discovery / experiments", "expected_state":"10-minute heartbeat", "actual_state":"ACTIVE" if worker_age is not None and worker_age < 1 else "STALE", "last_successful_run":worker.get("last_heartbeat_at"), "last_attempt":worker.get("last_heartbeat_at"), "heartbeat":worker_age, "last_error":worker.get("last_errors"), "queue_depth":queue, "dependencies":["AI Gateway", "research store"]},
-        {"module":"AI Gateway", "expected_state":"provider-neutral", "actual_state":"CONNECTED" if ai_connected else "OPENAI_PROVIDER_NOT_CONFIGURED", "last_successful_run":ai["budget"].get("last_call_at"), "last_attempt":ai["budget"].get("last_call_at"), "heartbeat":None, "last_error":None, "queue_depth":queue, "dependencies":["server-side developer API credential"]},
-        {"module":"paper engine", "expected_state":"daily when eligible", "actual_state":op["paper"]["state"], "last_successful_run":(op["paper"].get("last_cycle") or {}).get("completed_at"), "last_attempt":(op["paper"].get("last_cycle") or {}).get("completed_at"), "heartbeat":None, "last_error":None, "queue_depth":campaign["funnel"]["paper_eligible"], "dependencies":["eligible StrategyVersion"]},
-        {"module":"Telegram notifier", "expected_state":"event + daily digest", "actual_state":"HEALTHY" if telegram["last_successful_message"] else "UNPROVEN", "last_successful_run":(telegram["last_successful_message"] or {}).get("timestamp"), "last_attempt":((telegram["recent"] or [{}])[-1]).get("timestamp"), "heartbeat":None, "last_error":telegram["last_failed_message"], "queue_depth":0, "dependencies":["Telegram API"]},
-    ]
+    matrix = [{
+        "module": row["component"],
+        "expected_state": row["desired_state"],
+        "actual_state": row["effective_state"],
+        "scheduler_state": row["scheduler_state"],
+        "heartbeat_state": row["heartbeat_state"],
+        "dependency_state": row["dependency_state"],
+        "last_successful_run": row.get("last_success"),
+        "last_attempt": row.get("last_attempt"),
+        "next_expected_run": row.get("next_expected_run"),
+        "last_error": row.get("reason") if row["effective_state"] in
+                      ("CONFIGURATION_DRIFT", "STALE", "DEGRADED", "BLOCKED") else None,
+        "queue_depth": queue if row["component"] in ("RESEARCH_AI", "EXPERIMENTS") else None,
+        "dependencies": [row["dependency_state"]],
+    } for row in reconciled.get("components", [])]
+    matrix.append({"module":"AI_GATEWAY", "expected_state":"provider-neutral",
+                   "actual_state":"CONNECTED" if ai_connected else "OPENAI_PROVIDER_NOT_CONFIGURED",
+                   "scheduler_state":"N/A", "heartbeat_state":"N/A",
+                   "dependency_state":"READY" if ai_connected else "NOT_CONFIGURED",
+                   "last_successful_run":ai["budget"].get("last_call_at"),
+                   "last_attempt":ai["budget"].get("last_call_at"), "next_expected_run":None,
+                   "last_error":None if ai_connected else "server-side developer API credential absent",
+                   "queue_depth":queue, "dependencies":["OPENAI_API_KEY"]})
     return {"as_of": now_ist().isoformat(), "indicators": indicators, "active_work": active,
             "runtime_matrix": matrix, "funnel": campaign["funnel"], "conversion": campaign["conversion"],
-            "blockers": campaign["paper_readiness"]["blockers"], "phase_11":"LOCKED"}
+            "velocity": campaign.get("velocity", {}), "backlog": campaign.get("backlog", {}),
+            "blockers": campaign["paper_readiness"]["blockers"], "watchdog_alerts": reconciled.get("alerts", []),
+            "phase_11":"LOCKED"}

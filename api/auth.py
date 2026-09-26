@@ -3,7 +3,7 @@ api/auth.py — a deliberately small bearer-token check.
 
 No identity database is required for this single-operator system. It has two
 explicit roles: an observer token for read routes and a distinct administrator
-token for the two audited configuration writes. The frontend never embeds or
+token for the narrowly audited administrative writes. The frontend never embeds or
 persists the administrator credential beyond the current browser session.
 
     Authorization: Bearer <DASHBOARD_API_TOKEN>

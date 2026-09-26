@@ -6,23 +6,37 @@ locked and requires a deliberate human decision.
 ## System boundaries
 
 ```mermaid
-flowchart LR
-  Sources[Market, news and event sources] --> Recorder[Deterministic recorder]
-  Recorder --> Memory[(Bitemporal append-only memory)]
-  Memory --> Observe[Observatory]
-  Observe --> Hypothesis[Hypothesis + falsification]
-  Hypothesis --> Contract[Immutable experiment contract]
-  Contract --> Experiment[Replay / experiment]
-  Experiment --> Evidence[Evidence + comparison]
-  Evidence --> Version[Immutable StrategyVersion]
-  Version --> Backtest[Strategy backtest]
-  Backtest --> Eligibility{Explicit paper eligibility}
+flowchart TB
+  Market[Market, news and event sources] --> Data[Deterministic data ingestion]
+  Data --> Memory[(Bitemporal append-only research memory)]
+  Memory --> Research[Research allocator and backpressure]
+  AIGateway[Provider-neutral AI gateway and budgets] --> Research
+  Research --> Hypothesis[Hypotheses and falsification]
+  Hypothesis --> Experiments[Immutable contracts and deterministic experiments]
+  Experiments --> Evidence[Evidence and robustness review]
+  Evidence --> Strategy[Immutable strategy registry and backtests]
+  Strategy --> Eligibility{Explicit paper eligibility}
   Eligibility -->|approved| Paper[Isolated paper engine]
-  Eligibility -->|not approved| Blocker[Concrete blocker]
-  Paper --> Attribution[Paper attribution / decay]
-  Attribution --> Memory
-  Version -. no automatic edge .-> Live[Live engine]
+  Eligibility -->|blocked| Blocker[Concrete readiness blockers]
+  Paper --> Portfolio[Paper portfolio, risk and attribution]
+  Portfolio --> Memory
+  Strategy -. explicit human Phase 11 only .-> Live[Live execution]
   Live:::locked
+
+  Scheduler[Canonical cron scheduler] --> Data
+  Scheduler --> Research
+  Scheduler --> Experiments
+  Scheduler --> Paper
+  Scheduler --> Watchdog[Deterministic watchdog]
+  Control[Persistent component controls] --> Watchdog
+  Data --> Watchdog
+  Research --> Watchdog
+  Experiments --> Watchdog
+  Paper --> Watchdog
+  Watchdog --> Notify[Exception-only Telegram notifications]
+  Watchdog --> API[Authenticated control-plane API]
+  API --> UI[Six-area operator UI]
+  Admin[Separate admin credential] --> API
   classDef locked fill:#481b1b,stroke:#e0554f,color:#fff
 ```
 
@@ -134,3 +148,7 @@ entry remains the guarded `engine.execute propose` workflow.
 - The Validation dashboard exposes funnel, capacity, blockers and history.
 - Secrets are never committed, returned by APIs, or placed in browser storage
   except the user-entered admin session token already required by the UI.
+- Component state, scheduler presence, heartbeat freshness and dependencies are
+  reconciled by the watchdog; UI health never relies on cron comments or process
+  existence alone.
+- The canonical operator runbook is [OPERATIONS.md](OPERATIONS.md).

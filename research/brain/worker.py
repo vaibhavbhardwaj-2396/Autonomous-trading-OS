@@ -192,6 +192,7 @@ from . import llm
 # tests/test_kernel_isolation.py checks "research does not import
 # guardrails/execute/journal/broker" — control is none of those.
 from control import runtime as ctrl
+from control import components as component_control
 # STABLE + CONTROLLED — the Resource Governor. Same neutral, dependency-free
 # top-level package as control.runtime; see control/resources.py's own
 # module docstring for why organism state (control.runtime) and
@@ -1242,6 +1243,17 @@ def main(argv: Optional[list] = None) -> int:
             print(f"research worker: global control mode is {control_state['mode']} — "
                   f"skipping this heartbeat entirely (no store opened, no lock taken).")
         return 0
+
+    # Component controls are independent: pausing AI discovery does not stop
+    # deterministic queued experiments, and pausing experiments does not
+    # prevent a bounded research packet from being persisted for later.
+    ai_component = component_control.get("RESEARCH_AI")
+    experiment_component = component_control.get("EXPERIMENTS")
+    if ai_component["desired_state"] != "RUNNING":
+        limits = replace(limits, discovery_enabled=False, max_discovery_attempts=0)
+    if experiment_component["desired_state"] != "RUNNING":
+        limits = replace(limits, max_experiments=0, max_promotions=0,
+                         max_substrate_creations=0)
 
     # -- STABLE + CONTROLLED: the Resource Governor --------------------------
     # A second, independent axis from the control layer above — "is a human

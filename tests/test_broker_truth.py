@@ -864,7 +864,7 @@ _all_methods = {m.strip().strip('"\'').upper() for group in _route_methods for m
 # narrow, named exception to the check below, not a loosening of it —
 # tests/test_deployment_readiness.py §A independently re-proves this at
 # the route level (methods per rule, and names both exceptions explicitly).
-check("7. every api/app.py route is GET-only except four narrow audited admin routes",
+check("7. every api/app.py route is GET-only except five narrow audited admin routes",
       _all_methods == {"GET", "POST"}, f"declared methods across all routes: {_all_methods}")
 _app_code = _code_only(APP_SRC)
 check("7. api/app.py never calls propose_trade / place / a broker in code",

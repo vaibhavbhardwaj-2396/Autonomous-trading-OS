@@ -42,7 +42,7 @@ def api_token() -> str | None:
 
 
 def admin_token() -> str | None:
-    """Separate credential for the two audited administrative write routes."""
+    """Separate credential for the narrowly audited administrative write routes."""
     token = os.environ.get(ENV_ADMIN_TOKEN, "").strip()
     return token or None
 

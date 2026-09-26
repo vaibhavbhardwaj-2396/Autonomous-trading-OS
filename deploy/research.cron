@@ -32,6 +32,14 @@
 # ---- Deterministic daily research/system digest — no AI formatting call.
 0    20   * * *    cd /root/trading-agent && venv/bin/python -m scripts.notification_service digest >> logs/notifications.log 2>&1
 
+# ---- Deterministic runtime reconciliation. Cron stays installed; desired
+# ---- component state in control/component_state.json is the pause mechanism.
+*/5  *    * * *    cd /root/trading-agent && venv/bin/python -m scripts.watchdog >> logs/watchdog.log 2>&1
+
+# ---- Paper heartbeat. With no eligible StrategyVersion this is a truthful,
+# ---- bounded no-op; eligibility remains the scientific activation gate.
+0    19   * * 1-5  cd /root/trading-agent && venv/bin/python -m paper.runner run --cycle-label scheduled >> logs/paper_cycle.log 2>&1
+
 # ---- Continuous research worker (research/brain/worker.py, docs/RESEARCH_WORKER.md).
 # ---- One BOUNDED heartbeat per tick, then exit — cron is the heartbeat, the
 # ---- module is the brain. Defaults ARE the required bounds: max_discovery=1,

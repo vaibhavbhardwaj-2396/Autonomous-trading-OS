@@ -66,11 +66,11 @@ check("A: api.wsgi.app is a Flask application instance", isinstance(api_wsgi.app
 
 _wsgi_rules = list(api_wsgi.app.url_map.iter_rules())
 _wsgi_routes = sorted({r.rule for r in _wsgi_rules if r.rule != "/static/<path:filename>"})
-check("A: api.wsgi.app has the expected route count (34, including runtime and notifications: /health + 15 live/operational + "
+check("A: api.wsgi.app has the expected route count (37, including reconciled system/activity/component control routes: /health + 15 live/operational + "
       "6 paper/shadow — Slice AA + 2 global control — Priority Phase 4 + "
       "5 outcome 2/resource-governor routes: /resources/status, /ai/status, "
       "/ai/config, /artifacts, /artifacts/<id>; worker/data/operations telemetry)",
-      len(_wsgi_routes) == 34, str(_wsgi_routes))
+      len(_wsgi_routes) == 37, str(_wsgi_routes))
 check("A: /health is present on the WSGI entrypoint", "/health" in _wsgi_routes)
 check("A: /account is present on the WSGI entrypoint", "/account" in _wsgi_routes)
 
@@ -82,17 +82,19 @@ check("A: /account is present on the WSGI entrypoint", "/account" in _wsgi_route
 # research AI call uses — see control/ai_config.py (never calls a provider,
 # never touches research state or risk gates). Every OTHER route, without
 # exception, is still mechanically proven GET-only below — this is a
-# narrow, explicit allow-list of exactly two (route, method) pairs, not a
+# narrow, explicit allow-list of named (route, method) pairs, not a
 # loosening of the check itself.
 WRITE_ROUTE_EXCEPTIONS = {"/control/mode": {"POST"}, "/ai/config": {"POST"},
                           "/notifications/test": {"POST"},
-                          "/notifications/config": {"POST"}}
-check("A: the write-route exception list names exactly four narrow admin routes",
-      len(WRITE_ROUTE_EXCEPTIONS) == 4
+                          "/notifications/config": {"POST"},
+                          "/control/component": {"POST"}}
+check("A: the write-route exception list names exactly five narrow admin routes",
+      len(WRITE_ROUTE_EXCEPTIONS) == 5
       and WRITE_ROUTE_EXCEPTIONS.get("/control/mode") == {"POST"}
       and WRITE_ROUTE_EXCEPTIONS.get("/ai/config") == {"POST"}
       and WRITE_ROUTE_EXCEPTIONS.get("/notifications/test") == {"POST"}
-      and WRITE_ROUTE_EXCEPTIONS.get("/notifications/config") == {"POST"})
+      and WRITE_ROUTE_EXCEPTIONS.get("/notifications/config") == {"POST"}
+      and WRITE_ROUTE_EXCEPTIONS.get("/control/component") == {"POST"})
 
 for rule in _wsgi_rules:
     if rule.rule == "/static/<path:filename>":
@@ -409,11 +411,10 @@ check("E: the redundant standalone `research.overnight` cron line is NOT active 
       "(subsumed by the 23:30 worker batch)",
       not any("research.overnight" in ln for ln in _cron_active),
       [ln for ln in _cron_active if "research.overnight" in ln])
-check("E: research.cron schedules research ONLY — no run_cycle.sh / engine.execute / "
-      "paper / broker line",
+check("E: organism schedule contains no live cycle, engine execution, or broker path",
       not any(tok in ln for ln in _cron_active
               for tok in ("run_cycle.sh", "engine.execute", "engine.briefing",
-                          "paper.runner", "broker")),
+                          "broker")),
       "\n".join(_cron_active))
 check("E: every active line uses the repo's cd + venv convention",
       bool(_cron_active) and all(

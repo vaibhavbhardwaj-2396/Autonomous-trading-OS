@@ -96,6 +96,7 @@ Phase 10.5: [Validation campaign](docs/PHASE_10_5_VALIDATION.md),
 Current plan: [Implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md).
 Runtime recovery evidence: [P0 audit](docs/P0_RUNTIME_RECOVERY.md) and
 [AI cost optimization](docs/AI_COST_OPTIMIZATION.md).
+Canonical operator entry point: [Operations runbook](docs/OPERATIONS.md).
 
 ## Delivery and verification
 

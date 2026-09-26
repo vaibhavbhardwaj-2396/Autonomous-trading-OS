@@ -16,13 +16,11 @@
 
   <nav class="tabs">
     <button data-view="overview" class="active">Overview</button>
-    <button data-view="trading">Trading</button>
-    <button data-view="paper">Paper</button>
     <button data-view="research">Research</button>
     <button data-view="strategies">Strategies</button>
-    <button data-view="validation">Validation</button>
+    <button data-view="paper">Paper</button>
+    <button data-view="system">System</button>
     <button data-view="control">🔒 Admin</button>
-    <button data-view="artifacts">Artifacts</button>
   </nav>
 
   <main>
@@ -39,7 +37,7 @@
       </section>
 
       <section class="panel">
-        <h2>Latest Trading Activity</h2>
+        <h2>Operational &amp; Research Activity</h2>
         <div id="overview-activity" class="table-wrap"></div>
       </section>
 
@@ -110,6 +108,7 @@
 
     <!-- ============================== Research ============================== -->
     <section id="view-research" class="view">
+      <div class="subnav"><button data-navigate="validation">Campaign</button><button data-navigate="artifacts">Artifact Explorer</button></div>
       <section class="panel">
         <h2>Research Worker</h2>
         <div id="research-worker-cards" class="grid"></div>
@@ -135,6 +134,14 @@
         <h2>Research Areas</h2>
         <div id="research-areas" class="table-wrap"></div>
       </section>
+    </section>
+
+    <!-- ============================== System ============================== -->
+    <section id="view-system" class="view">
+      <div class="subnav"><button data-navigate="trading">Broker &amp; Risk</button><button data-navigate="validation">Campaign</button><button data-navigate="artifacts">Artifacts</button></div>
+      <section class="panel"><h2>Effective Runtime State</h2><div id="system-components" class="table-wrap"></div></section>
+      <section class="panel"><h2>Watchdog Alerts</h2><div id="system-alerts"></div></section>
+      <section class="panel"><h2>Subsystem Telemetry</h2><div id="system-operations" class="grid"></div></section>
     </section>
 
     <!-- ============================= Strategies ============================= -->
@@ -189,6 +196,11 @@
         <h2>Organism State</h2>
         <div id="control-cards" class="grid"></div>
         <div id="control-actions"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Scheduler &amp; Component Controls</h2>
+        <div id="component-controls" class="table-wrap"></div>
       </section>
 
       <section class="panel">

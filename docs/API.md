@@ -4,9 +4,10 @@ Covers: running `api/` (the HTTP API) and `frontend/` (the dashboard) locally, h
 authentication and CORS are configured, the full endpoint list, what this API does and does
 not protect against, and how the pieces are meant to separate later onto a VPS + Netlify.
 The API and dashboard are deployed on the production VPS and Netlify. All
-account/research/paper routes are read-only. Exactly two audited configuration
-writes exist: runtime mode and research AI-provider selection. Both require the
-separate administrator token and neither can place or modify an order.
+account/research/paper routes are read-only. Five narrowly audited administrator
+writes exist: runtime mode, component desired state, research AI-provider selection,
+notification configuration and notification delivery test. They require the separate
+administrator token and none can place or modify an order.
 
 ## 1. Running the API locally
 
@@ -122,8 +123,8 @@ Authorization: Bearer <DASHBOARD_API_TOKEN>
 ```
 
 `DASHBOARD_ADMIN_TOKEN` is a separate credential for `GET /admin/status`,
-`POST /control/mode`, and `POST /ai/config`. The observer credential receives
-403 on both writes. The frontend never embeds the admin token; it is entered on
+`POST /control/mode`, `POST /control/component`, `POST /ai/config`, and notification
+controls. The observer credential receives 403 on every write. The frontend never embeds the admin token; it is entered on
 the **🔒 Admin** tab and retained only in browser `sessionStorage`.
 
 - Missing or wrong token → `401 {"error": "unauthorized", ...}`. The response never echoes
@@ -166,6 +167,9 @@ All data endpoints require either valid bearer token and are `GET` only.
 | `GET /research/worker-status` | `research.brain.worker.worker_status()` | latest heartbeat, cooldown, errors, limits, and discovery queue-admission decision; telemetry-only read |
 | `GET /research/data-quality` | `research.data_quality.build_data_quality_report()` | point-in-time freshness, coverage and append-only integrity; explicit READY/DEGRADED/BLOCKED state |
 | `GET /operations/status` | bounded recorder JSONL, worker telemetry and read-only paper store | combined operational health; never starts work or creates a store |
+| `GET /runtime/status` | reconciled watchdog and validation snapshot | status pills, active work, funnel velocity, backlog and effective runtime matrix |
+| `GET /system/status` | component controls, watchdog state and operations | authoritative scheduler/heartbeat/dependency/effective state |
+| `GET /activity` | recorder/worker logs and artifact metadata | unified bounded operational and research feed; `?kind=&limit=&offset=` |
 | `GET /validation/status` | append-only research memory, immutable registries, paper store and capacity planner | Phase 10.5 funnel, conversion rates, paper blockers and campaign history; `?history_limit=` |
 | `GET /resources/status` | ratio-based resource governor and capacity planner | measured CPU/memory/disk plus IDLE/LOW_LOAD/NORMAL/HIGH_LOAD/CRITICAL work allocation |
 | `GET /ai/status` | provider registry, persisted selection and budget state | effective provider/model, non-secret auth mode metadata and measured usage |
@@ -175,6 +179,7 @@ All data endpoints require either valid bearer token and are `GET` only.
 | `GET /backtests` | `research.memory`'s research-note log | backtest **completion notes** only, see below |
 | `GET /admin/status` | auth boundary | verifies the separate admin token; returns no secret |
 | `POST /control/mode` | audited runtime control | changes only global mode; requires admin + reason |
+| `POST /control/component` | audited component control | changes only desired RUNNING/PAUSED/DISABLED state; requires admin + reason |
 | `POST /ai/config` | audited AI configuration | changes only future research provider/model; requires admin + reason |
 
 Every response is deterministic JSON built from already-authoritative state; nothing here

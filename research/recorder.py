@@ -46,6 +46,7 @@ from .sources import (option_chain, quotes, news, decisions, prices_eod,
 # imports nothing from engine/research/paper, so this adds no edge to the
 # engine<->research isolation graph tests/test_kernel_isolation.py checks.
 from control import runtime as ctrl
+from control import components as component_control
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
 RUN_LOG = Path(__file__).parent / "recorder_runs.jsonl"
@@ -187,11 +188,14 @@ def main() -> None:
     # lose market history while research/paper are paused for cost
     # reasons); only STOPPED, the most conservative mode, turns it off.
     control_state = ctrl.get_state()
-    if not ctrl.data_ingestion_allowed(control_state):
-        _persist_run(args.cycle, [], skip_reason=f"global control mode is {control_state['mode']}")
+    component_state = component_control.get("DATA")
+    if not ctrl.data_ingestion_allowed(control_state) or not component_control.allowed("DATA"):
+        reason = (f"global control mode is {control_state['mode']}" if
+                  not ctrl.data_ingestion_allowed(control_state) else
+                  f"DATA desired state is {component_state['desired_state']} ({component_state['reason']})")
+        _persist_run(args.cycle, [], skip_reason=reason)
         if not args.quiet_on_success:
-            print(f"recorder [{args.cycle}]: global control mode is "
-                  f"{control_state['mode']} — skipping (no store opened).")
+            print(f"recorder [{args.cycle}]: {reason} — skipping (no store opened).")
         sys.exit(0)
 
     try:

@@ -53,6 +53,7 @@ from .store import PaperStore
 # neutral, top-level package importing nothing from engine/research/paper —
 # see its own docstring for why that keeps this a safe addition.
 from control import runtime as ctrl
+from control import components as component_control
 
 LOCK_PATH = Path(__file__).parent / ".paper.lock"
 
@@ -162,11 +163,15 @@ def run_paper_cycle(
     returns a "SKIPPED" summary immediately and touches nothing.
     """
     control_state = ctrl.get_state()
-    if not ctrl.paper_allowed(control_state):
+    component_state = component_control.get("PAPER")
+    if not ctrl.paper_allowed(control_state) or not component_control.allowed("PAPER"):
+        reason = (f"global control mode is {control_state['mode']}" if
+                  not ctrl.paper_allowed(control_state) else
+                  f"PAPER desired state is {component_state['desired_state']} ({component_state['reason']})")
         return {
             "cycle_id": cycle_id or default_cycle_id(cycle_label, resolve_clock(clock)),
             "status": "SKIPPED",
-            "skip_reason": f"global control mode is {control_state['mode']}",
+            "skip_reason": reason,
         }
 
     try:

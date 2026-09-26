@@ -181,7 +181,8 @@ check("A11: get_artifact() for an unknown type prefix returns None",
 sys_events = artifacts.list_artifacts(store_a, type="system_event", registry_dir=reg_a)
 check("A12: system_event artifacts reflect control.runtime's real current mode",
       sys_events["total_count"] >= 1
-      and sys_events["artifacts"][0]["status"] == ctrl.get_state()["mode"], sys_events)
+      and any(a["status"] == ctrl.get_state()["mode"] for a in sys_events["artifacts"]),
+      sys_events)
 
 
 # ===========================================================================
@@ -244,6 +245,14 @@ check("C2d: the administrator token verifies on the dedicated status route",
 check("C2e: authenticated admin mode changes still validate input before writing",
       client.post("/control/mode", headers=ADMIN_AUTH,
                   json={"mode": "NOT_A_MODE", "reason": "x"}).status_code == 400)
+check("C2f: observer cannot change a component desired state",
+      client.post("/control/component", headers=AUTH,
+                  json={"component":"DATA", "desired_state":"PAUSED", "reason":"x"}).status_code == 403)
+check("C2g: component control requires a valid component/state and reason",
+      client.post("/control/component", headers=ADMIN_AUTH,
+                  json={"component":"NOPE", "desired_state":"PAUSED", "reason":"x"}).status_code == 400
+      and client.post("/control/component", headers=ADMIN_AUTH,
+                  json={"component":"DATA", "desired_state":"PAUSED"}).status_code == 400)
 
 r_resources = client.get("/resources/status", headers=AUTH)
 check("C3: GET /resources/status with auth returns 200 and a real "

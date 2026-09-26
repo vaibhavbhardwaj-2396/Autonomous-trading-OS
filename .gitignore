@@ -57,6 +57,11 @@ control/notification_config.json
 control/notification_config.json.tmp
 control/notification_audit.jsonl
 control/.notification_config.lock
+control/component_state.json
+control/component_state.json.tmp
+control/.component_state.lock
+control/watchdog_state.json
+control/watchdog_state.json.tmp
 
 # Paper/shadow store and its overlap-prevention lock (STABLE + CONTROLLED,
 # outcome 1) — same class as research/*.db above: rebuildable simulation

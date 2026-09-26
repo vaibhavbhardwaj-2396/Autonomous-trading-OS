@@ -391,6 +391,10 @@ footer.app-footer {
 .status-pill { text-align:left; border:1px solid var(--panel-border); background:var(--panel); color:var(--text); border-radius:8px; padding:10px; cursor:pointer; }
 .status-pill strong { display:block; font-size:11px; color:var(--text-dim); }
 .status-pill span { display:block; margin-top:5px; font-weight:700; }
+.status-pill small { display:block; margin-top:4px; color:var(--text-dim); max-width:190px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.subnav { display:flex; gap:8px; margin:0 0 18px; flex-wrap:wrap; }
+.subnav button,.link-btn { background:transparent; color:var(--blue); border:1px solid var(--panel-border); border-radius:6px; padding:7px 10px; cursor:pointer; }
+.alert-list { margin:0; padding-left:22px; color:var(--amber); }
 .research-flow { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:14px; }
 .flow-stage { border:1px solid var(--panel-border); border-radius:8px; padding:10px 14px; background:var(--bg); cursor:pointer; }
 .flow-arrow { color:var(--text-dim); }

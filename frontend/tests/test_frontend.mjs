@@ -230,6 +230,22 @@ function stripComments(s) {
   return s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 const VIEWS_SRC = stripComments(readFileSync(join(HERE, "../js/views.js"), "utf8"));
+const INDEX_SRC = readFileSync(join(HERE, "../index.html"), "utf8");
+const primaryNav = [...INDEX_SRC.matchAll(/<button data-view="([^"]+)"[^>]*>([^<]+)<\/button>/g)]
+  .map((m) => [m[1], m[2].replace("🔒", "").trim()]);
+check("primary navigation exposes exactly the six product areas",
+  JSON.stringify(primaryNav) === JSON.stringify([
+    ["overview","Overview"],["research","Research"],["strategies","Strategies"],
+    ["paper","Paper"],["system","System"],["control","Admin"],
+  ]), JSON.stringify(primaryNav));
+check("System view renders reconciled scheduler, heartbeat and dependency state",
+  VIEWS_SRC.includes('apiGet("/system/status")')
+  && VIEWS_SRC.includes('key:"scheduler_state"')
+  && VIEWS_SRC.includes('key:"heartbeat_state"'));
+check("Overview activity uses the unified operational and research feed",
+  VIEWS_SRC.includes('load("/activity?limit=20"'));
+check("Admin component controls call only the audited component endpoint",
+  VIEWS_SRC.includes('apiPost("/control/component"'));
 check("artifact explorer exposes server-side search, sorting, and pagination controls",
   VIEWS_SRC.includes("artifact-search-form")
   && VIEWS_SRC.includes("URLSearchParams")
