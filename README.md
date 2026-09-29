@@ -97,6 +97,7 @@ Current plan: [Implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md).
 Runtime recovery evidence: [P0 audit](docs/P0_RUNTIME_RECOVERY.md) and
 [AI cost optimization](docs/AI_COST_OPTIMIZATION.md). Final runtime-unblock
 evidence: [production report](docs/RUNTIME_UNBLOCK_REPORT.md).
+Experiment performance and scaling: [benchmark report](docs/EXPERIMENT_ENGINE_PERFORMANCE.md).
 Canonical operator entry point: [Operations runbook](docs/OPERATIONS.md).
 
 ## Delivery and verification
@@ -123,6 +124,8 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 
 | Commit | Delivered |
 |---|---|
+| `881e249` | calibrated experiment admission, timeout auto-pause, API/UI execution telemetry and scaling controls |
+| `ab665dc` | point-in-time bulk experiment replay, exact legacy equivalence tests and 17.7× production speedup |
 | `6ce7bb3` | bounded per-session point-in-time price-window cache and streamed replay steps |
 | `5e7dff1` | production replay lookup index and query-plan regression proof |
 | `f421937` | canonical `prices_eod` data-readiness correction for deterministic draft review |

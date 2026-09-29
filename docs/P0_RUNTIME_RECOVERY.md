@@ -73,11 +73,11 @@ execution states/failure reasons, stale-RUNNING restart reconciliation, canonica
 creation after successful completion, and bounded deterministic draft review. See
 `docs/OPERATIONS.md` for the operator contract and recovery behavior.
 
-Production verification proved that the supervisor terminates the child process group at the
-180-second deadline, releases the worker, marks the contract `ABANDONED/TIMEOUT`, creates no
-scientific evidence, and leaves no orphan worker. The workload is legitimate but excessive for
-the current one-vCPU operational bound: a three-year Nifty 500 contract evaluates up to 500
-symbols per session and several point-in-time features per symbol. Replay lookup indexing and
-per-session window reuse reduced known database work but the controlled production contract
-still exceeded 180 seconds. `EXPERIMENTS` therefore remains deliberately paused; a safe timeout
-is not presented as successful research. See `docs/RUNTIME_UNBLOCK_REPORT.md` for exact results.
+Production verification first proved that the supervisor terminates the child process group at
+the 180-second deadline, releases the worker, marks the contract `ABANDONED/TIMEOUT`, creates no
+scientific evidence, and leaves no orphan worker. Follow-up profiling then isolated an N+1
+SQLite price-window pattern. The point-in-time bulk replay reduced the representative three-year
+Nifty 500 workload to 16.359 seconds without changing the deadline or scientific contract.
+`EXPERIMENTS` was resumed only after CI, exact-result equivalence and the full production
+benchmark passed. A governed Contract then completed and created legitimate evidence. See
+`docs/RUNTIME_UNBLOCK_REPORT.md` and `docs/EXPERIMENT_ENGINE_PERFORMANCE.md` for exact results.

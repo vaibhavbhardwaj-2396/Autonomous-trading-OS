@@ -92,6 +92,26 @@ summary. Operational failure never creates evidence. Draft review is determinist
 `python -m research.brain.draft_review --limit 10` records structural validity, exact/tested
 duplicates and price-data readiness before any AI review or lock attempt.
 
+The production replay path bulk-loads the bounded symbol/date slice and computes price features
+in arrays while preserving historical membership and as-of visibility. Its measured three-year
+Nifty 500 runtime is 16.359 seconds under the unchanged 180-second deadline. Preflight labels
+work `SMALL`, `MEDIUM`, `LARGE` or `OVERSIZED`; over-budget work is deferred for partitioning or
+a heavy queue and creates no evidence. Two consecutive production timeouts automatically pause
+`EXPERIMENTS` with a manual resume policy; any successful completion resets the streak.
+
+Read-only inspection and benchmark commands:
+
+```bash
+curl -H "Authorization: Bearer $DASHBOARD_API_TOKEN" \
+  http://127.0.0.1:8787/research/experiment-telemetry
+venv/bin/python scripts/benchmark_experiment.py --contract-id EXP-162BB2-F \
+  --start 2022-01-01 --end 2024-12-31 --engine auto
+```
+
+The Overview, Research and System screens render the same queue, process, timeout, resource and
+stage telemetry. See [Experiment performance](EXPERIMENT_ENGINE_PERFORMANCE.md) for benchmark
+evidence and scaling guidance.
+
 ## Incident sequence
 
 1. Read `/system/status` and `/runtime/status`; identify desired, scheduler, heartbeat and

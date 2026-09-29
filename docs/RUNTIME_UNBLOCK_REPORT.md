@@ -1,9 +1,31 @@
-# Final runtime-unblock production report
+# Runtime-unblock production report
 
 Captured: 26 September 2026, 21:04 IST. Baseline: `969b7d7`, API v1.4.0.
 Verified implementation: `6ce7bb368a0c5769582a8d8bad3075c77cff4316`, API v1.5.0.
 
-## Outcome
+## Performance resolution — 26 September 2026
+
+The throughput blocker described in the original incident record below is resolved. Profiling
+identified per-session/per-symbol SQLite price-window reads as the dominant N+1 path. Commit
+`ab665dc294f6c4b9912eaafc7e514c5ddfb2187a` replaced that path with a bounded point-in-time bulk
+load and array feature computation. It preserves Contract, universe, as-of, cost and portfolio
+semantics and falls back to the exact legacy engine whenever equivalence is not guaranteed.
+
+The production three-year Nifty 500 benchmark completed in 16.359 seconds with 459,325 price
+rows, 630 symbols, 739 sessions, five SQL queries and 392.2 MiB peak RSS. The matching Q1 sample
+was 18.61 times faster and produced identical ordered trades and exact P&L. `EXPERIMENTS` was
+resumed only after CI and the full production benchmark passed. The next governed Contract,
+`EXP-162BB2-G`, completed in 10.064 seconds, persisted 2,061 simulated trades, reached
+`REPORTED`, and created one legitimate evidence update. No live orders were submitted.
+
+The control plane now also provides calibrated workload admission, explicit compute classes,
+read-only execution telemetry in the API and existing dashboard screens, and automatic
+fail-closed pausing after two consecutive production timeouts. The hard deadline remains 180
+seconds. These controls were committed as `881e249`. See
+[Experiment engine performance](EXPERIMENT_ENGINE_PERFORMANCE.md) for the complete profile,
+scaling decision and operator commands.
+
+## Original cancellation-safety outcome
 
 The unsafe runtime behavior is fixed, deployed and verified. An experiment that crosses its
 deadline now actually stops. Its child process group is terminated, its temporary result file
@@ -12,7 +34,7 @@ marked `ABANDONED` with `TIMEOUT`, and no scientific evidence is created. Startu
 also converts a stale `RUNNING` contract with no surviving child into an audited
 `ABANDONED/WORKER_CRASH` outcome without retrying it.
 
-The research throughput blocker is not fully removed. The production smoke workload is a
+At this point in the incident, the research throughput blocker was not yet removed. The production smoke workload is a
 three-year Nifty 500 replay with multiple point-in-time conditions. It still exceeds the
 180-second limit on the one-vCPU VPS after two targeted improvements: an ordered replay lookup
 index and reuse of the largest price window within each immutable as-of session. Two post-fix
@@ -47,7 +69,7 @@ pre-test result, not evidence and not permission to trade.
 Three drafts entered the governed autonomous promotion/execution path during controlled and
 scheduled verification and were operationally abandoned on timeout. Final registry state was
 100 draft, 5 reported and 4 abandoned contracts (one abandoned contract predated this final
-verification). The scientific funnel remained 109 hypotheses, 5 reported experiments, zero
+verification). At that snapshot, the scientific funnel remained 109 hypotheses, 5 reported experiments, zero
 evidence artifacts, zero StrategyVersions, zero eligible paper strategies and zero paper trades.
 No operational failure was converted into negative or positive scientific evidence.
 
@@ -63,18 +85,16 @@ call succeeds. Consumer ChatGPT authentication is not used as a substitute.
 
 - `DATA`, `PAPER`, `BROKER_SYNC`, `VALIDATION`, `NOTIFICATIONS` and `WATCHDOG`: `RUNNING`.
 - `RESEARCH_AI`: `PAUSED`, manual resume, missing developer API credential.
-- `EXPERIMENTS`: `PAUSED`, manual resume, production replay still exceeds 180 seconds.
+- `EXPERIMENTS`: was `PAUSED` at the incident snapshot; resumed after the measured bulk replay
+  and governed production completion passed.
 - Telegram milestone delivery: successful (`sent`).
 - Phase 11: `LOCKED`; explicit human decision remains required.
 - Live orders submitted during this work: **0**.
 
-## Remaining blockers
+## Remaining external blocker
 
-1. Rework the broad Nifty 500 replay into a bounded bulk/columnar execution path, or introduce a
-   deterministic pre-test compute-size rejection/partition rule. Do not raise the timeout as a
-   substitute for measurement.
-2. Install `OPENAI_API_KEY` only in the protected VPS environment, perform one bounded structured
+1. Install `OPENAI_API_KEY` only in the protected VPS environment, perform one bounded structured
    provider proof, and record actual model, trace, usage, latency and cost before activating AI.
-3. Only after a normal experiment completes inside the operational bound should recurring
-   experiments be re-enabled. Evidence, strategy and paper progression must then follow the
-   existing gates without manual promotion or threshold weakening.
+
+The experiment-engine runtime blocker is no longer open. Evidence, strategy and paper
+progression remain governed by their existing scientific gates; Phase 11 remains locked.

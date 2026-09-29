@@ -165,6 +165,7 @@ All data endpoints require either valid bearer token and are `GET` only.
 | `GET /research/evidence` | `research.brain.digest.build_digest()`'s evidence section | PROMISING/WEAK/INCONCLUSIVE/CONTRADICTED verdicts |
 | `GET /research/areas` | `research.brain.research_areas.groups_as_dicts()` | hypothesis-to-area tags |
 | `GET /research/worker-status` | `research.brain.worker.worker_status()` | latest heartbeat, cooldown, errors, limits, and discovery queue-admission decision; telemetry-only read |
+| `GET /research/experiment-telemetry` | `research.experiments.telemetry.get_status()` | experiment desired/process state, queue, lifecycle, timeout, runtime, compute and stage telemetry; read-only |
 | `GET /research/data-quality` | `research.data_quality.build_data_quality_report()` | point-in-time freshness, coverage and append-only integrity; explicit READY/DEGRADED/BLOCKED state |
 | `GET /operations/status` | bounded recorder JSONL, worker telemetry and read-only paper store | combined operational health; never starts work or creates a store |
 | `GET /runtime/status` | reconciled watchdog and validation snapshot | status pills, active work, funnel velocity, backlog and effective runtime matrix |
@@ -243,10 +244,8 @@ token:
 
 ## 7. Production deployment
 
-Deployment **configuration has been prepared** (systemd unit, Caddy template, gunicorn
-entrypoint, Netlify build script) but **nothing has actually been deployed** — no VPS
-changes, no DNS record, no Netlify site. The full step-by-step procedure lives in
-**`docs/DEPLOYMENT.md`**; this section is the short version.
+The API is deployed on the VPS and the dashboard is deployed through Netlify. The exact,
+CI-gated procedure lives in **`docs/DEPLOYMENT.md`**; this section is the short version.
 
 - **API**: gunicorn (`api/wsgi.py`) behind Caddy on the VPS, run by systemd
   (`deploy/trading-api.service`) as its own unprivileged `tradingapi` user — never
@@ -263,10 +262,10 @@ changes, no DNS record, no Netlify site. The full step-by-step procedure lives i
   still the one `apiBaseUrl` value in `config.js`, exactly as designed — Netlify's build just
   changes how that file gets written, not what it contains or how the app reads it.
 
-## 8. Netlify preparation
+## 8. Netlify configuration
 
-Not yet created — this documents exactly what the Netlify project will need, verified
-against the actual repository (there is no build system to invent settings for):
+The deployed site uses the following configuration (there is no frontend build system to
+install):
 
 | Setting | Value |
 |---|---|
