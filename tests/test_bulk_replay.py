@@ -62,6 +62,10 @@ try:
           bulk.profile["rows_processed"] > 0 and bulk.profile["symbols_processed"] >= 2
           and bulk.profile["peak_rss_bytes"] > 0
           and bulk.profile["stages"]["bulk_price_retrieval"] >= 0, str(bulk.profile))
+    estimate = bulk_replay.estimate_workload(c, store)
+    check("measured preflight admits bounded fixture work",
+          estimate["action"] == "NORMAL" and estimate["compute_class"] == "SMALL"
+          and estimate["predicted_seconds"] < estimate["deadline_seconds"], str(estimate))
 
     # Point-in-time membership changes: BBB is known but only becomes effective
     # halfway through the evaluation window. Both engines must admit it then.
@@ -77,6 +81,17 @@ try:
     bulk2 = bulk_replay.simulate(c2, store).trades
     check("bulk replay preserves point-in-time membership and price signals",
           bulk2 == legacy2, f"legacy={legacy2} bulk={bulk2}")
+
+    store.append("bse_announcement", "RELIANCE", "2024-02-01", "2024-02-01",
+                 "fixture", {"headline": "fixture only"})
+    event_contract = contract("BULK-EVENT", "watchlist", "2024-01-25", "2024-03-25", [
+        {"metric": "event_frequency_zscore", "op": ">", "value": 1.0,
+         "window_days": 20},
+    ])
+    event_estimate = bulk_replay.estimate_workload(event_contract, store)
+    check("non-empty event history is deferred to the exact heavy path",
+          event_estimate["action"] == "DEFER_TO_HEAVY_QUEUE"
+          and event_estimate["compute_class"] == "OVERSIZED", str(event_estimate))
 
     delayed = Store.open(tmp / "delayed.db")
     try:

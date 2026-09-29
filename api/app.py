@@ -107,7 +107,7 @@ from control import resources as rg  # noqa: E402 — outcome 1: the Resource Go
 from control import capacity as capacity_planner  # noqa: E402 — Phase 10.5 allocation plan
 
 APP_NAME = "living-quant-api"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 
 def _int_query_param(name: str, default: Optional[int]) -> tuple[Optional[int], Optional[Response]]:
@@ -261,6 +261,11 @@ def create_app() -> Flask:
     @auth.require_auth
     def research_worker_status():
         return jsonify(data.get_research_worker_status())
+
+    @app.route("/research/experiment-telemetry", methods=["GET"])
+    @auth.require_auth
+    def experiment_telemetry():
+        return jsonify(data.get_experiment_telemetry(data.get_default_store()))
 
     @app.route("/research/data-quality", methods=["GET"])
     @auth.require_auth

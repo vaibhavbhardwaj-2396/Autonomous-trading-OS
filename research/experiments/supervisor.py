@@ -28,6 +28,7 @@ from . import runner
 EXECUTION_LOG = Path(__file__).resolve().parents[1] / "experiment_executions.jsonl"
 FAILURE_REASONS = ("TIMEOUT", "WORKER_CRASH", "DATA_FAILURE", "VALIDATION_FAILURE",
                    "RESOURCE_LIMIT", "OTHER")
+AUTO_PAUSE_TIMEOUTS = 2
 
 
 def _append(row: dict, *, path: Path = EXECUTION_LOG) -> None:
@@ -61,12 +62,71 @@ def _abandon(contract_id: str, store: Store, registry_dir: Path, *, reason: str,
                                        "scientific_evidence": False})
 
 
+def _consecutive_timeouts(path: Path) -> int:
+    terminals = []
+    try:
+        for line in path.read_text(errors="replace").splitlines():
+            row = json.loads(line)
+            if row.get("state") in ("COMPLETED", "FAILED", "ABANDONED"):
+                terminals.append(row)
+    except (OSError, json.JSONDecodeError):
+        return 0
+    count = 0
+    for row in reversed(terminals):
+        if row.get("state") == "ABANDONED" and row.get("failure_reason") == "TIMEOUT":
+            count += 1
+        else:
+            break
+    return count
+
+
+def _auto_pause_after_timeout(path: Path) -> bool:
+    """Production-only fail-closed policy; tests use isolated log paths."""
+    if path.resolve() != EXECUTION_LOG.resolve() or _consecutive_timeouts(path) < AUTO_PAUSE_TIMEOUTS:
+        return False
+    from control import components
+    if components.get("EXPERIMENTS")["desired_state"] != "RUNNING":
+        return False
+    components.set_state(
+        "EXPERIMENTS", "PAUSED", reason="REPEATED_SYSTEMIC_EXPERIMENT_TIMEOUTS",
+        actor="experiment-supervisor", resume_policy="MANUAL")
+    notify = Path(__file__).resolve().parents[2] / "scripts" / "notify.py"
+    try:
+        subprocess.run([sys.executable, str(notify),
+            "Living Quant: experiment subsystem auto-paused after two consecutive "
+            "180-second timeouts. Backlog processing stopped; no scientific evidence "
+            "was created for operational failures."], timeout=30, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return True
+
+
 def run_supervised(contract_id: str, store: Store, *, registry_dir: Path = REGISTRY_DIR,
                    deadline_seconds: float = 180.0,
                    execution_log: Path = EXECUTION_LOG) -> dict:
     """Run one experiment with a real wall-clock deadline and hard cleanup."""
     if deadline_seconds <= 0:
         raise ValueError("deadline_seconds must be > 0")
+    from . import bulk_replay
+    contract = runner.load_runnable_contract(contract_id, registry_dir)
+    estimate = bulk_replay.estimate_workload(
+        contract, store, deadline_seconds=deadline_seconds)
+    estimate_detail = json.dumps(estimate, sort_keys=True, default=str)
+    if estimate["action"] != "NORMAL":
+        _event(contract_id, "QUEUED", deadline_seconds=deadline_seconds,
+               detail=estimate_detail, path=execution_log)
+        detail = (f"preflight {estimate['action']}: compute_class="
+                  f"{estimate['compute_class']}; {estimate.get('reason') or 'predicted runtime exceeds normal lane'}")
+        rm.record_research_note(
+            store, note=detail, source="research.experiments.supervisor",
+            extra={"contract_id":contract_id, "failure_reason":"RESOURCE_LIMIT",
+                   "scientific_evidence":False, "workload_estimate":estimate})
+        _event(contract_id, "FAILED", reason="RESOURCE_LIMIT", detail=detail,
+               deadline_seconds=deadline_seconds, path=execution_log)
+        return {"status":"deferred", "contract_id":contract_id,
+                "failure_reason":"RESOURCE_LIMIT", "detail":detail,
+                "workload_estimate":estimate}
     fd, result_name = tempfile.mkstemp(prefix=f"lq-{contract_id}-", suffix=".json")
     os.close(fd)
     result_file = Path(result_name)
@@ -74,7 +134,8 @@ def run_supervised(contract_id: str, store: Store, *, registry_dir: Path = REGIS
     cmd = [sys.executable, "-m", "research.experiments.supervisor", "--child",
            "--contract-id", contract_id, "--db", str(store.path),
            "--registry-dir", str(registry_dir), "--result", str(result_file)]
-    _event(contract_id, "QUEUED", deadline_seconds=deadline_seconds, path=execution_log)
+    _event(contract_id, "QUEUED", deadline_seconds=deadline_seconds,
+           detail=estimate_detail, path=execution_log)
     proc = subprocess.Popen(cmd, start_new_session=True)
     _event(contract_id, "RUNNING", pid=proc.pid, deadline_seconds=deadline_seconds,
            path=execution_log)
@@ -99,6 +160,7 @@ def run_supervised(contract_id: str, store: Store, *, registry_dir: Path = REGIS
         _abandon(contract_id, store, registry_dir, reason="TIMEOUT", detail=detail)
         _event(contract_id, "ABANDONED", reason="TIMEOUT", detail=detail,
                pid=proc.pid, path=execution_log)
+        _auto_pause_after_timeout(execution_log)
         result_file.unlink(missing_ok=True)
         return {"status": "abandoned", "contract_id": contract_id,
                 "failure_reason": "TIMEOUT", "detail": detail}

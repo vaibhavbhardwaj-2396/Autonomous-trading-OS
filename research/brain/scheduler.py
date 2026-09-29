@@ -189,7 +189,7 @@ class ExperimentOutcome(NamedTuple):
     serializable shape."""
 
     contract_id: str
-    outcome: str  # "reported" | "abandoned" | "rejected" | "error"
+    outcome: str  # "reported" | "abandoned" | "deferred" | "rejected" | "error"
     detail: str
 
 
@@ -238,6 +238,9 @@ def run_one_experiment(
             contract_id, store, registry_dir=registry_dir,
             deadline_seconds=deadline_seconds) if deadline_seconds is not None else
             runner.run_experiment(contract_id, store, registry_dir=registry_dir))
+        if result.get("status") == "deferred":
+            return ExperimentOutcome(contract_id=contract_id, outcome="deferred",
+                                     detail=result.get("detail") or "experiment deferred")
         if result.get("status") != "reported":
             return ExperimentOutcome(contract_id=contract_id, outcome="abandoned",
                                      detail=result.get("detail") or "experiment abandoned")

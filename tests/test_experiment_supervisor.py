@@ -74,6 +74,20 @@ check("restart recovery preserves a WORKER_CRASH reason",
       any(r.get("contract_id") == locked3.id and r.get("failure_reason") == "WORKER_CRASH"
           for r in [json.loads(x) for x in log.read_text().splitlines()]))
 
+policy_log = tmp / "policy.jsonl"
+policy_log.write_text("\n".join(json.dumps(r) for r in [
+    {"state":"ABANDONED","failure_reason":"TIMEOUT"},
+    {"state":"COMPLETED","failure_reason":None},
+    {"state":"ABANDONED","failure_reason":"TIMEOUT"},
+    {"state":"ABANDONED","failure_reason":"TIMEOUT"},
+]))
+check("two consecutive systemic timeouts trigger the auto-pause threshold",
+      supervisor._consecutive_timeouts(policy_log) == supervisor.AUTO_PAUSE_TIMEOUTS)
+with policy_log.open("a") as out:
+    out.write("\n" + json.dumps({"state":"COMPLETED","failure_reason":None}))
+check("a successful completion resets the systemic-timeout streak",
+      supervisor._consecutive_timeouts(policy_log) == 0)
+
 store.close(); shutil.rmtree(tmp)
 print(f"\n{PASSED} passed, {FAILED} failed")
 raise SystemExit(1 if FAILED else 0)

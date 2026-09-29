@@ -224,10 +224,10 @@ def clock_ban_violations(directory: Path) -> list[str]:
     if not directory.exists():
         return out
     for f in sorted(directory.rglob("*.py")):
-        # supervisor.py is operational process-control infrastructure, not a
-        # scientific computation: its wall clock defines deadlines and audit
-        # timestamps. The simulation it launches remains clock-banned.
-        if f.name == "supervisor.py":
+        # Supervisor/telemetry are operational infrastructure, not scientific
+        # computations: their wall clocks define deadlines and status age.
+        # The simulation they launch/report remains clock-banned.
+        if f.name in ("supervisor.py", "telemetry.py"):
             continue
         for lineno, line in enumerate(f.read_text().splitlines(), 1):
             stripped = line.strip()

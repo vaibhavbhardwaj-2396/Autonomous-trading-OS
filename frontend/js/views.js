@@ -42,11 +42,12 @@ async function load(path, containerId, render, failureMessage) {
 export async function renderOverview() {
   const results = [];
 
-  const [acctRes, riskRes, regimeRes, runtimeRes] = await Promise.all([
+  const [acctRes, riskRes, regimeRes, runtimeRes, experimentRes] = await Promise.all([
     apiGet("/account"),
     apiGet("/risk"),
     apiGet("/regime"),
     apiGet("/runtime/status"),
+    apiGet("/research/experiment-telemetry"),
   ]);
   if (runtimeRes.ok) {
     el("runtime-status-bar").innerHTML = (runtimeRes.data.indicators || []).map((s) => `<button class="status-pill" data-navigate="${esc(s.target)}" title="${esc(s.detail || '')}"><strong>${esc(s.label)}</strong><span>${esc(s.state)}</span><small>${esc(s.detail || '')}</small></button>`).join("");
@@ -56,6 +57,18 @@ export async function renderOverview() {
   } else {
     errorState(el("runtime-status-bar"), "Runtime status unavailable.");
   }
+  if (experimentRes.ok) {
+    const x = experimentRes.data;
+    el("overview-experiments").innerHTML = [
+      {label:"Experiments",value:x.state,cls:x.state==="RUNNING"?"good":"amber",detail:x.reason},
+      {label:"Queue",value:num(x.queue_depth,0),detail:`${num((x.status_counts||{}).locked,0)} locked`},
+      {label:"Current",value:x.current_contract||"Idle",detail:x.current_stage||x.process_state},
+      {label:"Progress",value:x.elapsed_seconds==null?"—":`${num(x.elapsed_seconds,1)}s`,detail:x.current_pid?`PID ${x.current_pid}`:"no active process"},
+      {label:"Last completion",value:dt(x.last_completion&&x.last_completion.timestamp)},
+      {label:"Median runtime",value:x.median_runtime_seconds==null?"—":`${num(x.median_runtime_seconds,2)}s`},
+      {label:"Last timeout",value:dt(x.last_timeout&&x.last_timeout.timestamp),cls:x.last_timeout?"amber":"good"},
+    ].map(c=>`<div class="card"><div class="label">${esc(c.label)}</div><div class="value ${c.cls||''}">${esc(c.value)}</div><div class="subtext">${esc(c.detail||'')}</div></div>`).join("");
+  } else errorState(el("overview-experiments"), "Experiment telemetry unavailable.");
   if (acctRes.ok) {
     el("overview-cards").innerHTML = accountCardsHtml(
       acctRes.data,
@@ -69,6 +82,7 @@ export async function renderOverview() {
   results.push({ ok: riskRes.ok, status: riskRes.status, error: riskRes.error });
   results.push({ ok: regimeRes.ok, status: regimeRes.status, error: regimeRes.error });
   results.push({ ok: runtimeRes.ok, status: runtimeRes.status, error: runtimeRes.error });
+  results.push({ ok: experimentRes.ok, status: experimentRes.status, error: experimentRes.error });
 
   results.push(
     await load("/positions", "overview-positions", (data) => {
@@ -465,6 +479,25 @@ export async function renderResearch() {
         { label: "Recent errors", value: num((data.recent_errors || []).length, 0), cls: (data.recent_errors || []).length ? "bad" : "good" },
       ].map((card) => `<div class="card"><div class="label">${esc(card.label)}</div><div class="value ${card.cls || ""}">${esc(card.value)}</div><div class="subtext">${esc(card.detail || "")}</div></div>`).join("");
     }, "Research worker telemetry unavailable")
+  );
+
+  results.push(
+    await load("/research/experiment-telemetry", "research-experiment-cards", (data) => {
+      const p = data.latest_profile || {};
+      el("research-experiment-cards").innerHTML = [
+        {label:"State",value:data.state,cls:data.state==="RUNNING"?"good":"amber",detail:data.reason},
+        {label:"Engine",value:p.engine||"—"},
+        {label:"Compute",value:p.compute_class||"measured",detail:p.rows_processed?`${num(p.rows_processed,0)} rows`:"no completed profile"},
+        {label:"Runtime",value:p.wall_seconds==null?"—":`${num(p.wall_seconds,3)}s`},
+        {label:"Symbols",value:num(p.symbols_processed,0)},
+        {label:"Peak memory",value:p.peak_rss_bytes?`${num(p.peak_rss_bytes/1048576,1)} MiB`:"—"},
+        {label:"DB queries",value:num(p.db_query_count,0)},
+        {label:"Timeouts 24h",value:num(data.timeouts_24h,0),cls:data.timeouts_24h?"amber":"good"},
+      ].map(c=>`<div class="card"><div class="label">${esc(c.label)}</div><div class="value ${c.cls||''}">${esc(c.value)}</div><div class="subtext">${esc(c.detail||'')}</div></div>`).join("");
+      table(el("research-experiment-stages"), [
+        {key:"stage",label:"Stage"},{key:"seconds",label:"Wall time",cell:r=>`<td class="num">${num(r.seconds,4)}s</td>`},
+      ], Object.entries(p.stages||{}).map(([stage,seconds])=>({stage,seconds})), "No completed execution profile yet.");
+    }, "Experiment telemetry unavailable")
   );
 
   results.push(
@@ -866,6 +899,15 @@ export async function renderSystem() {
       {label:"Phase 11",value:data.phase_11,cls:"amber"},
     ].map(c=>`<div class="card"><div class="label">${esc(c.label)}</div><div class="value ${c.cls||''}">${esc(c.value)}</div></div>`).join("");
   }, "System status unavailable"));
+  results.push(await load("/research/experiment-telemetry", "system-experiments", (x) => {
+    el("system-experiments").innerHTML = [
+      {label:"Worker",value:x.process_state,cls:x.process_state==="RUNNING"?"good":""},
+      {label:"PID",value:x.current_pid||"—"},{label:"Queue",value:num(x.queue_depth,0)},
+      {label:"Contract",value:x.current_contract||"Idle"},{label:"Stage",value:x.current_stage||"—"},
+      {label:"Last heartbeat",value:dt(x.as_of)},{label:"Last success",value:dt(x.last_completion&&x.last_completion.timestamp)},
+      {label:"Timeouts / 24h",value:num(x.timeouts_24h,0),cls:x.timeouts_24h?"amber":"good"},
+    ].map(c=>`<div class="card"><div class="label">${esc(c.label)}</div><div class="value ${c.cls||''}">${esc(c.value)}</div></div>`).join("");
+  }, "Experiment worker telemetry unavailable"));
   return results;
 }
 

@@ -66,11 +66,11 @@ check("A: api.wsgi.app is a Flask application instance", isinstance(api_wsgi.app
 
 _wsgi_rules = list(api_wsgi.app.url_map.iter_rules())
 _wsgi_routes = sorted({r.rule for r in _wsgi_rules if r.rule != "/static/<path:filename>"})
-check("A: api.wsgi.app has the expected route count (37, including reconciled system/activity/component control routes: /health + 15 live/operational + "
+check("A: api.wsgi.app has the expected route count (38, including reconciled system/activity/component control routes: /health + 16 live/operational + "
       "6 paper/shadow — Slice AA + 2 global control — Priority Phase 4 + "
       "5 outcome 2/resource-governor routes: /resources/status, /ai/status, "
       "/ai/config, /artifacts, /artifacts/<id>; worker/data/operations telemetry)",
-      len(_wsgi_routes) == 37, str(_wsgi_routes))
+      len(_wsgi_routes) == 38, str(_wsgi_routes))
 check("A: /health is present on the WSGI entrypoint", "/health" in _wsgi_routes)
 check("A: /account is present on the WSGI entrypoint", "/account" in _wsgi_routes)
 

@@ -242,6 +242,11 @@ check("System view renders reconciled scheduler, heartbeat and dependency state"
   VIEWS_SRC.includes('apiGet("/system/status")')
   && VIEWS_SRC.includes('key:"scheduler_state"')
   && VIEWS_SRC.includes('key:"heartbeat_state"'));
+check("experiment runtime telemetry is visible without adding a top-level page",
+  VIEWS_SRC.includes('apiGet("/research/experiment-telemetry")')
+  && INDEX_SRC.includes('id="overview-experiments"')
+  && INDEX_SRC.includes('id="research-experiment-stages"')
+  && INDEX_SRC.includes('id="system-experiments"'));
 check("Overview activity uses the unified operational and research feed",
   VIEWS_SRC.includes('load("/activity?limit=20"'));
 check("Admin component controls call only the audited component endpoint",

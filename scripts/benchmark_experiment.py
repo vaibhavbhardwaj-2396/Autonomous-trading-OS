@@ -12,9 +12,12 @@ import argparse
 import copy
 import json
 import resource
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from research.contracts import Contract, REGISTRY_DIR
 from research.experiments import runner

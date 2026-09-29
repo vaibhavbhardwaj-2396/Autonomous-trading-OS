@@ -31,6 +31,8 @@ from ..store import IST, Store, to_dt, ts
 
 FEATURE_VERSION = "bulk_price_features_v1"
 BATCH_SIZE = 400
+# Calibrated on the production one-vCPU VPS on 26 September 2026.
+CALIBRATION = ((38_431, 0.603), (161_040, 2.881), (459_325, 16.359))
 
 
 @dataclass
@@ -41,6 +43,22 @@ class BulkResult:
 
 class BulkReplayUnsupported(RuntimeError):
     """Dataset/contract needs the exact legacy bitemporal replay path."""
+
+
+def compute_class(rows: int, *, compatible: bool = True) -> str:
+    if not compatible or rows > 600_000: return "OVERSIZED"
+    if rows <= 75_000: return "SMALL"
+    if rows <= 250_000: return "MEDIUM"
+    return "LARGE"
+
+
+def _predicted_seconds(rows: int) -> float:
+    points = CALIBRATION
+    if rows <= points[0][0]: return points[0][1] * max(rows, 1) / points[0][0]
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if rows <= x1:
+            return y0 + (rows - x0) * (y1 - y0) / (x1 - x0)
+    return points[-1][1] * rows / points[-1][0]
 
 
 def _rss_bytes() -> int:
@@ -144,6 +162,43 @@ def _load_prices(store: Store, symbols: list[str], start: str, end: str) -> tupl
     return rows, query_count
 
 
+def estimate_workload(contract: Contract, store: Store, *, deadline_seconds: float = 180.0) -> dict:
+    """Measured-calibration preflight; no contract or scientific state changes."""
+    entry_rule = json.loads(contract.entry_rule)
+    days = _trading_days(store, str(contract.evaluation_start), str(contract.evaluation_end))
+    if not days:
+        return {"compute_class":"SMALL", "action":"NORMAL", "sessions":0,
+                "symbols":0, "rows":0, "features":len(entry_rule["conditions"]),
+                "predicted_seconds":0.0, "calibration":CALIBRATION}
+    universes, _ = _resolve_universes(store, contract, days)
+    symbols = sorted({s for universe in universes for s in universe})
+    load_start = _load_start(store, days[0], _required_rows(entry_rule))
+    conn = store._unsafe_connection(); rows = 0
+    for offset in range(0, len(symbols), BATCH_SIZE):
+        batch = symbols[offset:offset+BATCH_SIZE]; marks = ",".join("?" for _ in batch)
+        rows += int(conn.execute(
+            f"SELECT COUNT(*) FROM prices_eod WHERE symbol IN ({marks}) AND adjusted=0 "
+            "AND session_date>=? AND session_date<=? AND knowledge_ts<=?",
+            [*batch, load_start, days[-1], _gate(days[-1])]).fetchone()[0])
+    compatible = True; reason = None
+    if any(c["metric"] == "event_frequency_zscore" for c in entry_rule["conditions"]):
+        present = conn.execute(
+            "SELECT 1 FROM observations WHERE dataset='bse_announcement' "
+            "AND event_ts>=? AND event_ts<=? AND knowledge_ts<=? LIMIT 1",
+            (ts(load_start), ts(days[-1], end_of_day=True), _gate(days[-1]))).fetchone()
+        if present is not None:
+            compatible = False; reason = "non-empty event history requires exact legacy joins"
+    predicted = _predicted_seconds(rows) if compatible else None
+    klass = compute_class(rows, compatible=compatible)
+    action = "NORMAL" if predicted is not None and predicted <= deadline_seconds else (
+        "PARTITION" if compatible else "DEFER_TO_HEAVY_QUEUE")
+    return {"compute_class":klass, "action":action, "sessions":len(days),
+            "symbols":len(symbols), "rows":rows, "features":len(entry_rule["conditions"]),
+            "predicted_seconds":round(predicted,3) if predicted is not None else None,
+            "deadline_seconds":deadline_seconds, "reason":reason,
+            "calibration":{"vps":"one_vcpu_2026-09-26", "points":CALIBRATION}}
+
+
 def _canonical_or_raise(rows: list[dict]) -> None:
     seen = set()
     for row in rows:
@@ -224,8 +279,7 @@ def simulate(contract: Contract, store: Store) -> BulkResult:
     entry_rule = json.loads(contract.entry_rule)
     exit_rule = json.loads(contract.exit_rule)
     conditions = entry_rule["conditions"]
-    if any(c["metric"] == "event_frequency_zscore" for c in conditions):
-        raise BulkReplayUnsupported("event-frequency joins are not yet bulk-equivalent")
+    uses_events = any(c["metric"] == "event_frequency_zscore" for c in conditions)
 
     started = time.perf_counter()
     days = _trading_days(store, str(contract.evaluation_start), str(contract.evaluation_end))
@@ -249,6 +303,18 @@ def simulate(contract: Contract, store: Store) -> BulkResult:
     required = _required_rows(entry_rule)
     load_start = _load_start(store, days[0], required)
     profile["db_query_count"] += 1
+    if uses_events:
+        event_started = time.perf_counter()
+        event_row = store._unsafe_connection().execute(
+            "SELECT 1 FROM observations WHERE dataset='bse_announcement' "
+            "AND event_ts>=? AND event_ts<=? AND knowledge_ts<=? LIMIT 1",
+            (ts(load_start), ts(days[-1], end_of_day=True), _gate(days[-1])),
+        ).fetchone()
+        profile["db_query_count"] += 1
+        _timed(profile, "event_joins", event_started)
+        if event_row is not None:
+            raise BulkReplayUnsupported(
+                "non-empty event-frequency history requires exact legacy event joins")
     rows, queries = _load_prices(store, symbols, load_start, days[-1])
     profile["db_query_count"] += queries
     _canonical_or_raise(rows)
@@ -314,7 +380,7 @@ def simulate(contract: Contract, store: Store) -> BulkResult:
     signals &= membership
     _timed(profile, "signal_generation", started)
     profile["stages"]["cross_sectional_calculations"] = 0.0
-    profile["stages"]["event_joins"] = 0.0
+    profile["stages"].setdefault("event_joins", 0.0)
     profile["stages"]["walk_forward"] = 0.0
     profile["stages"]["robustness_passes"] = 0.0
 
@@ -378,4 +444,6 @@ def simulate(contract: Contract, store: Store) -> BulkResult:
     profile["cpu_seconds"] = round(time.process_time() - cpu_started, 6)
     profile["peak_rss_bytes"] = _rss_bytes()
     profile["sessions_processed"] = len(days)
+    profile["compute_class"] = compute_class(len(rows))
+    profile["partitions"] = {"completed": 1, "total": 1}
     return BulkResult(trades, profile)

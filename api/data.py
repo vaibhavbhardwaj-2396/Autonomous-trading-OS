@@ -60,6 +60,7 @@ from research.data_quality import build_data_quality_report
 from research.brain import draft_backlog, research_areas
 from research.brain import digest as digest_mod
 from research.brain import worker as research_worker
+from research.experiments import telemetry as experiment_telemetry
 from strategies import registry as sreg
 
 from . import broker_truth
@@ -481,6 +482,14 @@ def get_research_worker_status() -> dict:
         return research_worker.worker_status()
     except Exception as e:
         raise DataSourceError("research worker telemetry is unavailable") from e
+
+
+def get_experiment_telemetry(store: Store) -> dict:
+    """Current queue/process state plus persisted execution profiles."""
+    try:
+        return experiment_telemetry.get_status(store)
+    except Exception as e:
+        raise DataSourceError("experiment telemetry is unavailable") from e
 
 
 def get_data_quality() -> dict:

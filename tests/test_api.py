@@ -70,6 +70,7 @@ client = app.test_client()
 PROTECTED_GET_ROUTES = [
     "/account", "/positions", "/orders", "/trades", "/risk", "/regime",
     "/research/drafts", "/research/evidence", "/research/areas", "/research/worker-status",
+    "/research/experiment-telemetry",
     "/research/data-quality", "/operations/status",
     "/strategies", "/backtests",
 ]
@@ -255,6 +256,12 @@ worker_status = r.get_json()
 check("E: /research/worker-status exposes telemetry and queue admission without running work",
       {"heartbeats_recorded", "last_heartbeat_at", "last_queue_health", "recent_errors"}
       <= worker_status.keys(), str(worker_status))
+
+r = client.get("/research/experiment-telemetry", headers=AUTH)
+experiment_status = r.get_json()
+check("E: /research/experiment-telemetry exposes queue, process and runtime profile state",
+      {"state", "queue_depth", "process_state", "timeouts_24h", "latest_profile"}
+      <= experiment_status.keys(), str(experiment_status))
 
 r = client.get("/strategies", headers=AUTH)
 check("E: /strategies returns an empty list cleanly on the real registry",
