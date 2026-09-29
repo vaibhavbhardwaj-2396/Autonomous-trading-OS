@@ -124,6 +124,7 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 
 | Commit | Delivered |
 |---|---|
+| `6428831` | complete experiment queue-wait, deadline, partition, cancellation and resource telemetry in existing UI views |
 | `881e249` | calibrated experiment admission, timeout auto-pause, API/UI execution telemetry and scaling controls |
 | `ab665dc` | point-in-time bulk experiment replay, exact legacy equivalence tests and 17.7× production speedup |
 | `6ce7bb3` | bounded per-session point-in-time price-window cache and streamed replay steps |
