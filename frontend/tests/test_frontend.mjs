@@ -246,7 +246,10 @@ check("experiment runtime telemetry is visible without adding a top-level page",
   VIEWS_SRC.includes('apiGet("/research/experiment-telemetry")')
   && INDEX_SRC.includes('id="overview-experiments"')
   && INDEX_SRC.includes('id="research-experiment-stages"')
-  && INDEX_SRC.includes('id="system-experiments"'));
+  && INDEX_SRC.includes('id="system-experiments"')
+  && VIEWS_SRC.includes('{label:"Partitions"')
+  && VIEWS_SRC.includes('{label:"Queue wait"')
+  && VIEWS_SRC.includes('{label:"Last cancellation"'));
 check("Overview activity uses the unified operational and research feed",
   VIEWS_SRC.includes('load("/activity?limit=20"'));
 check("Admin component controls call only the audited component endpoint",

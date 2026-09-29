@@ -36,6 +36,10 @@ rm.record_research_note(store, note="done", source="research.experiments.runner"
 log.write_text("\n".join(json.dumps(x) for x in [
     {"timestamp":(now-dt.timedelta(hours=2)).isoformat(),"contract_id":"OLD",
      "state":"ABANDONED","failure_reason":"TIMEOUT","pid":None},
+    {"timestamp":(now-dt.timedelta(seconds=63)).isoformat(),"contract_id":"EXP-TEL",
+     "state":"QUEUED","failure_reason":None,"pid":None},
+    {"timestamp":(now-dt.timedelta(seconds=62)).isoformat(),"contract_id":"EXP-TEL",
+     "state":"RUNNING","failure_reason":None,"pid":123},
     {"timestamp":(now-dt.timedelta(minutes=1)).isoformat(),"contract_id":"EXP-TEL",
      "state":"COMPLETED","failure_reason":None,"pid":123},
 ]))
@@ -46,9 +50,15 @@ try:
 finally:
     telemetry.components.get = original
 check("telemetry reports desired state and queue", status["state"] == "RUNNING" and status["queue_depth"] == 1, status)
-check("telemetry exposes last completion and timeout count", status["last_completion"]["contract_id"] == "EXP-TEL" and status["timeouts_24h"] == 1, status)
+check("telemetry exposes last completion and timeout count",
+      status["last_completion"]["contract_id"] == "EXP-TEL"
+      and status["last_completion"]["queue_wait_seconds"] == 1.0
+      and status["last_completion"]["execution_seconds"] == 2.0
+      and status["timeouts_24h"] == 1, status)
 check("telemetry exposes persisted runtime profile", status["latest_profile"]["engine"] == "bulk_price_features_v1" and status["median_runtime_seconds"] == 2.5, status)
 check("terminal completion is not reported as a live PID", status["process_state"] == "IDLE" and status["current_pid"] is None, status)
+check("telemetry exposes the latest lifecycle event timestamp",
+      status["last_event_at"] == status["last_completion"]["timestamp"], status)
 store.close(); shutil.rmtree(tmp, ignore_errors=True)
 print(f"\n{PASSED} passed, {FAILED} failed")
 raise SystemExit(1 if FAILED else 0)

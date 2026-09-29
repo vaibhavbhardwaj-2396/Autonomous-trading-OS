@@ -7,6 +7,7 @@ import json
 import os
 import statistics
 from pathlib import Path
+from typing import Optional
 
 from control import components
 from .. import memory as rm
@@ -41,6 +42,28 @@ def _parse(value):
     except (TypeError, ValueError): return None
 
 
+def _seconds_between(first: Optional[dict], second: Optional[dict]) -> Optional[float]:
+    start = _parse(first.get("timestamp")) if first else None
+    end = _parse(second.get("timestamp")) if second else None
+    return round(max(0.0, (end - start).total_seconds()), 3) if start and end else None
+
+
+def _lifecycle(events: list[dict], terminal: Optional[dict]) -> Optional[dict]:
+    if terminal is None:
+        return None
+    contract_id = terminal.get("contract_id")
+    cutoff = events.index(terminal)
+    prior = [event for event in events[:cutoff]
+             if event.get("contract_id") == contract_id]
+    queued = next((event for event in reversed(prior)
+                   if event.get("state") == "QUEUED"), None)
+    running = next((event for event in reversed(prior)
+                    if event.get("state") == "RUNNING"), None)
+    return {**terminal,
+            "queue_wait_seconds": _seconds_between(queued, running),
+            "execution_seconds": _seconds_between(running, terminal)}
+
+
 def get_status(store: Store, *, execution_log: Path = EXECUTION_LOG,
                registry_dir: Path = REGISTRY_DIR) -> dict:
     events = _events(execution_log)
@@ -51,9 +74,11 @@ def get_status(store: Store, *, execution_log: Path = EXECUTION_LOG,
                     if e.get("state") in ("RUNNING", "CANCEL_REQUESTED")
                     and latest_by_contract.get(e.get("contract_id")) is e
                     and _alive(e.get("pid"))), None)
-    completed = next((e for e in reversed(events) if e.get("state") == "COMPLETED"), None)
-    timeout = next((e for e in reversed(events) if e.get("state") == "ABANDONED"
-                    and e.get("failure_reason") == "TIMEOUT"), None)
+    completed = _lifecycle(events, next(
+        (e for e in reversed(events) if e.get("state") == "COMPLETED"), None))
+    timeout = _lifecycle(events, next(
+        (e for e in reversed(events) if e.get("state") == "ABANDONED"
+         and e.get("failure_reason") == "TIMEOUT"), None))
     cutoff = now_ist() - dt.timedelta(hours=24)
     timeouts_24h = sum(1 for e in events if e.get("state") == "ABANDONED"
                        and e.get("failure_reason") == "TIMEOUT"
@@ -71,6 +96,9 @@ def get_status(store: Store, *, execution_log: Path = EXECUTION_LOG,
               for state in ("draft", "locked", "running", "reported", "abandoned")}
     started = _parse(running.get("timestamp")) if running else None
     elapsed = max(0.0, (now_ist() - started).total_seconds()) if started else None
+    current_queued = next((e for e in reversed(events)
+                           if running and e.get("contract_id") == running.get("contract_id")
+                           and e.get("state") == "QUEUED"), None)
     state = components.get("EXPERIMENTS")
     return {
         "state": state["desired_state"], "reason": state.get("reason"),
@@ -81,6 +109,9 @@ def get_status(store: Store, *, execution_log: Path = EXECUTION_LOG,
         "current_stage": "cancelling" if running and running.get("state") == "CANCEL_REQUESTED"
                          else ("simulation" if running else None),
         "elapsed_seconds": round(elapsed, 3) if elapsed is not None else None,
+        "current_deadline_seconds": running.get("deadline_seconds") if running else None,
+        "current_queue_wait_seconds": _seconds_between(current_queued, running),
+        "last_event_at": events[-1].get("timestamp") if events else None,
         "last_completion": completed,
         "last_timeout": timeout,
         "timeouts_24h": timeouts_24h,

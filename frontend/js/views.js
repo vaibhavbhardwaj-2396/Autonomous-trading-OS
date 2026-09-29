@@ -63,10 +63,10 @@ export async function renderOverview() {
       {label:"Experiments",value:x.state,cls:x.state==="RUNNING"?"good":"amber",detail:x.reason},
       {label:"Queue",value:num(x.queue_depth,0),detail:`${num((x.status_counts||{}).locked,0)} locked`},
       {label:"Current",value:x.current_contract||"Idle",detail:x.current_stage||x.process_state},
-      {label:"Progress",value:x.elapsed_seconds==null?"—":`${num(x.elapsed_seconds,1)}s`,detail:x.current_pid?`PID ${x.current_pid}`:"no active process"},
+      {label:"Progress",value:x.elapsed_seconds==null?"—":`${num(x.elapsed_seconds,1)}s / ${num(x.current_deadline_seconds,0)}s`,detail:x.current_pid?`PID ${x.current_pid}`:"no active process"},
       {label:"Last completion",value:dt(x.last_completion&&x.last_completion.timestamp)},
       {label:"Median runtime",value:x.median_runtime_seconds==null?"—":`${num(x.median_runtime_seconds,2)}s`},
-      {label:"Last timeout",value:dt(x.last_timeout&&x.last_timeout.timestamp),cls:x.last_timeout?"amber":"good"},
+      {label:"Last timeout",value:dt(x.last_timeout&&x.last_timeout.timestamp),cls:x.timeouts_24h?"amber":"good",detail:x.last_timeout&&x.last_timeout.failure_reason},
     ].map(c=>`<div class="card"><div class="label">${esc(c.label)}</div><div class="value ${c.cls||''}">${esc(c.value)}</div><div class="subtext">${esc(c.detail||'')}</div></div>`).join("");
   } else errorState(el("overview-experiments"), "Experiment telemetry unavailable.");
   if (acctRes.ok) {
@@ -492,7 +492,10 @@ export async function renderResearch() {
         {label:"Symbols",value:num(p.symbols_processed,0)},
         {label:"Peak memory",value:p.peak_rss_bytes?`${num(p.peak_rss_bytes/1048576,1)} MiB`:"—"},
         {label:"DB queries",value:num(p.db_query_count,0)},
+        {label:"Partitions",value:p.partitions?`${num(p.partitions.completed,0)} / ${num(p.partitions.total,0)}`:"—"},
+        {label:"Queue wait",value:data.last_completion&&data.last_completion.queue_wait_seconds!=null?`${num(data.last_completion.queue_wait_seconds,3)}s`:"—"},
         {label:"Timeouts 24h",value:num(data.timeouts_24h,0),cls:data.timeouts_24h?"amber":"good"},
+        {label:"Last cancellation",value:data.last_timeout?data.last_timeout.failure_reason:"None",cls:data.timeouts_24h?"amber":"good",detail:data.last_timeout&&data.last_timeout.detail},
       ].map(c=>`<div class="card"><div class="label">${esc(c.label)}</div><div class="value ${c.cls||''}">${esc(c.value)}</div><div class="subtext">${esc(c.detail||'')}</div></div>`).join("");
       table(el("research-experiment-stages"), [
         {key:"stage",label:"Stage"},{key:"seconds",label:"Wall time",cell:r=>`<td class="num">${num(r.seconds,4)}s</td>`},
@@ -904,7 +907,8 @@ export async function renderSystem() {
       {label:"Worker",value:x.process_state,cls:x.process_state==="RUNNING"?"good":""},
       {label:"PID",value:x.current_pid||"—"},{label:"Queue",value:num(x.queue_depth,0)},
       {label:"Contract",value:x.current_contract||"Idle"},{label:"Stage",value:x.current_stage||"—"},
-      {label:"Last heartbeat",value:dt(x.as_of)},{label:"Last success",value:dt(x.last_completion&&x.last_completion.timestamp)},
+      {label:"Last event",value:dt(x.last_event_at)},{label:"Last success",value:dt(x.last_completion&&x.last_completion.timestamp)},
+      {label:"Peak RSS",value:(x.latest_profile||{}).peak_rss_bytes?`${num(x.latest_profile.peak_rss_bytes/1048576,1)} MiB`:"—"},
       {label:"Timeouts / 24h",value:num(x.timeouts_24h,0),cls:x.timeouts_24h?"amber":"good"},
     ].map(c=>`<div class="card"><div class="label">${esc(c.label)}</div><div class="value ${c.cls||''}">${esc(c.value)}</div></div>`).join("");
   }, "Experiment worker telemetry unavailable"));
