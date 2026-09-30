@@ -134,6 +134,7 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 
 | Commit | Delivered |
 |---|---|
+| `e4ef796` | final integrated operating product: provider-neutral capability routing and benchmark, significance-gated ResearchPackets, family-wise research governance, autonomous evidence-to-strategy/paper learning loop, product command center, scientific watchdog and daily digest |
 | `6428831` | complete experiment queue-wait, deadline, partition, cancellation and resource telemetry in existing UI views |
 | `881e249` | calibrated experiment admission, timeout auto-pause, API/UI execution telemetry and scaling controls |
 | `ab665dc` | point-in-time bulk experiment replay, exact legacy equivalence tests and 17.7× production speedup |
