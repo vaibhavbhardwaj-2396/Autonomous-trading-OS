@@ -40,7 +40,7 @@ def get_runtime_status(store) -> dict:
     indicators = [
         {"key":"system", "label":"SYSTEM", "state":system_state, "detail":f"{len(reconciled.get('alerts', []))} watchdog alerts", "target":"system"},
         {"key":"research", "label":"RESEARCH", "state":research_state, "detail":(effective.get("RESEARCH_AI") or {}).get("reason"), "target":"research"},
-        {"key":"ai", "label":"AI", "state":f"{ai['effective_provider'].upper()} / {'CONNECTED' if ai_connected else 'NOT CONFIGURED'}", "target":"control"},
+        {"key":"ai", "label":"AI", "state":f"{(ai['effective_provider'] or 'NONE').upper()} / {'CONNECTED' if ai_connected else 'NO PROVIDER CONFIGURED'}", "target":"control"},
         {"key":"data", "label":"DATA", "state":(effective.get("DATA") or {}).get("effective_state") or op["recorder"]["state"], "detail":(effective.get("DATA") or {}).get("reason"), "target":"research"},
         {"key":"broker", "label":"BROKER", "state":"SEE ACCOUNT", "target":"trading"},
         {"key":"paper", "label":"PAPER", "state":"WAITING" if not campaign["paper_readiness"]["ready"] else ((effective.get("PAPER") or {}).get("effective_state") or "READY"), "detail":"No eligible StrategyVersion" if not campaign["paper_readiness"]["ready"] else (effective.get("PAPER") or {}).get("reason"), "target":"paper"},
@@ -69,13 +69,13 @@ def get_runtime_status(store) -> dict:
         "dependencies": [row["dependency_state"]],
     } for row in reconciled.get("components", [])]
     matrix.append({"module":"AI_GATEWAY", "expected_state":"provider-neutral",
-                   "actual_state":"CONNECTED" if ai_connected else "OPENAI_PROVIDER_NOT_CONFIGURED",
+                   "actual_state":"CONNECTED" if ai_connected else "NO_PROVIDER_CONFIGURED",
                    "scheduler_state":"N/A", "heartbeat_state":"N/A",
                    "dependency_state":"READY" if ai_connected else "NOT_CONFIGURED",
                    "last_successful_run":ai["budget"].get("last_call_at"),
                    "last_attempt":ai["budget"].get("last_call_at"), "next_expected_run":None,
-                   "last_error":None if ai_connected else "server-side developer API credential absent",
-                   "queue_depth":queue, "dependencies":["OPENAI_API_KEY"]})
+                   "last_error":None if ai_connected else "no enabled route has a server-side provider credential",
+                   "queue_depth":queue, "dependencies":["ANY_CONFIGURED_PROVIDER"]})
     return {"as_of": now_ist().isoformat(), "indicators": indicators, "active_work": active,
             "runtime_matrix": matrix, "funnel": campaign["funnel"], "conversion": campaign["conversion"],
             "velocity": campaign.get("velocity", {}), "backlog": campaign.get("backlog", {}),

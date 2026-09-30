@@ -42,13 +42,41 @@ async function load(path, containerId, render, failureMessage) {
 export async function renderOverview() {
   const results = [];
 
-  const [acctRes, riskRes, regimeRes, runtimeRes, experimentRes] = await Promise.all([
+  const [acctRes, riskRes, regimeRes, runtimeRes, experimentRes, productRes] = await Promise.all([
     apiGet("/account"),
     apiGet("/risk"),
     apiGet("/regime"),
     apiGet("/runtime/status"),
     apiGet("/research/experiment-telemetry"),
+    apiGet("/product/status"),
   ]);
+  if (productRes.ok) {
+    const product = productRes.data;
+    const labels = {packets:"Packets",hypotheses:"Hypotheses",experiments:"Experiments",
+      rejected:"Rejected",inconclusive:"Inconclusive",promising:"Promising",robust:"Robust",
+      strategies:"Strategies",paper_trades:"Paper trades"};
+    el("today-research").innerHTML = Object.entries(labels).map(([key,label]) =>
+      `<button class="card clickable-card" data-navigate="${key === 'strategies' ? 'strategies' : key === 'paper_trades' ? 'paper' : 'research'}"><div class="label">${esc(label)}</div><div class="value">${num(product.today[key],0)}</div></button>`).join("");
+    el("research-organization").innerHTML = (product.organization || []).map((node, i) =>
+      `${i === 0 ? '' : '<span class="org-connector">›</span>'}<button class="workflow-node ${String(node.status).toLowerCase()}" data-workflow="${esc(node.id)}"><span>${esc(node.label)}</span><strong>${esc(node.status)}</strong><small>${esc(node.current_work)}</small></button>`).join("");
+    const showWorkflow = (node) => {
+      el("workflow-detail").innerHTML = `<div><strong>${esc(node.label)}</strong> — ${esc(node.status)}</div><div>${esc(node.current_work)}</div><div class="subtext">Capability: ${esc(node.capability)} · Provider/model: ${esc(node.provider || 'deterministic')} / ${esc(node.model || '—')} · Last run: ${dt(node.last_run)} · Outputs: ${num(node.outputs,0)} · Cost: ${node.cost == null ? 'unknown' : esc(node.cost)}</div><button class="link-btn" data-navigate="${esc(node.target)}">Open workflow</button>`;
+    };
+    el("research-organization").querySelectorAll("[data-workflow]").forEach((button) => button.addEventListener("click", () => {
+      const node = product.organization.find((row) => row.id === button.dataset.workflow);
+      if (node) showWorkflow(node);
+    }));
+    table(el("current-research"), [
+      {key:"title",label:"Investigation",cell:(r)=>`<td><button class="link-btn" data-navigate="research">${esc(r.title)}</button><div class="subtext">${esc(r.id)}</div></td>`},
+      {key:"status",label:"State",cell:(r)=>`<td>${badge(r.status,r.status)}</td>`},
+      {key:"why",label:"Why this exists"},
+      {key:"artifact_id",label:"Lineage",cell:(r)=>`<td><button class="link-btn" data-navigate="artifacts">${esc(r.artifact_id)}</button></td>`},
+    ], product.current_research || [], "No investigation is currently active; deterministic observation continues.");
+    el("research-timeline").innerHTML = (product.timeline || []).map((item) =>
+      `<button class="timeline-item" data-navigate="artifacts"><time>${dt(item.timestamp)}</time><span>${esc(item.summary)}</span><small>${esc(item.type)} · ${esc(item.status || '')}</small></button>`).join("") || '<div class="empty-state">No research events have been recorded.</div>';
+  } else {
+    ["today-research","research-organization","current-research","research-timeline"].forEach((id) => errorState(el(id), "Product status unavailable."));
+  }
   if (runtimeRes.ok) {
     el("runtime-status-bar").innerHTML = (runtimeRes.data.indicators || []).map((s) => `<button class="status-pill" data-navigate="${esc(s.target)}" title="${esc(s.detail || '')}"><strong>${esc(s.label)}</strong><span>${esc(s.state)}</span><small>${esc(s.detail || '')}</small></button>`).join("");
     el("active-work").innerHTML = `<ul class="active-work-list">${(runtimeRes.data.active_work || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
@@ -83,6 +111,7 @@ export async function renderOverview() {
   results.push({ ok: regimeRes.ok, status: regimeRes.status, error: regimeRes.error });
   results.push({ ok: runtimeRes.ok, status: runtimeRes.status, error: runtimeRes.error });
   results.push({ ok: experimentRes.ok, status: experimentRes.status, error: experimentRes.error });
+  results.push({ ok: productRes.ok, status: productRes.status, error: productRes.error });
 
   results.push(
     await load("/positions", "overview-positions", (data) => {
@@ -364,6 +393,7 @@ export async function renderPaper() {
           { key: "algorithm_id", label: "Algorithm" },
           { key: "approved_by", label: "Approved By" },
           { key: "approved_at", label: "Approved", cell: (r) => `<td>${dt(r.approved_at)}</td>` },
+          { key: "health", label: "Health", cell: (r) => `<td>${badge((r.health||{}).state,(r.health||{}).state)}<div class="subtext">${esc((r.health||{}).reason||'')}</div></td>` },
         ],
         data.strategies,
         "No StrategyVersion is currently paper-eligible."
@@ -453,6 +483,10 @@ function paperCardsHtml(acct, perf) {
       })</span>`,
     });
     cards.push({ label: "Open Paper Positions", value: num(perf.open_position_count, 0) });
+    cards.push({ label: "Drawdown", value: perf.drawdown_pct == null ? "—" : `${num(perf.drawdown_pct,2)}%`, cls: perf.drawdown_pct > 10 ? "bad" : "good" });
+    cards.push({ label: "Gross Exposure", value: `${money(perf.gross_exposure)} · ${num(perf.gross_exposure_pct,1)}%` });
+    cards.push({ label: "Turnover", value: `${money(perf.gross_turnover)} · ${num(perf.turnover_pct,1)}%` });
+    cards.push({ label: "Costs", value: money(perf.total_costs_alltime) });
   }
   return cards
     .map(
@@ -697,7 +731,6 @@ export async function renderValidation() {
 // --------------------------------------------------------------------------
 
 const CONTROL_MODES = ["RUNNING", "PAUSED", "SAFE_MODE", "STOPPED"];
-const AI_PROVIDERS = ["anthropic_cli", "openai"];
 
 function adminGateHtml() {
   if (hasAdminToken()) {
@@ -820,20 +853,31 @@ function controlActionsHtml(currentMode) {
 }
 
 function aiConfigFormHtml(ai) {
+  const providers = ai.known_providers || [];
   return `
     <form id="ai-config-form" class="control-form">
+      <label>Capability
+        <select name="capability">${(ai.capabilities || []).map((c) => `<option value="${c}" ${c === "REASONING" ? "selected" : ""}>${c}</option>`).join("")}</select>
+      </label>
       <label>Provider
         <select name="provider">
-          ${AI_PROVIDERS.map((p) => `<option value="${p}" ${p === ai.configured_provider ? "selected" : ""}>${p}</option>`).join("")}
+          ${providers.map((p) => `<option value="${p}" ${p === ai.configured_provider ? "selected" : ""}>${p}</option>`).join("")}
         </select>
       </label>
-      <label>Model (optional — only used by openai)
-        <input type="text" name="model" placeholder="e.g. gpt-4o-mini" value="${esc(ai.configured_model || "")}" />
+      <label>Model
+        <input type="text" name="model" placeholder="configured provider model id" value="${esc(ai.configured_model || "")}" required />
+      </label>
+      <label>Fallback provider
+        <select name="fallback_provider"><option value="">none</option>${providers.map((p) => `<option value="${p}">${p}</option>`).join("")}</select>
+      </label>
+      <label>Fallback model
+        <input type="text" name="fallback_model" placeholder="optional" />
       </label>
       <label>Reason (required)
         <input type="text" name="reason" placeholder="why switch?" required />
       </label>
-      <button type="submit">Switch</button>
+      <button type="submit">Save route</button>
+      <button type="button" id="ai-test-provider" class="ghost-btn">Test provider</button>
       <span class="control-form-status"></span>
     </form>
   `;
@@ -865,16 +909,28 @@ function wireAiConfigForm() {
     e.preventDefault();
     const statusEl = form.querySelector(".control-form-status");
     const provider = form.provider.value;
-    const model = form.model.value || null;
+    const model = form.model.value;
+    const capability = form.capability.value;
+    const fallback = form.fallback_provider.value && form.fallback_model.value
+      ? {provider:form.fallback_provider.value,model:form.fallback_model.value} : null;
     const reason = form.reason.value;
     statusEl.textContent = "applying...";
-    const result = await apiPost("/ai/config", { provider, model, reason, actor: "dashboard" }, { admin: true });
+    const result = await apiPost("/ai/config", { provider, model, reason, actor: "dashboard",
+      capability_routes:{[capability]:{primary:{provider,model},fallback}} }, { admin: true });
     if (result.ok) {
       statusEl.textContent = `now ${result.data.effective_provider}`;
       renderControl();
     } else {
       statusEl.textContent = `failed: ${result.detail || result.error}`;
     }
+  });
+  el("ai-test-provider")?.addEventListener("click", async () => {
+    const statusEl = form.querySelector(".control-form-status");
+    statusEl.textContent = "testing bounded request...";
+    const result = await apiPost("/ai/test", {provider:form.provider.value,model:form.model.value},{admin:true});
+    statusEl.textContent = result.ok
+      ? `healthy · ${result.data.latency_seconds}s · ${(result.data.input_tokens ?? '?')} in / ${(result.data.output_tokens ?? '?')} out`
+      : `failed: ${result.detail || result.error}`;
   });
 }
 
@@ -1001,9 +1057,21 @@ export async function renderControl() {
     el("ai-config-actions").innerHTML = hasAdminToken()
       ? aiConfigFormHtml(aiRes.data) : lockedAdminActionHtml();
     if (hasAdminToken()) wireAiConfigForm();
-    table(el("ai-model-routing"), [
-      {key:"role",label:"Workflow"},{key:"model",label:"Model"}
-    ], Object.entries(aiRes.data.role_mappings || {}).map(([role,model]) => ({role,model})), "No role mappings configured.");
+    const providerRows = aiRes.data.provider_catalog || [];
+    el("ai-model-routing").innerHTML = `<h3>Providers</h3><div id="ai-provider-table"></div><h3>Capability routes</h3><div id="ai-route-table"></div><h3>Role routing</h3><div id="ai-role-table"></div>`;
+    table(el("ai-provider-table"), [
+      {key:"provider",label:"Provider"},{key:"auth_mode",label:"Auth"},
+      {key:"credential_status",label:"Credential"},{key:"health",label:"Health"},
+      {key:"last_successful_request",label:"Last success",cell:r=>`<td>${dt(r.last_successful_request)}</td>`},
+      {key:"last_error",label:"Last error"}], providerRows, "No providers registered.");
+    table(el("ai-route-table"), [
+      {key:"capability",label:"Capability"},{key:"primary",label:"Primary"},{key:"fallback",label:"Operational fallback"}
+    ], Object.entries(aiRes.data.capability_routes || {}).map(([capability,route]) => ({capability,
+      primary:route.primary ? `${route.primary.provider} / ${route.primary.model}` : "not configured",
+      fallback:route.fallback ? `${route.fallback.provider} / ${route.fallback.model}` : "none"})), "No capability routes configured.");
+    table(el("ai-role-table"), [
+      {key:"role",label:"Workflow role"},{key:"capability",label:"Capability"}
+    ], Object.entries(aiRes.data.role_mappings || {}).map(([role,capability]) => ({role,capability})), "No role mappings configured.");
 
     table(
       el("ai-config-history"),

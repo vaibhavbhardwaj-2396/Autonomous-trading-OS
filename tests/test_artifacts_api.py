@@ -196,9 +196,9 @@ ai_config.get_config = lambda **kw: _orig_get_config(path=path_b)
 ai_config.set_config = lambda **kw: _orig_set_config(**{**kw, "path": path_b, "lock_path": lock_b})
 try:
     status0 = ai_status.get_ai_status()
-    check("B1: get_ai_status() reports the effective provider even with no "
-          "config ever set (falls back to the default)",
-          status0["effective_provider"] == "anthropic_cli", status0)
+    check("B1: get_ai_status() reports provider-neutral unconfigured state "
+          "when no capability route exists",
+          status0["effective_provider"] is None, status0)
     check("B2: get_ai_status() includes budget figures",
           "tokens_today" in status0["budget"] and "calls_today" in status0["budget"], status0)
 
@@ -308,11 +308,11 @@ check("C9: POST /ai/config with no reason returns 400 (reason required, "
 _real_ai_config_existed_before = ai_config.STATE_PATH.exists()
 _real_ai_config_before = ai_config.get_config()
 r_switch = client.post("/ai/config", headers=ADMIN_AUTH,
-                       json={"provider": "anthropic_cli", "reason": "api route test",
-                             "actor": "test"})
+                       json={"provider": "anthropic", "model": "test-model",
+                             "reason": "api route test", "actor": "test"})
 check("C10: POST /ai/config with valid input returns 200 and the new "
       "effective status", r_switch.status_code == 200
-      and r_switch.get_json()["effective_provider"] == "anthropic_cli", r_switch.get_json())
+      and r_switch.get_json()["effective_provider"] == "anthropic", r_switch.get_json())
 
 # C11: the read-only guarantee for the write route — engine/memory/state
 # untouched. Same style of proof test_api.py already uses for every other
@@ -320,7 +320,7 @@ check("C10: POST /ai/config with valid input returns 200 and the new "
 # write, before and after.
 STATE_JSON = Path("memory/state.json")
 _state_hash_before = STATE_JSON.stat().st_mtime if STATE_JSON.exists() else None
-client.post("/ai/config", headers=ADMIN_AUTH, json={"provider": "openai", "reason": "isolation check"})
+client.post("/ai/config", headers=ADMIN_AUTH, json={"provider": "openai", "model": "test-model", "reason": "isolation check"})
 _state_hash_after = STATE_JSON.stat().st_mtime if STATE_JSON.exists() else None
 check("C11: POST /ai/config never touches memory/state.json (mtime unchanged)",
       _state_hash_before == _state_hash_after, (_state_hash_before, _state_hash_after))

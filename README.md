@@ -71,6 +71,16 @@ sorting and bounded pagination across the research and control lineage. Full
 prompt/response bodies remain available only through the authenticated detail
 view, not the list response.
 
+The integrated operating product now gates expensive reasoning behind compact,
+persisted ResearchPackets; routes research roles through provider-neutral
+capabilities; applies family-wise repeated-test correction; automatically
+bridges ROBUST evidence into immutable StrategyVersions; and feeds paper
+strategy-health transitions back to research memory. Overview exposes the real
+research organization, today counters, current investigations and unified
+timeline. See [Final autonomous product](docs/FINAL_AUTONOMOUS_PRODUCT.md),
+[AI providers](docs/AI_PROVIDERS.md), and
+[Research governance](docs/RESEARCH_GOVERNANCE.md).
+
 ## Roadmap status
 
 | Phase | Outcome | Status |

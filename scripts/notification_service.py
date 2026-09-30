@@ -11,6 +11,9 @@ from control import ai_budget, notifications
 from research.store import Store
 from research.validation import build_snapshot
 from scripts.telegram_notify import send_message
+from paper import config as paper_config
+from paper.portfolio import PaperPortfolio
+from paper.store import PaperStore
 
 
 def deliver(text: str, *, category: str, message_type: str, actor: str) -> dict:
@@ -37,16 +40,33 @@ def daily_digest(*, actor: str = "scheduler") -> dict:
     f = snapshot["funnel"]
     budget = ai_budget.get_budget_state()
     blockers = snapshot["paper_readiness"]["blockers"]
+    datasets = snapshot["data"]["datasets"]
+    velocity = snapshot.get("velocity") or {}
+    paper_perf = {"total_net_pnl": 0.0, "drawdown_pct": None}
+    if paper_config.db_path().is_file():
+        paper_store = PaperStore.open_readonly()
+        try:
+            paper_perf = PaperPortfolio(paper_store).performance_summary()
+        finally:
+            paper_store.close()
+    system = "HEALTHY" if snapshot["capacity"]["state"] == "NORMAL" else snapshot["capacity"]["state"]
     text = "\n".join([
         "LIVING QUANT — DAILY", "",
-        f"Observations: {f['observations']:,}",
-        f"News: {snapshot['data']['datasets'].get('news_arrival', 0):,}",
-        f"Hypotheses: {f['hypotheses']:,}", f"Experiments: {f['reported_experiments']:,}",
-        f"Accepted Evidence: {f['evidence']:,}", f"Strategies: {f['strategy_versions']:,}",
-        f"Paper Trades: {f['paper_trades']:,}", "",
-        f"Capacity: {snapshot['capacity']['state']}",
-        f"AI Calls Today: {budget.get('calls_today', 0)}",
-        f"Current Bottleneck: {blockers[0] if blockers else 'None detected'}",
+        f"System: {system}", "Research: ACTIVE",
+        f"Experiments: {'ACTIVE' if snapshot['contract_status'].get('locked', 0) else 'WAITING'}",
+        f"Paper: {'ACTIVE' if snapshot['paper_readiness']['ready'] else 'WAITING'}", "",
+        "Today:",
+        f"Observations +{(velocity.get('observations') or {}).get('24h', 0)}",
+        f"Research packets +{datasets.get('research_packet', 0)}",
+        f"Hypotheses +{(velocity.get('hypotheses') or {}).get('24h', 0)}",
+        f"Experiments +{snapshot['contract_status'].get('reported', 0)}", "",
+        "Evidence:",
+        f"Total {f['evidence']:,} · Strategies {f['strategy_versions']:,}",
+        f"Paper trades {f['paper_trades']:,} · P&L ₹{paper_perf.get('total_net_pnl', 0):,.2f}",
+        f"Drawdown {paper_perf.get('drawdown_pct') if paper_perf.get('drawdown_pct') is not None else '—'}%", "",
+        f"AI: {budget.get('calls_today', 0)} calls · {budget.get('tokens_today', 0)} tokens · cost unknown",
+        f"Compute: {snapshot['capacity']['state']}",
+        f"Main finding: {blockers[0] if blockers else 'No material pipeline blocker detected'}",
         "Live Promotion: LOCKED",
     ])
     return deliver(text, category="DAILY_DIGEST", message_type="daily_research_digest", actor=actor)

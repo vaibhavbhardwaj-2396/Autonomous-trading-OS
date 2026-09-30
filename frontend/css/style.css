@@ -385,6 +385,20 @@ footer.app-footer {
 .artifact-toolbar label { display: flex; flex-direction: column; gap: 5px; color: var(--text-dim); font-size: 11px; text-transform: uppercase; }
 .artifact-toolbar input, .artifact-toolbar select { background: var(--bg); color: var(--text); border: 1px solid var(--panel-border); border-radius: 6px; padding: 7px 9px; }
 .artifact-toolbar button { padding: 7px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+
+.org-chart { display: flex; gap: 10px; align-items: stretch; overflow-x: auto; padding: 8px 0 14px; }
+.workflow-node { min-width: 180px; max-width: 230px; text-align: left; padding: 14px; border-radius: 10px; border: 1px solid var(--panel-border); background: var(--bg); color: var(--text); cursor: pointer; display: grid; gap: 7px; }
+.workflow-node:hover, .workflow-node:focus { border-color: var(--accent); transform: translateY(-1px); }
+.workflow-node strong { color: var(--green); font: 600 12px var(--mono); }
+.workflow-node.waiting strong, .workflow-node.stale strong { color: var(--amber); }
+.workflow-node small { color: var(--text-dim); line-height: 1.35; }
+.org-connector { color: var(--accent); font-size: 24px; align-self: center; }
+.workflow-detail { min-height: 42px; padding: 12px; border-left: 3px solid var(--accent); background: rgba(77,139,249,.06); border-radius: 4px; line-height: 1.6; }
+.timeline { display: grid; gap: 8px; }
+.timeline-item { display: grid; grid-template-columns: 150px 1fr auto; gap: 12px; align-items: center; width: 100%; border: 0; border-left: 2px solid var(--panel-border); padding: 9px 12px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.timeline-item:hover { border-left-color: var(--accent); background: rgba(77,139,249,.05); }
+.timeline-item time, .timeline-item small { color: var(--text-dim); }
+@media (max-width: 760px) { .timeline-item { grid-template-columns: 1fr; gap: 3px; } }
 .pager { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 12px 16px; color: var(--text-dim); }
 .pager button:disabled { opacity: .35; cursor: not-allowed; }
 .status-bar { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-bottom:16px; }

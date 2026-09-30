@@ -166,6 +166,7 @@ from typing import Callable, Iterator, NamedTuple, Optional
 from ..store import Store, TimeLike, now_ist, iso
 from ..contracts import REGISTRY_DIR
 from .digest import build_digest
+from .packet import build_packet, persist_packet
 from . import investigator as inv
 from . import scheduler as sched
 from . import hypothesis_intake as hi
@@ -521,6 +522,7 @@ def run_worker_cycle(
     state_path: Path = STATE_PATH,
     now_fn: Callable[[], float] = time.monotonic,
     ai_failure_log: Optional[Path] = None,
+    require_significance: bool = False,
 ) -> WorkerRunResult:
     """One heartbeat. Repeatedly selects and executes the single
     highest-priority ELIGIBLE action — RUN_EXPERIMENT, PROMOTE, or
@@ -574,6 +576,7 @@ def run_worker_cycle(
     substrate_creations_attempted = 0
     created_substrate_ids: list = []
     substrate_creation_outcomes: list = []
+    created_strategy_versions: list = []
 
     state = _load_state(state_path)
     now_epoch = time.time()
@@ -587,9 +590,12 @@ def run_worker_cycle(
     #    heartbeat (same as overnight.run_overnight_cycle) -----------------
     digest_as_of: Optional[str] = None
     digest: Optional[dict] = None
+    research_packet: Optional[dict] = None
     try:
         digest = build_digest(store, as_of, registry_dir=registry_dir)
         digest_as_of = digest.get("as_of")
+        research_packet = build_packet(digest)
+        persist_packet(store, research_packet)
     except Exception as e:  # noqa: BLE001
         errors.append(f"digest: {type(e).__name__}: {e}")
 
@@ -609,6 +615,9 @@ def run_worker_cycle(
             f"in cooldown until {dt.datetime.fromtimestamp(cooldown_until).isoformat()}")
     elif digest is None:
         discovery_skip_reason = "digest unavailable"
+    elif require_significance and not (research_packet and
+              (research_packet.get("significance") or {}).get("admitted")):
+        discovery_skip_reason = "no ResearchPacket passed the deterministic significance gate"
     discovery_precondition_ok = discovery_skip_reason is None
     dup_check = lambda p: _proposal_duplicate_of(p, registry_dir=registry_dir)  # noqa: E731
 
@@ -800,7 +809,8 @@ def run_worker_cycle(
             try:
                 result = inv.investigate(
                     store, as_of, runner=runner, registry_dir=registry_dir,
-                    digest=digest, duplicate_check=dup_check,
+                    digest=(research_packet if require_significance else digest),
+                    duplicate_check=dup_check,
                     ai_failure_log=ai_failure_log)
             except (inv.InvestigatorError, hi.IntakeRejected) as e:
                 errors.append(f"discovery: {type(e).__name__}: {str(e)[:200]}")
@@ -847,12 +857,32 @@ def run_worker_cycle(
         record["runtime_consumed_seconds"] = round(now_fn() - t_action_start, 4)
         action_log.append(record)
 
+    # Deterministic evidence-to-strategy bridge. ROBUST is computed by the
+    # existing evidence gates; the factory is idempotent and cannot approve
+    # paper or live execution. This removes manual developer artifact wiring.
+    try:
+        from ..strategy_factory import promote_robust_hypothesis
+        final_pool = opp.build_opportunity_pool(store, as_of, registry_dir=registry_dir)
+        for robust in sorted((o for o in final_pool if o.lifecycle_stage == "ROBUST"),
+                             key=lambda o: (-o.priority_score, o.hypothesis_id))[:1]:
+            promoted = promote_robust_hypothesis(
+                store, robust.hypothesis_id, as_of=as_of,
+                contract_registry_dir=registry_dir)
+            if promoted.created:
+                created_strategy_versions.append(promoted.version_id)
+                action_log.append({"kind": "STRATEGY_FACTORY",
+                    "opportunity_id": robust.id, "contract_id": promoted.contract_id,
+                    "outcome": "created", "created_strategy_version": promoted.version_id,
+                    "runtime_consumed_seconds": 0.0})
+    except Exception as e:  # a factory refusal cannot invalidate completed evidence
+        errors.append(f"strategy_factory: {type(e).__name__}: {str(e)[:200]}")
+
     evidence_updates = len(touched_hids)
 
     # -- cooldown / no-work bookkeeping -------------------------------------
     did_useful_work = (
         experiments_run > 0 or proposals_created > 0 or len(promoted_hypothesis_ids) > 0
-        or len(created_substrate_ids) > 0
+        or len(created_substrate_ids) > 0 or len(created_strategy_versions) > 0
     )
     new_state = dict(state)
     if did_useful_work:
@@ -1336,7 +1366,7 @@ def main(argv: Optional[list] = None) -> int:
                         trigger="scheduled discovery attempt")
                     result = run_worker_cycle(
                         store, now_ist(), limits=limits, registry_dir=registry_dir,
-                        runner=configured_runner)
+                        runner=configured_runner, require_significance=True)
                 except Exception as e:  # noqa: BLE001 — run_worker_cycle() is designed
                     # to catch everything itself; if it somehow doesn't, degrade to a
                     # recorded, notified error cycle rather than let this heartbeat

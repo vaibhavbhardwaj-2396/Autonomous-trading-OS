@@ -17,6 +17,7 @@ from research.brain.worker import worker_status
 from research.recorder import RUN_LOG as RECORDER_LOG
 from research.store import now_ist
 from research.validation import LEDGER_PATH
+from paper.eligibility import list_paper_eligible
 from scripts.notification_service import deliver
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -87,10 +88,14 @@ def collect_heartbeats() -> dict:
 
 
 def dependencies() -> dict:
-    openai_ready = bool((os.environ.get("OPENAI_API_KEY") or "").strip())
+    from research.brain import llm
+    provider = llm.current_provider_name("hypothesis_generation")
+    provider_row = next((row for row in llm.provider_catalog()
+                         if row["provider"] == provider), None)
+    provider_ready = bool(provider_row and provider_row.get("configured"))
     return {
-        "RESEARCH_AI": {"state": "READY" if openai_ready else "NOT_CONFIGURED",
-                        "reason": None if openai_ready else "OPENAI_API_KEY is not configured"},
+        "RESEARCH_AI": {"state": "READY" if provider_ready else "NOT_CONFIGURED",
+                        "reason": None if provider_ready else "NO_PROVIDER_CONFIGURED"},
         "PAPER": {"state": "READY", "reason": None},
     }
 
@@ -103,6 +108,27 @@ def run(*, crontab_text: Optional[str] = None, state_path: Path = watchdog.STATE
     previous = watchdog.read_state(path=state_path)
     state = watchdog.reconcile(crontab_text=crontab_text, heartbeats=collect_heartbeats(),
                                dependencies=dependencies())
+    worker = worker_status()
+    queue = (worker.get("last_queue_health") or {}).get("snapshot") or {}
+    scientific_alerts = []
+    if (queue.get("locked_runnable_count", 0) > 0 and
+            not worker.get("last_experiments_run") and worker.get("last_heartbeat_at")):
+        scientific_alerts.append({"code": "EXPERIMENT_BACKLOG_STALLED",
+            "component": "EXPERIMENTS", "severity": "WARNING",
+            "reason": "runnable locked experiments exist but the latest heartbeat completed none"})
+    recent_errors = " ".join(str(e) for e in worker.get("recent_errors") or [])
+    if recent_errors.lower().count("provider") >= 3 or recent_errors.lower().count("invocation") >= 3:
+        scientific_alerts.append({"code": "AI_PROVIDER_REPEATED_FAILURE",
+            "component": "RESEARCH_AI", "severity": "WARNING",
+            "reason": "three or more recent provider/invocation failures"})
+    if list_paper_eligible():
+        paper_row = next((r for r in state["components"] if r["component"] == "PAPER"), {})
+        if paper_row.get("heartbeat_state") == "STALE":
+            scientific_alerts.append({"code": "PAPER_STRATEGY_HEARTBEAT_STALLED",
+                "component": "PAPER", "severity": "WARNING",
+                "reason": "paper-eligible strategies exist but the paper heartbeat is stale"})
+    state["alerts"].extend(scientific_alerts)
+    state["healthy"] = not any(a["severity"] == "ERROR" for a in state["alerts"])
     watchdog.write_state(state, path=state_path)
     old_codes = {a.get("code") for a in previous.get("alerts", [])}
     new_alerts = [a for a in state["alerts"] if a["code"] not in old_codes]

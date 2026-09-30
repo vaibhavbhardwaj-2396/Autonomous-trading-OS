@@ -1,6 +1,6 @@
 """
 api/app.py — the dashboard and administrator HTTP API.
-All reads use the observer bearer token. Five narrowly scoped writes use
+All reads use the observer bearer token. Six narrowly scoped writes use
 the separate administrator token and cannot place or modify an order.
 
     GET /health                     — public, app liveness only
@@ -99,7 +99,7 @@ from . import operations  # noqa: E402 — bounded, read-only subsystem health
 from . import validation  # noqa: E402 — Phase 10.5 read-only campaign status
 from . import notifications as notification_api  # noqa: E402
 from . import runtime_status  # noqa: E402
-from . import system_status, activity  # noqa: E402
+from . import system_status, activity, product  # noqa: E402
 from control import components as component_control  # noqa: E402
 from control import notifications as notification_config  # noqa: E402
 from control import runtime as ctrl  # noqa: E402
@@ -107,7 +107,7 @@ from control import resources as rg  # noqa: E402 — outcome 1: the Resource Go
 from control import capacity as capacity_planner  # noqa: E402 — Phase 10.5 allocation plan
 
 APP_NAME = "living-quant-api"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 
 
 def _int_query_param(name: str, default: Optional[int]) -> tuple[Optional[int], Optional[Response]]:
@@ -281,6 +281,11 @@ def create_app() -> Flask:
     @auth.require_auth
     def runtime_status_route():
         return jsonify(runtime_status.get_runtime_status(data.get_default_store()))
+
+    @app.route("/product/status", methods=["GET"])
+    @auth.require_auth
+    def product_status_route():
+        return jsonify(product.get_product_status(data.get_default_store()))
 
     @app.route("/system/status", methods=["GET"])
     @auth.require_auth
@@ -457,9 +462,9 @@ def create_app() -> Flask:
         return jsonify(result)
 
     # -- AI provider/model configuration + budget (outcome 2) --------------
-    # POST /ai/config is the SECOND write-capable route this API has ever
-    # had (the first was /control/mode). It only ever selects which
-    # provider/model the NEXT research AI call should use — see
+    # POST /ai/config and /ai/test are audited administrator-only routes.
+    # They only configure routing or perform one budget-bounded provider
+    # proof; neither can touch trading, risk gates, or capital. See
     # control/ai_config.py's own docstring for why that is safe: it never
     # calls a provider, never verifies one works, and cannot touch live
     # trading, risk gates, or research state by construction (imports
@@ -482,18 +487,38 @@ def create_app() -> Flask:
         if not isinstance(provider, str) or provider not in ai_config_mod.KNOWN_PROVIDERS:
             return jsonify({"error": "bad_request",
                            "detail": f"'provider' must be one of {list(ai_config_mod.KNOWN_PROVIDERS)}"}), 400
-        if model is not None and not isinstance(model, str):
-            return jsonify({"error": "bad_request", "detail": "'model' must be a string or null"}), 400
+        if not isinstance(model, str) or not model.strip():
+            return jsonify({"error": "bad_request", "detail": "'model' must be a non-empty string"}), 400
         if not isinstance(reason, str) or not reason.strip():
             return jsonify({"error": "bad_request",
                            "detail": "'reason' is required and must be non-empty"}), 400
         if not isinstance(actor, str) or not actor.strip():
             return jsonify({"error": "bad_request",
                            "detail": "'actor' must be a non-empty string when given"}), 400
-        ai_status.set_ai_provider(provider=provider, model=model, actor=actor, reason=reason,
-                                  role_mappings=body.get("role_mappings"),
-                                  fallback=body.get("fallback"))
+        try:
+            ai_status.set_ai_provider(provider=provider, model=model, actor=actor, reason=reason,
+                                      role_mappings=body.get("role_mappings"),
+                                      capability_routes=body.get("capability_routes"),
+                                      providers=body.get("providers"),
+                                      fallback=body.get("fallback"))
+        except ai_config_mod.InvalidAIConfig as exc:
+            return jsonify({"error": "bad_request", "detail": str(exc)}), 400
         return jsonify(ai_status.get_ai_status())
+
+    @app.route("/ai/test", methods=["POST"])
+    @auth.require_admin
+    def ai_test_route():
+        """Run one minimal structured provider proof; never returns a secret."""
+        from research.brain import llm
+        body = request.get_json(silent=True) or {}
+        provider = body.get("provider")
+        model = body.get("model")
+        if provider not in llm.KNOWN_PROVIDERS:
+            return jsonify({"error": "bad_request", "detail": "unknown provider"}), 400
+        if not isinstance(model, str) or not model.strip():
+            return jsonify({"error": "bad_request", "detail": "model is required"}), 400
+        result = llm.test_provider(provider, model.strip())
+        return jsonify(result), (200 if result["success"] else (429 if result.get("blocked") else 503))
 
     # -- Artifacts (outcome 2) — the unified, read-only artifact explorer --
 

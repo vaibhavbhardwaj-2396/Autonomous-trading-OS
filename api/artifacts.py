@@ -70,6 +70,7 @@ OBSERVATION_ARTIFACT_TYPES = {
     "opportunity_event": rm.DATASET_OPPORTUNITY_EVENT,
     "note": rm.DATASET_NOTE,
     "discovery_search": rm.DATASET_DISCOVERY_SEARCH,
+    "research_packet": rm.DATASET_RESEARCH_PACKET,
 }
 _DATASET_TO_TYPE = {v: k for k, v in OBSERVATION_ARTIFACT_TYPES.items()}
 
@@ -98,6 +99,9 @@ def _summarize(artifact_type: str, payload: dict) -> str:
         return (payload.get("note") or payload.get("text") or "")[:160]
     if artifact_type == "discovery_search":
         return f"discovery search for {payload.get('hypothesis_id')}"
+    if artifact_type == "research_packet":
+        gate = (payload.get("significance") or {}).get("admitted")
+        return f"{payload.get('packet_id')} — {'admitted' if gate else 'filtered'} — {payload.get('research_question')}"
     return str(payload)[:160]
 
 

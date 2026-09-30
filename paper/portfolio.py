@@ -284,9 +284,28 @@ class PaperPortfolio:
         wins = sum(1 for t in trades if t["net_pnl"] > 0)
         losses = sum(1 for t in trades if t["net_pnl"] < 0)
 
-        current_equity = account["cash"] + unrealized + sum(
-            (p["avg_entry_price"] or 0) * p["quantity"] for p in positions
-        )
+        position_value = sum(((marks.get(p["symbol"]) or {}).get("price")
+                              or p["avg_entry_price"] or 0) * p["quantity"]
+                             for p in positions)
+        current_equity = account["cash"] + position_value
+        cycles = self.store.list_cycles(limit=None)
+        historic_equity = [account["initial_capital"]]
+        for cycle in cycles:
+            try:
+                summary = __import__("json").loads(cycle.get("summary_json") or "{}")
+                if summary.get("current_equity") is not None:
+                    historic_equity.append(float(summary["current_equity"]))
+            except (ValueError, TypeError):
+                continue
+        peak_equity = max(historic_equity + [current_equity])
+        gross_turnover = sum(float(t["quantity"]) *
+                             (float(t["entry_price"]) + float(t["exit_price"])) for t in trades)
+        attribution: dict[str, dict] = {}
+        for trade in trades:
+            row = attribution.setdefault(trade["strategy_version_id"],
+                                         {"trades": 0, "net_pnl": 0.0})
+            row["trades"] += 1
+            row["net_pnl"] = round(row["net_pnl"] + float(trade["net_pnl"]), 2)
 
         return {
             "starting_capital": account["initial_capital"],
@@ -301,6 +320,17 @@ class PaperPortfolio:
             "loss_count": losses,
             "win_rate": (wins / n_trades) if n_trades else None,
             "open_position_count": len(positions),
+            "gross_exposure": round(position_value, 2),
+            "gross_exposure_pct": round(position_value / current_equity * 100, 2)
+                                  if current_equity else None,
+            "peak_equity": round(peak_equity, 2),
+            "drawdown_pct": round((peak_equity - current_equity) / peak_equity * 100, 2)
+                            if peak_equity else None,
+            "gross_turnover": round(gross_turnover, 2),
+            "turnover_pct": round(gross_turnover / account["initial_capital"] * 100, 2)
+                            if account["initial_capital"] else None,
+            "strategy_attribution": attribution,
+            "regime_attribution": {},
         }
 
     def positions_with_marks(self) -> list[dict]:

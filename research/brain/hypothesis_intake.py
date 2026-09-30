@@ -162,6 +162,8 @@ VALID_SPLIT_KEYS = frozenset({"discovery", "validation", "holdout"})
 FREE_TEXT_FIELDS = (
     "title", "hypothesis", "null_hypothesis", "signal",
     "independence", "falsification", "abandon_condition", "notes", "source",
+    "source_research_packet", "economic_mechanism", "expected_effect",
+    "time_horizon", "regime_assumption",
 )
 FREE_TEXT_MAX_LEN = {"title": 200, "signal": 200, "notes": 2000}
 FREE_TEXT_DEFAULT_MAX_LEN = 1000
@@ -177,7 +179,9 @@ REQUIRED_FIELDS = frozenset({
 })
 OPTIONAL_FIELDS = frozenset({
     "hypothesis_id", "source", "llm_features", "llm_model_id",
-    "llm_knowledge_cutoff", "notes",
+    "llm_knowledge_cutoff", "notes", "source_research_packet",
+    "economic_mechanism", "expected_effect", "features", "time_horizon",
+    "regime_assumption", "required_datasets", "related_research",
 })
 ALLOWED_TOP_LEVEL_KEYS = REQUIRED_FIELDS | OPTIONAL_FIELDS
 
@@ -395,6 +399,22 @@ def validate_proposal(proposal: Any) -> list[str]:
     if missing:
         problems.append(f"proposal is missing required field(s): {sorted(missing)}")
 
+    # AI-generated packet proposals carry the richer scientific schema. This
+    # conditional preserves backwards compatibility for old deterministic
+    # fixtures while making every new autonomous proposal complete.
+    if proposal.get("source_research_packet"):
+        packet_fields = {"economic_mechanism", "expected_effect", "features",
+                         "time_horizon", "regime_assumption", "required_datasets",
+                         "related_research"}
+        packet_missing = packet_fields - set(proposal)
+        if packet_missing:
+            problems.append(f"ResearchPacket proposal is missing field(s): {sorted(packet_missing)}")
+        for name in ("features", "required_datasets", "related_research"):
+            value = proposal.get(name)
+            if name in proposal and (not isinstance(value, list) or
+                                     any(not isinstance(v, str) for v in value)):
+                problems.append(f"{name} must be a list of strings")
+
     # -- free text: type, non-empty, bounded length, no code-like content ---
     for field_name in FREE_TEXT_FIELDS:
         if field_name not in proposal:
@@ -598,7 +618,11 @@ def create_draft(
     source = proposal.get("source", default_source)
     rm.record_hypothesis_proposal(
         store, claim=proposal["hypothesis"], source=source,
-        hypothesis_id=hid, extra={"contract_id": contract_id},
+        hypothesis_id=hid, extra={"contract_id": contract_id,
+            **{k: proposal.get(k) for k in (
+                "source_research_packet", "economic_mechanism", "expected_effect",
+                "features", "time_horizon", "regime_assumption",
+                "required_datasets", "related_research") if k in proposal}},
     )
 
     entry_rule_str = json.dumps(proposal["entry_rule"], sort_keys=True, separators=(",", ":"))

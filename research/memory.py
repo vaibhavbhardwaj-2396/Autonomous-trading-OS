@@ -68,8 +68,20 @@ DATASET_OPPORTUNITY_EVENT = "research_opportunity_event"
 # schema. research/brain/llm.py is the only writer.
 DATASET_MODEL_INTERACTION = "research_model_interaction"
 DATASET_DRAFT_REVIEW = "research_draft_review"
+DATASET_RESEARCH_PACKET = "research_packet"
 
 MARKET_ENTITY = "_market"  # same convention research/sources already uses
+
+
+def record_research_packet(store: Store, packet: dict,
+                           source: str = "research.brain.packet") -> Optional[int]:
+    """Persist one deterministic compact pre-AI packet, idempotently."""
+    event_time = packet.get("knowledge_timestamp") or now_ist()
+    return store.append(
+        dataset=DATASET_RESEARCH_PACKET, entity=MARKET_ENTITY,
+        event_time=event_time, knowledge_time=event_time, source=source,
+        payload=packet,
+    )
 
 
 def record_draft_review(store: Store, *, contract_id: str, hypothesis_id: Optional[str],

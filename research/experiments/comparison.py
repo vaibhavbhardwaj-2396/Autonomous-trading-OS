@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from statistics import NormalDist
 from pathlib import Path
 from typing import Optional
 
@@ -156,7 +157,7 @@ def _parsed(rule: str):
 # Per-variant classification
 # ---------------------------------------------------------------------------
 
-def classify_variant(contract_id: str, verdict: dict) -> dict:
+def classify_variant(contract_id: str, verdict: dict, *, t_threshold: float = T_STAT_THRESHOLD) -> dict:
     """Classify one contract's already-computed verdict along the three
     independent axes described in the module docstring. Reuses the numbers
     evaluator.compute_verdict already produced (n_trades, net_pnl,
@@ -180,7 +181,7 @@ def classify_variant(contract_id: str, verdict: dict) -> dict:
         direction = "positive" if net_pnl > 0 else "negative"
 
     insufficient = n_trades < MIN_TRADES_FOR_SIGNIFICANCE
-    stat_sig = (t_stat is not None) and (abs(t_stat) >= T_STAT_THRESHOLD)
+    stat_sig = (t_stat is not None) and (abs(t_stat) >= t_threshold)
     econ_meaningful = (avg_net_pnl is not None) and (
         abs(avg_net_pnl) / RESEARCH_POSITION_NOTIONAL >= ECONOMIC_SIGNIFICANCE_PCT)
 
@@ -201,6 +202,7 @@ def classify_variant(contract_id: str, verdict: dict) -> dict:
         "direction": direction,
         "insufficient_sample": insufficient,
         "statistically_significant": stat_sig,
+        "multiple_testing_t_threshold": round(t_threshold, 4),
         "economically_meaningful": econ_meaningful,
         "label": label,
     }
@@ -312,8 +314,27 @@ def evaluate_hypothesis_evidence(
         for c in ordered[1:]:
             duplicate_of[c.id] = original.id
 
+    # Family-wise error control is separate from operational throughput. The
+    # family is the explicit research-area tag when present, otherwise this
+    # hypothesis itself. Bonferroni is conservative but auditable and valid
+    # without fabricated p-values; raw t statistics remain untouched.
+    from ..brain import research_areas
+    family = research_areas.area_of(store, hypothesis_id) or hypothesis_id
+    if family == hypothesis_id:
+        family_hypotheses = {hypothesis_id}
+    else:
+        family_hypotheses = set(next(
+            (g.hypothesis_ids for g in research_areas.groups(store) if g.name == family), ()))
+    family_contract_ids = {cid for hid in family_hypotheses
+                           for cid in evaluator.contract_ids_for_hypothesis(store, hid)}
+    family_attempts = sum(1 for cid in family_contract_ids
+                          if evaluator.verdict_for_contract(store, cid) is not None)
+    adjusted_alpha = 0.05 / max(1, family_attempts)
+    adjusted_threshold = max(T_STAT_THRESHOLD,
+                             NormalDist().inv_cdf(1 - adjusted_alpha / 2))
+
     variants = [
-        classify_variant(c.id, verdict)
+        classify_variant(c.id, verdict, t_threshold=adjusted_threshold)
         for c, verdict in scored
         if c.id not in duplicate_of
     ]
@@ -332,6 +353,19 @@ def evaluate_hypothesis_evidence(
         "variants": variants,
         "positive_count": sum(1 for v in variants if v["direction"] == "positive"),
         "negative_count": sum(1 for v in variants if v["direction"] == "negative"),
+        "multiple_testing": {
+            "method": "BONFERRONI_FAMILY_WISE_ERROR",
+            "family": family,
+            "family_hypothesis_count": len(family_hypotheses),
+            "family_attempt_count": family_attempts,
+            "raw_alpha": 0.05,
+            "adjusted_alpha": adjusted_alpha,
+            "adjusted_t_threshold": round(adjusted_threshold, 4),
+            "variant_lineage": sorted(c.id for c, _ in scored),
+            "unique_rule_variants": len(fingerprints),
+            "retests": len(scored) - len(fingerprints),
+            "parameter_searches": max(0, len(fingerprints) - 1),
+        },
         "verdict": verdict_label,
         "rationale": rationale,
     }

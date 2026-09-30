@@ -1,112 +1,53 @@
-"""
-research/brain/llm.py — the LLM provider abstraction.
-INTELLIGENT + EFFICIENT + TRACEABLE (outcome 2).
+"""Provider-neutral AI gateway for bounded research reasoning.
 
-THE ACTUAL SEAM THIS BUILDS ON
----------------------------------------------------------------------------
-research/brain/investigator.py::investigate() already takes an injectable
-`runner: Callable[[str], str]` — prompt in, raw text out — and its default
-is `_default_runner`, the existing Claude Code CLI subprocess call,
-UNCHANGED. That is already a complete provider abstraction seam; nothing
-about investigate(), hypothesis_intake, digest, or anything downstream of
-build_prompt() needed to change. This module's only job is to build the
-Callable[[str], str] that research/brain/worker.py hands to investigate(),
-selecting a provider and wrapping every call with budget-checking and
-artifact-recording — all invisible to investigate() itself.
-
-    research/brain/worker.py::main()
-              |
-              v
-    build_configured_runner(store=..., cycle_id=..., purpose=..., trigger=...)
-              |                                    (constructs, does not call)
-              v
-    run_worker_cycle(..., runner=<that closure>)
-              |
-              v
-    investigate(..., runner=<that closure>)         UNCHANGED
-              |
-              v
-    <closure>(prompt)                               THIS is where:
-              |                                        1. budget checked
-              |                                        2. provider selected
-              |                                        3. latency timed
-              |                                        4. artifact recorded
-              v
-    raw text, exactly as investigate() has always expected
-
-WHY THIS DOES NOT TOUCH run_cycle.sh's LIVE AGENT
----------------------------------------------------------------------------
-The live trading agent (run_cycle.sh, docs/ENGINE_DEPLOY.md) invokes the
-Claude Code CLI as a full agentic process with file/tool access to make
-trading judgments — a fundamentally different thing from this module's
-"send a bounded prompt, parse a JSON object back" structured call. Nothing
-in this file is imported by run_cycle.sh or anything engine/ touches; the
-existing engine<->research isolation (tests/test_kernel_isolation.py)
-covers this module the same as every other file in research/brain/.
-
-PROVIDERS
----------------------------------------------------------------------------
-  anthropic_cli (default) — calls investigator._default_runner exactly as
-      before. No token counts (the CLI's plain-text mode does not report
-      them); latency and the prompt/response themselves are still
-      recorded.
-  openai — one real HTTP call to OpenAI's chat completions endpoint via
-      the standard library only (urllib) — no new dependency for a single
-      POST request. Reports real input/output token counts from the
-      API's own `usage` field.
-
-Selected via RESEARCH_AI_PROVIDER (env), defaulting to "anthropic_cli" —
-an unconfigured deployment behaves exactly as it always has.
-
-See docs/AI_PROVIDERS.md for the full design note and
-tests/test_llm_providers.py for the test suite (provider selection,
-budget deferral, artifact recording, malformed responses, provider
-failure — all against injected/mocked calls, never a real network
-request or a real claude subprocess).
+The workflow requests a research role; ``control.ai_config`` maps that role
+to a capability and the capability to a primary/fallback provider-model pair.
+Fallback is attempted only after a retryable operational provider failure.
+Every attempt is persisted as a model-interaction artifact.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional, Protocol
 
+from control import ai_budget, ai_config
 from . import investigator as inv
 from .. import memory as rm
-from control import ai_budget
-from control import ai_config
 
 try:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 except (ImportError, OSError):
-    # The dashboard service intentionally may not have permission to read
-    # the root-owned production credential file. The root worker does.
     pass
 
-PROVIDER_ANTHROPIC_CLI = "anthropic_cli"
 PROVIDER_OPENAI = "openai"
-KNOWN_PROVIDERS = (PROVIDER_ANTHROPIC_CLI, PROVIDER_OPENAI)
+PROVIDER_ANTHROPIC = "anthropic"
+PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
+PROVIDER_LOCAL_OPENAI = "local_openai"
+KNOWN_PROVIDERS = ai_config.KNOWN_PROVIDERS
 
-ENV_PROVIDER = "RESEARCH_AI_PROVIDER"
+ENV_PROVIDER = "RESEARCH_AI_PROVIDER"  # legacy emergency override
 ENV_OPENAI_MODEL = "RESEARCH_AI_OPENAI_MODEL"
 ENV_OPENAI_API_KEY = "OPENAI_API_KEY"
-DEFAULT_PROVIDER = PROVIDER_ANTHROPIC_CLI
-DEFAULT_OPENAI_MODEL = "gpt-5.6-terra"
-ANTHROPIC_CLI_MODEL_LABEL = "claude-code-cli"
+ENV_ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
+ENV_COMPATIBLE_API_KEY = "OPENAI_COMPATIBLE_API_KEY"
+ENV_COMPATIBLE_BASE_URL = "OPENAI_COMPATIBLE_BASE_URL"
+ENV_LOCAL_BASE_URL = "LOCAL_AI_BASE_URL"
+DEFAULT_PROVIDER = None
+DEFAULT_OPENAI_MODEL = None
 
-OPENAI_ENDPOINT = "https://api.openai.com/v1/responses"
-OPENAI_TIMEOUT_SECONDS = 120
-OPENAI_SYSTEM_PREAMBLE = (
-    "You are the Living Quant Research AI. Respond with a single JSON "
-    "object only, exactly matching the instructions in the prompt. No "
-    "prose, no markdown code fences, no explanation outside the object."
+REQUEST_TIMEOUT_SECONDS = 120
+SYSTEM_PREAMBLE = (
+    "You are the Living Quant Research AI. Return one JSON object exactly "
+    "matching the prompt schema. Do not include prose or markdown fences."
 )
 
 
@@ -118,155 +59,128 @@ class ModelResponse:
 
 
 class ModelProvider(Protocol):
-    """Provider-neutral boundary used by every research reasoning call."""
-
     name: str
     auth_mode: str
-
     def invoke(self, prompt: str, *, model: str) -> ModelResponse: ...
 
 
 class ProviderError(RuntimeError):
-    """A provider-level failure — network, auth, malformed API response.
-    Always converted to an investigator.InvestigatorError before
-    escaping build_configured_runner()'s closure, so investigate() never
-    needs a second except clause for "the provider abstraction failed" vs.
-    "the CLI subprocess failed" — both boundary failures look identical
-    from investigate()'s point of view, which is the whole point of the
-    abstraction."""
-
     def __init__(self, message: str, *, retryable: bool = False):
         super().__init__(message)
         self.retryable = retryable
 
 
-def current_provider_name() -> str:
-    """Precedence: RESEARCH_AI_PROVIDER env var (an explicit, ops-level
-    override) > control/ai_config.py's persisted, UI-settable choice >
-    DEFAULT_PROVIDER. Read fresh every call — nothing here is cached at
-    import — so a provider switch via the AI configuration API takes
-    effect on the very next heartbeat (the worker is a fresh subprocess
-    per cron tick, so there is no running process to notify — it simply
-    reads the current file next time it runs), the same "no caching, read
-    at call time" posture investigator.resolve_claude_binary() already
-    documents. See control/ai_config.py's own docstring for why a plain
-    env var alone cannot do this (the API and the worker are different
-    processes)."""
-    env_override = (os.environ.get(ENV_PROVIDER) or "").strip().lower()
-    if env_override:
-        return env_override
-    persisted = ai_config.get_config().get("provider")
-    return persisted or DEFAULT_PROVIDER
-
-
-def current_model_name(provider_name: str, purpose: Optional[str] = None) -> str:
-    """The model to use for `provider_name`, honoring the same precedence
-    as current_provider_name(): env var > persisted config > built-in
-    default. Only meaningful for openai today (the CLI provider's "model"
-    is always ANTHROPIC_CLI_MODEL_LABEL, a label, not a real selection)."""
-    if provider_name != PROVIDER_OPENAI:
-        return ANTHROPIC_CLI_MODEL_LABEL
-    env_override = (os.environ.get(ENV_OPENAI_MODEL) or "").strip()
-    if env_override:
-        return env_override
-    persisted = ai_config.get_config()
-    mapped = (persisted.get("role_mappings") or {}).get(purpose or "")
-    if mapped and mapped != "deterministic":
-        return mapped
-    if persisted.get("provider") == PROVIDER_OPENAI and persisted.get("model"):
-        return persisted["model"]
-    return DEFAULT_OPENAI_MODEL
-
-
-def _estimate_tokens(text: str) -> int:
-    """A rough, honest, ~4-chars/token estimate used ONLY for the
-    before-the-call budget check — never reported as a measured value in
-    any artifact. See research.memory.record_model_interaction, which
-    only ever stores provider-REPORTED counts (or None when a provider,
-    like the CLI, cannot report them)."""
-    return max(1, len(text) // 4)
-
-
-def _anthropic_cli_call(prompt: str) -> tuple:
-    """The existing, unmodified Claude Code CLI subprocess call. Returns
-    (raw_text, usage) with usage always None."""
-    raw = inv._default_runner(prompt)
-    return raw, None
-
-
-def _openai_call(prompt: str, *, model: str) -> tuple:
-    """One HTTP POST to OpenAI's chat completions endpoint. Raises
-    ProviderError for any failure (missing key, network, non-2xx,
-    unparseable body, unexpected shape) — never a bare exception type a
-    caller would need to know this module's internals to catch."""
-    api_key = (os.environ.get(ENV_OPENAI_API_KEY) or "").strip()
-    if not api_key:
-        raise ProviderError(
-            f"{ENV_OPENAI_API_KEY} is not set on the server — cannot call "
-            f"OpenAI. Set it in the server environment only (never in "
-            f"frontend code, browser storage, logs, or committed config).")
-
-    body = json.dumps({"model": model, "store": False,
-        "instructions": OPENAI_SYSTEM_PREAMBLE, "input": prompt,
-        "reasoning": {"effort": "low"}, "max_output_tokens": 4000}).encode("utf-8")
-    req = urllib.request.Request(
-        OPENAI_ENDPOINT, data=body,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
+def _read_json(req: urllib.request.Request) -> dict:
     try:
-        with urllib.request.urlopen(req, timeout=OPENAI_TIMEOUT_SECONDS) as resp:
-            parsed = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")[:500]
-        retryable = e.code in (408, 409, 429) or e.code >= 500
-        raise ProviderError(
-            f"OpenAI API returned HTTP {e.code}: {detail}", retryable=retryable
-        ) from e
-    except urllib.error.URLError as e:
-        raise ProviderError(f"could not reach the OpenAI API: {e}", retryable=True) from e
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        raise ProviderError(f"OpenAI API returned an unparseable response body: {e}") from e
-
-    try:
-        text = parsed.get("output_text")
-        if not text:
-            text = next(part["text"] for item in parsed.get("output", [])
-                        if item.get("type") == "message" for part in item.get("content", [])
-                        if part.get("type") == "output_text")
-    except (KeyError, IndexError, TypeError, StopIteration) as e:
-        raise ProviderError(
-            f"OpenAI API response did not have the expected shape "
-            f"(Responses output_text): {e}") from e
-
-    usage = parsed.get("usage") or {}
-    return text, {"input_tokens": usage.get("input_tokens"),
-                 "output_tokens": usage.get("output_tokens")}
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        retryable = exc.code in (408, 409, 429) or exc.code >= 500
+        raise ProviderError(f"provider returned HTTP {exc.code}: {detail}",
+                            retryable=retryable) from exc
+    except urllib.error.URLError as exc:
+        raise ProviderError(f"provider unavailable: {exc}", retryable=True) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ProviderError(f"provider returned invalid JSON: {exc}") from exc
 
 
-class AnthropicCLIProvider:
-    name = PROVIDER_ANTHROPIC_CLI
-    auth_mode = "local_cli_session"
-
-    def invoke(self, prompt: str, *, model: str) -> ModelResponse:
-        text, usage = _anthropic_cli_call(prompt)
-        return ModelResponse(text=text)
+def _output_text(parsed: dict) -> str:
+    text = parsed.get("output_text")
+    if text:
+        return text
+    for item in parsed.get("output", []):
+        for part in item.get("content", []):
+            if part.get("type") == "output_text" and part.get("text"):
+                return part["text"]
+    raise ProviderError("provider response contained no output text")
 
 
 class OpenAIProvider:
-    name = PROVIDER_OPENAI
-    auth_mode = "environment_api_key"
-
+    name, auth_mode = PROVIDER_OPENAI, "API_KEY"
     def invoke(self, prompt: str, *, model: str) -> ModelResponse:
-        text, usage = _openai_call(prompt, model=model)
-        usage = usage or {}
-        return ModelResponse(text=text, input_tokens=usage.get("input_tokens"),
-                             output_tokens=usage.get("output_tokens"))
+        key = (os.environ.get(ENV_OPENAI_API_KEY) or "").strip()
+        if not key:
+            raise ProviderError(f"{ENV_OPENAI_API_KEY} is not configured")
+        endpoint = ai_config.get_config()["providers"][self.name]["endpoint"]
+        body = json.dumps({"model": model, "store": False,
+                           "instructions": SYSTEM_PREAMBLE, "input": prompt,
+                           "max_output_tokens": 4000}).encode()
+        parsed = _read_json(urllib.request.Request(
+            endpoint, data=body, method="POST",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}))
+        usage = parsed.get("usage") or {}
+        return ModelResponse(_output_text(parsed), usage.get("input_tokens"),
+                             usage.get("output_tokens"))
+
+
+class AnthropicProvider:
+    name, auth_mode = PROVIDER_ANTHROPIC, "API_KEY"
+    def invoke(self, prompt: str, *, model: str) -> ModelResponse:
+        key = (os.environ.get(ENV_ANTHROPIC_API_KEY) or "").strip()
+        if not key:
+            raise ProviderError(f"{ENV_ANTHROPIC_API_KEY} is not configured")
+        endpoint = ai_config.get_config()["providers"][self.name]["endpoint"]
+        body = json.dumps({"model": model, "max_tokens": 4000,
+                           "system": SYSTEM_PREAMBLE,
+                           "messages": [{"role": "user", "content": prompt}]}).encode()
+        parsed = _read_json(urllib.request.Request(
+            endpoint, data=body, method="POST", headers={
+                "x-api-key": key, "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json"}))
+        try:
+            text = "".join(x.get("text", "") for x in parsed["content"] if x.get("type") == "text")
+            if not text:
+                raise KeyError("empty content")
+        except (KeyError, TypeError) as exc:
+            raise ProviderError(f"Anthropic response contained no text: {exc}") from exc
+        usage = parsed.get("usage") or {}
+        return ModelResponse(text, usage.get("input_tokens"), usage.get("output_tokens"))
+
+
+def _compatible_endpoint(provider_name: str) -> tuple[str, Optional[str]]:
+    cfg = ai_config.get_config()["providers"][provider_name]
+    if provider_name == PROVIDER_LOCAL_OPENAI:
+        endpoint = (os.environ.get(ENV_LOCAL_BASE_URL) or cfg.get("endpoint") or "").strip()
+        parsed = urllib.parse.urlparse(endpoint)
+        if parsed.scheme not in ("http", "https") or parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+            raise ProviderError("LOCAL_AI_BASE_URL must be an explicit loopback HTTP endpoint")
+        return endpoint.rstrip("/") + "/chat/completions", None
+    endpoint = (os.environ.get(ENV_COMPATIBLE_BASE_URL) or cfg.get("endpoint") or "").strip()
+    key = (os.environ.get(ENV_COMPATIBLE_API_KEY) or "").strip()
+    if not endpoint or not key:
+        raise ProviderError("OpenAI-compatible endpoint and API key are not configured")
+    return endpoint.rstrip("/") + "/chat/completions", key
+
+
+class OpenAICompatibleProvider:
+    auth_mode = "API_KEY"
+    def __init__(self, name: str):
+        self.name = name
+        if name == PROVIDER_LOCAL_OPENAI:
+            self.auth_mode = "LOCAL_NO_AUTH"
+    def invoke(self, prompt: str, *, model: str) -> ModelResponse:
+        endpoint, key = _compatible_endpoint(self.name)
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        body = json.dumps({"model": model, "temperature": 0,
+                           "messages": [{"role": "system", "content": SYSTEM_PREAMBLE},
+                                        {"role": "user", "content": prompt}],
+                           "max_tokens": 4000}).encode()
+        parsed = _read_json(urllib.request.Request(endpoint, data=body, method="POST", headers=headers))
+        try:
+            text = parsed["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ProviderError(f"compatible response contained no message: {exc}") from exc
+        usage = parsed.get("usage") or {}
+        return ModelResponse(text, usage.get("prompt_tokens"), usage.get("completion_tokens"))
 
 
 PROVIDER_REGISTRY: dict[str, ModelProvider] = {
-    PROVIDER_ANTHROPIC_CLI: AnthropicCLIProvider(),
-    PROVIDER_OPENAI: OpenAIProvider(),
+    PROVIDER_OPENAI: OpenAIProvider(), PROVIDER_ANTHROPIC: AnthropicProvider(),
+    PROVIDER_OPENAI_COMPATIBLE: OpenAICompatibleProvider(PROVIDER_OPENAI_COMPATIBLE),
+    PROVIDER_LOCAL_OPENAI: OpenAICompatibleProvider(PROVIDER_LOCAL_OPENAI),
 }
 
 
@@ -274,132 +188,162 @@ def get_provider(name: str) -> ModelProvider:
     try:
         return PROVIDER_REGISTRY[name]
     except KeyError as exc:
-        raise ProviderError(
-            f"unknown {ENV_PROVIDER}={name!r} — expected one of {tuple(PROVIDER_REGISTRY)}") from exc
+        raise ProviderError(f"unknown provider {name!r}") from exc
+
+
+def _credential_status(name: str, cfg: dict) -> tuple[bool, str]:
+    if not cfg.get("enabled"):
+        return False, "DISABLED"
+    if name == PROVIDER_OPENAI:
+        ok = bool((os.environ.get(ENV_OPENAI_API_KEY) or "").strip())
+    elif name == PROVIDER_ANTHROPIC:
+        ok = bool((os.environ.get(ENV_ANTHROPIC_API_KEY) or "").strip())
+    elif name == PROVIDER_OPENAI_COMPATIBLE:
+        ok = bool((os.environ.get(ENV_COMPATIBLE_API_KEY) or "").strip() and
+                  (os.environ.get(ENV_COMPATIBLE_BASE_URL) or cfg.get("endpoint")))
+    else:
+        try:
+            _compatible_endpoint(name)
+            ok = True
+        except ProviderError:
+            ok = False
+    return ok, "CONFIGURED" if ok else "NOT_CONFIGURED"
 
 
 def provider_catalog() -> list[dict]:
-    """Non-secret provider metadata suitable for the admin UI."""
-    configured = {
-        PROVIDER_OPENAI: bool((os.environ.get(ENV_OPENAI_API_KEY) or "").strip()),
-        PROVIDER_ANTHROPIC_CLI: bool(shutil.which("claude")),
-    }
-    return [{"provider": name, "auth_mode": provider.auth_mode,
-             "configured": configured[name],
-             "status": "CONFIGURED_UNVERIFIED" if configured[name] else "NOT_CONFIGURED"}
-            for name, provider in PROVIDER_REGISTRY.items()]
+    """Secret-free persisted registry plus current credential presence."""
+    cfg = ai_config.get_config()
+    out = []
+    for name in KNOWN_PROVIDERS:
+        row = dict(cfg["providers"][name])
+        configured, status = _credential_status(name, row)
+        row.update({"provider": name, "configured": configured,
+                    "credential_status": status,
+                    "health": row.get("health") or ("UNVERIFIED" if configured else status),
+                    "rate_limit_state": row.get("rate_limit_state") or "UNKNOWN",
+                    "usage": row.get("usage") or {}, "cost": row.get("cost")})
+        out.append(row)
+    return out
 
 
-def build_configured_runner(
-    *, store, cycle_id: str, purpose: str, trigger: str,
-    provider: Optional[str] = None,
-) -> Callable[[str], str]:
-    """Builds the Callable[[str], str] research/brain/worker.py hands to
-    run_worker_cycle(runner=...). Constructing this is inert — nothing
-    here touches the budget, a provider, or the store until the returned
-    closure is actually CALLED, which only happens if investigate()
-    genuinely decides to invoke its runner (i.e. a DISCOVER action was
-    selected this heartbeat). Every existing test that passes its own
-    `runner=` directly to run_worker_cycle()/investigate() bypasses this
-    function entirely and is completely unaffected by it.
+def current_provider_name(purpose: str = "hypothesis_generation") -> Optional[str]:
+    override = (os.environ.get(ENV_PROVIDER) or "").strip().lower()
+    if override:
+        return override
+    _, route = ai_config.resolve_role(purpose)
+    return (route.get("primary") or {}).get("provider")
 
-    `provider`, if given, overrides RESEARCH_AI_PROVIDER for this one
-    runner (used by tests and by a future "try the other provider for
-    this one call" API action) — production call sites never pass it,
-    relying on the env var / DEFAULT_PROVIDER instead.
-    """
-    provider_name = provider or current_provider_name()
 
+def current_model_name(provider_name: Optional[str], purpose: Optional[str] = None) -> Optional[str]:
+    if provider_name == PROVIDER_OPENAI and (os.environ.get(ENV_OPENAI_MODEL) or "").strip():
+        return os.environ[ENV_OPENAI_MODEL].strip()
+    _, route = ai_config.resolve_role(purpose or "hypothesis_generation")
+    for target in (route.get("primary"), route.get("fallback")):
+        if target and target.get("provider") == provider_name:
+            return target.get("model")
+    return None
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(text) // 4)
+
+
+def _route_for(purpose: str, explicit_provider: Optional[str]) -> tuple[str, dict, Optional[dict]]:
+    capability, route = ai_config.resolve_role(purpose)
+    primary = route.get("primary")
+    if explicit_provider:
+        model = current_model_name(explicit_provider, purpose)
+        primary = {"provider": explicit_provider, "model": model}
+    if not primary or not primary.get("provider") or not primary.get("model"):
+        raise ProviderError(f"NO_PROVIDER_CONFIGURED for capability {capability}")
+    return capability, primary, route.get("fallback")
+
+
+def build_configured_runner(*, store, cycle_id: str, purpose: str, trigger: str,
+                            provider: Optional[str] = None) -> Callable[[str], str]:
     def runner(prompt: str) -> str:
-        estimated = _estimate_tokens(prompt)
-        allowed, deny_reason = ai_budget.budget_allows(estimated_tokens=estimated)
-        if not allowed:
-            rm.record_model_interaction(
-                store, provider=provider_name, model="(not called)", purpose=purpose,
+        try:
+            capability, primary, fallback = _route_for(purpose, provider)
+        except ProviderError as exc:
+            rm.record_model_interaction(store, provider="none", model="none", purpose=purpose,
                 trigger=trigger, prompt=prompt, response=None, status="deferred",
-                cycle_id=cycle_id, error=deny_reason,
-            )
-            # The SAME escape hatch investigate() already treats as a
-            # normal, valid outcome — routines/research_investigate.md's
-            # own {"no_proposal": true, "reason": ...} contract. Zero
-            # changes needed downstream for "the AI budget said defer."
+                cycle_id=cycle_id, error=str(exc), extra={"capability": None,
+                "prompt_version": "research-json-v2", "fallback_used": False})
+            return json.dumps({"no_proposal": True, "reason": str(exc)})
+        allowed, deny_reason = ai_budget.budget_allows(estimated_tokens=_estimate_tokens(prompt))
+        if not allowed:
+            rm.record_model_interaction(store, provider=primary["provider"], model=primary["model"],
+                purpose=purpose, trigger=trigger, prompt=prompt, response=None,
+                status="deferred", cycle_id=cycle_id, error=deny_reason,
+                extra={"capability": capability, "prompt_version": "research-json-v2"})
             return json.dumps({"no_proposal": True, "reason": f"AI budget: {deny_reason}"})
 
-        t0 = time.monotonic()
-        model_name = current_model_name(provider_name, purpose)
-        actual_model = model_name
-        fallback_used = False
-        try:
-            response = get_provider(provider_name).invoke(prompt, model=model_name)
-            text = response.text
-            usage = {"input_tokens": response.input_tokens,
-                     "output_tokens": response.output_tokens}
-        except inv.InvestigatorError as e:
-            latency = round(time.monotonic() - t0, 3)
-            rm.record_model_interaction(
-                store, provider=provider_name, model=model_name, purpose=purpose,
-                trigger=trigger, prompt=prompt, response=None, status="error",
-                cycle_id=cycle_id, latency_seconds=latency,
-                error=f"{e.stage}: {e}" if getattr(e, "stage", None) else str(e),
-            )
-            raise
-        except ProviderError as e:
-            latency = round(time.monotonic() - t0, 3)
-            fallback = ai_config.get_config().get("fallback") or {}
-            fallback_model = (fallback.get("model") or "").strip()
-            may_fallback = (
-                e.retryable and fallback.get("enabled") is True
-                and provider_name == PROVIDER_OPENAI and fallback_model
-                and fallback_model != model_name
-            )
-            rm.record_model_interaction(
-                store, provider=provider_name, model=model_name, purpose=purpose,
-                trigger=trigger, prompt=prompt, response=None, status="error",
-                cycle_id=cycle_id, latency_seconds=latency, error=str(e),
-                extra={"prompt_version": "research-json-v1", "workflow": purpose,
-                       "retryable": e.retryable, "fallback_attempted": may_fallback,
-                       "fallback_model": fallback_model if may_fallback else None},
-            )
-            if not may_fallback:
-                raise inv.InvestigatorError(str(e), stage="invocation_error") from e
+        targets = [(primary, False)]
+        if fallback and fallback != primary:
+            targets.append((fallback, True))
+        first_error = None
+        for index, (target, is_fallback) in enumerate(targets):
+            started = time.monotonic()
             try:
-                t0 = time.monotonic()
-                response = get_provider(provider_name).invoke(prompt, model=fallback_model)
-                text = response.text
-                usage = {"input_tokens": response.input_tokens,
-                         "output_tokens": response.output_tokens}
-                actual_model = fallback_model
-                fallback_used = True
-            except ProviderError as fallback_error:
-                fallback_latency = round(time.monotonic() - t0, 3)
-                rm.record_model_interaction(
-                    store, provider=provider_name, model=fallback_model, purpose=purpose,
-                    trigger=trigger, prompt=prompt, response=None, status="error",
-                    cycle_id=cycle_id, latency_seconds=fallback_latency,
-                    error=str(fallback_error),
-                    extra={"prompt_version": "research-json-v1", "workflow": purpose,
-                           "retryable": fallback_error.retryable,
-                           "fallback_attempted": True, "fallback_from": model_name},
-                )
-                raise inv.InvestigatorError(
-                    f"primary model failed ({e}); fallback failed ({fallback_error})",
-                    stage="invocation_error",
-                ) from fallback_error
-
-        latency = round(time.monotonic() - t0, 3)
-        input_tokens = (usage or {}).get("input_tokens")
-        output_tokens = (usage or {}).get("output_tokens")
-        total_tokens = (input_tokens or 0) + (output_tokens or 0) if usage else 0
-        ai_budget.record_usage(tokens=total_tokens, expensive=True)
-        rm.record_model_interaction(
-            store, provider=provider_name, model=actual_model, purpose=purpose,
-            trigger=trigger, prompt=prompt, response=text, status="ok",
-            cycle_id=cycle_id, input_tokens=input_tokens, output_tokens=output_tokens,
-            latency_seconds=latency,
-            extra={"prompt_version": "research-json-v1", "workflow": purpose,
-                   "fallback_used": fallback_used,
-                   "fallback_from": model_name if fallback_used else None},
-        )
-        return text
-
+                response = get_provider(target["provider"]).invoke(prompt, model=target["model"])
+            except ProviderError as exc:
+                latency = round(time.monotonic() - started, 3)
+                ai_config.record_provider_result(target["provider"], success=False,
+                                                 error=str(exc), latency_seconds=latency)
+                may_continue = index == 0 and exc.retryable and len(targets) > 1
+                rm.record_model_interaction(store, provider=target["provider"], model=target["model"],
+                    purpose=purpose, trigger=trigger, prompt=prompt, response=None, status="error",
+                    cycle_id=cycle_id, latency_seconds=latency, error=str(exc),
+                    extra={"role": purpose, "capability": capability,
+                           "prompt_version": "research-json-v2", "retryable": exc.retryable,
+                           "fallback_attempted": may_continue,
+                           "fallback_reason": str(exc) if may_continue else None})
+                first_error = first_error or exc
+                if may_continue:
+                    continue
+                raise inv.InvestigatorError(str(exc), stage="invocation_error") from exc
+            latency = round(time.monotonic() - started, 3)
+            ai_config.record_provider_result(target["provider"], success=True,
+                                             latency_seconds=latency)
+            total = (response.input_tokens or 0) + (response.output_tokens or 0)
+            ai_budget.record_usage(tokens=total, expensive=capability in
+                                   ("REASONING", "STRONG_REASONING"))
+            rm.record_model_interaction(store, provider=target["provider"], model=target["model"],
+                purpose=purpose, trigger=trigger, prompt=prompt, response=response.text,
+                status="ok", cycle_id=cycle_id, input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens, latency_seconds=latency,
+                extra={"role": purpose, "capability": capability,
+                       "prompt_version": "research-json-v2", "fallback_used": is_fallback,
+                       "fallback_reason": str(first_error) if is_fallback else None,
+                       "cost": None, "validation": "pending_downstream_schema_validation"})
+            return response.text
+        raise inv.InvestigatorError("no provider route succeeded", stage="invocation_error")
     return runner
+
+
+def test_provider(provider: str, model: str) -> dict:
+    """Minimal bounded provider proof; never exposes prompt or credential."""
+    allowed, reason = ai_budget.budget_allows(estimated_tokens=64)
+    if not allowed:
+        return {"success": False, "blocked": True, "provider": provider,
+                "model": model, "error": f"AI budget: {reason}", "cost": None}
+    started = time.monotonic()
+    try:
+        response = get_provider(provider).invoke(
+            '{"task":"return exactly {\\"ok\\":true}"}', model=model)
+        latency = round(time.monotonic() - started, 3)
+        parsed = json.loads(response.text)
+        if parsed != {"ok": True}:
+            raise ProviderError("provider test returned an unexpected structured response")
+        ai_config.record_provider_result(provider, success=True, latency_seconds=latency)
+        ai_budget.record_usage(tokens=(response.input_tokens or 0) +
+                               (response.output_tokens or 0), expensive=False)
+        return {"success": True, "provider": provider, "model": model,
+                "latency_seconds": latency, "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens, "cost": None}
+    except (ProviderError, json.JSONDecodeError) as exc:
+        latency = round(time.monotonic() - started, 3)
+        ai_config.record_provider_result(provider, success=False, error=str(exc),
+                                         latency_seconds=latency)
+        return {"success": False, "provider": provider, "model": model,
+                "latency_seconds": latency, "error": str(exc), "cost": None}

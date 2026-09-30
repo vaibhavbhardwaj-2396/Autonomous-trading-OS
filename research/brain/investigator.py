@@ -620,6 +620,9 @@ def investigate(
             reason = "(no reason given)"
         return NoProposal(reason=reason)
 
+    if digest.get("packet_id"):
+        proposal.setdefault("source_research_packet", digest["packet_id"])
+
     if duplicate_check is not None:
         existing_id = duplicate_check(proposal)
         if existing_id:
@@ -642,7 +645,8 @@ def investigate(
         as_of=digest["as_of"],
         version=RESEARCH_AI_VERSION,
         source=DEFAULT_SOURCE,
-        extra={"prompt_path": str(PROMPT_PATH.relative_to(PROJECT_ROOT))},
+        extra={"prompt_path": str(PROMPT_PATH.relative_to(PROJECT_ROOT)),
+               "research_packet_id": digest.get("packet_id")},
     )
 
     return InvestigatorResult(

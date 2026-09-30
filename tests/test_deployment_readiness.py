@@ -66,11 +66,11 @@ check("A: api.wsgi.app is a Flask application instance", isinstance(api_wsgi.app
 
 _wsgi_rules = list(api_wsgi.app.url_map.iter_rules())
 _wsgi_routes = sorted({r.rule for r in _wsgi_rules if r.rule != "/static/<path:filename>"})
-check("A: api.wsgi.app has the expected route count (38, including reconciled system/activity/component control routes: /health + 16 live/operational + "
+check("A: api.wsgi.app has the expected route count (40, including reconciled system/activity/component control routes: /health + product status + 16 live/operational + "
       "6 paper/shadow — Slice AA + 2 global control — Priority Phase 4 + "
-      "5 outcome 2/resource-governor routes: /resources/status, /ai/status, "
-      "/ai/config, /artifacts, /artifacts/<id>; worker/data/operations telemetry)",
-      len(_wsgi_routes) == 38, str(_wsgi_routes))
+      "6 outcome 2/resource-governor routes: /resources/status, /ai/status, "
+      "/ai/config, /ai/test, /artifacts, /artifacts/<id>; worker/data/operations telemetry)",
+      len(_wsgi_routes) == 40, str(_wsgi_routes))
 check("A: /health is present on the WSGI entrypoint", "/health" in _wsgi_routes)
 check("A: /account is present on the WSGI entrypoint", "/account" in _wsgi_routes)
 
@@ -85,13 +85,15 @@ check("A: /account is present on the WSGI entrypoint", "/account" in _wsgi_route
 # narrow, explicit allow-list of named (route, method) pairs, not a
 # loosening of the check itself.
 WRITE_ROUTE_EXCEPTIONS = {"/control/mode": {"POST"}, "/ai/config": {"POST"},
+                          "/ai/test": {"POST"},
                           "/notifications/test": {"POST"},
                           "/notifications/config": {"POST"},
                           "/control/component": {"POST"}}
-check("A: the write-route exception list names exactly five narrow admin routes",
-      len(WRITE_ROUTE_EXCEPTIONS) == 5
+check("A: the write-route exception list names exactly six narrow admin routes",
+      len(WRITE_ROUTE_EXCEPTIONS) == 6
       and WRITE_ROUTE_EXCEPTIONS.get("/control/mode") == {"POST"}
       and WRITE_ROUTE_EXCEPTIONS.get("/ai/config") == {"POST"}
+      and WRITE_ROUTE_EXCEPTIONS.get("/ai/test") == {"POST"}
       and WRITE_ROUTE_EXCEPTIONS.get("/notifications/test") == {"POST"}
       and WRITE_ROUTE_EXCEPTIONS.get("/notifications/config") == {"POST"}
       and WRITE_ROUTE_EXCEPTIONS.get("/control/component") == {"POST"})

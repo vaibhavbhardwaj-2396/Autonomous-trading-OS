@@ -166,6 +166,11 @@ def get_paper_strategies(*, eligibility_dir=None, registry_dir=None) -> dict:
         eligible = pelig.list_paper_eligible(directory=eligibility_dir)
         reg_dir = registry_dir if registry_dir is not None else sreg.REGISTRY_DIR
         items = []
+        from paper.health import strategy_health
+        health_store = get_default_paper_store()
+        health_by_version = ({h["strategy_version_id"]: h
+                              for h in strategy_health(health_store)}
+                             if health_store is not None else {})
         for event in eligible:
             try:
                 version = sreg.load_version(event["version_id"], directory=reg_dir)
@@ -180,6 +185,9 @@ def get_paper_strategies(*, eligibility_dir=None, registry_dir=None) -> dict:
                 "approved_by": event.get("actor"),
                 "approved_reason": event.get("reason"),
                 "approved_at": event.get("ts"),
+                "health": health_by_version.get(event["version_id"], {
+                    "state": "WATCH", "reason": "no paper sample yet", "trades": 0,
+                    "net_pnl": 0.0, "win_rate": None}),
             })
     except Exception as e:
         raise PaperDataSourceError("paper eligibility registry is unavailable") from e
@@ -201,6 +209,10 @@ def get_paper_performance(store: Optional[PaperStore] = None) -> dict:
             "total_costs_alltime": 0.0,
             "n_trades": 0, "win_count": 0, "loss_count": 0, "win_rate": None,
             "open_position_count": 0,
+            "gross_exposure": 0.0, "gross_exposure_pct": 0.0,
+            "peak_equity": cap, "drawdown_pct": 0.0,
+            "gross_turnover": 0.0, "turnover_pct": 0.0,
+            "strategy_attribution": {}, "regime_attribution": {},
             "label": "PAPER — simulation only, not a live-approval signal",
         }
     try:
