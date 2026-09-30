@@ -29,6 +29,19 @@ check("component pause persists actor, reason and manual resume policy",
       and row["resume_policy"] == "MANUAL")
 check("component lock remains writable by the shared production group",
       (lock.stat().st_mode & 0o777) == 0o660)
+original_fchmod = components.os.fchmod
+def denied_fchmod(_fd, _mode):
+    raise PermissionError("simulated non-owner")
+components.os.fchmod = denied_fchmod
+try:
+    with components._shared_lock(lock):
+        non_owner_group_write_works = True
+except PermissionError:
+    non_owner_group_write_works = False
+finally:
+    components.os.fchmod = original_fchmod
+check("group writer accepts an already group-writable root-owned lock",
+      non_owner_group_write_works)
 check("component pause is enforced by allowed()", not components.allowed("RESEARCH_AI", path=state))
 
 now = dt.datetime(2026, 9, 26, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=5, minutes=30)))

@@ -73,7 +73,15 @@ def _shared_lock(path: Path):
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o660)
     # Explicit chmod defeats a root worker's usual 022 umask. Production's
     # setgid control directory supplies the ``tradingapi`` group.
-    os.fchmod(fd, 0o660)
+    try:
+        os.fchmod(fd, 0o660)
+    except PermissionError:
+        # The API legitimately opens a root-owned lock via group write. It
+        # cannot chmod a file it does not own, so accept it only when the
+        # required shared-write bit is already present.
+        if not (os.fstat(fd).st_mode & 0o020):
+            os.close(fd)
+            raise
     with os.fdopen(fd, "r+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
