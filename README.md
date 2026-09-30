@@ -134,6 +134,7 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 
 | Commit | Delivered |
 |---|---|
+| `3510e91` | shared root-worker/API component-control locking and production Admin resume regression proof |
 | `000ab1f` | Anthropic organization-key workspace routing and isolated request-header proof |
 | `5ada5ac` | stable Admin AI configuration forms, least-privilege VPS provider credentials, explicit provider/model guidance and regression coverage |
 | `e4ef796` | final integrated operating product: provider-neutral capability routing and benchmark, significance-gated ResearchPackets, family-wise research governance, autonomous evidence-to-strategy/paper learning loop, product command center, scientific watchdog and daily digest |
