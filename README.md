@@ -134,6 +134,7 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 
 | Commit | Delivered |
 |---|---|
+| `3a23442` | non-owner API reuse of the shared root-owned component-control lock, with permission regression coverage |
 | `3510e91` | shared root-worker/API component-control locking and production Admin resume regression proof |
 | `000ab1f` | Anthropic organization-key workspace routing and isolated request-header proof |
 | `5ada5ac` | stable Admin AI configuration forms, least-privilege VPS provider credentials, explicit provider/model guidance and regression coverage |
