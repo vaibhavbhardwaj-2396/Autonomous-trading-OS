@@ -33,7 +33,7 @@ function setActiveView(name) {
   document.querySelectorAll("main .view").forEach((sec) => {
     sec.classList.toggle("active", sec.id === `view-${name}`);
   });
-  tick(); // load the newly selected tab immediately, don't wait for the next poll
+  tick({ force: true }); // load the newly selected tab immediately
 }
 
 function setupTabs() {
@@ -47,7 +47,7 @@ function setupActions() {
     const target = event.target.closest("[data-navigate]");
     if (target) setActiveView(target.dataset.navigate);
   });
-  document.getElementById("refresh-now")?.addEventListener("click", tick);
+  document.getElementById("refresh-now")?.addEventListener("click", () => tick({ force: true }));
 }
 
 function updateBanner(results) {
@@ -82,7 +82,12 @@ function updateBanner(results) {
     : "no successful update yet";
 }
 
-async function tick() {
+async function tick(options) {
+  const force = options && options.force === true;
+  // The Admin view contains multi-field write forms. Re-rendering it every
+  // polling interval destroys the operator's unsaved input, so it refreshes
+  // only when entered, after a completed action, or via the Refresh button.
+  if (activeView === "control" && !force) return;
   const renderFn = VIEWS[activeView];
   if (!renderFn) return;
   try {

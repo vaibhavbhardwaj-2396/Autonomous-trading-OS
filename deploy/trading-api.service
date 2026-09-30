@@ -24,6 +24,10 @@ WorkingDirectory=/root/trading-agent
 # would mean a bug in this read-only API could leak broker/Telegram secrets
 # it never actually uses. See docs/DEPLOYMENT.md step 11/12.
 EnvironmentFile=/root/trading-agent/deploy/api.env
+# Provider credentials only. This file must never contain broker, Telegram,
+# dashboard or other root trading secrets. Optional so the dashboard and
+# deterministic subsystems remain available before AI is configured.
+EnvironmentFile=-/root/trading-agent/deploy/ai.env
 # Telegram-only credentials for the authenticated notification test action.
 # Optional so the read-only API remains available when notifications have not
 # been configured. Never point this service at the broker-bearing root .env.

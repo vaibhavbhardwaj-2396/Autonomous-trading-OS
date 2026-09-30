@@ -2,7 +2,7 @@
 
 Living Quant research asks for a capability, never a brand/model name. The
 durable, secret-free configuration is `control/ai_config.json`; credentials
-remain in the root worker environment and are never returned by the API.
+remain server-side and are never returned by the API.
 
 ## Providers
 
@@ -38,12 +38,34 @@ evidence evaluation, Strategy Factory and paper operation remain independent.
 
 ## First production proof
 
-After adding one supported credential to the VPS environment:
+Install supported credentials in the dedicated least-privilege environment:
+
+```bash
+cd /root/trading-agent
+cp deploy/ai.env.example deploy/ai.env
+nano deploy/ai.env
+chown root:tradingapi deploy/ai.env
+chmod 640 deploy/ai.env
+systemctl daemon-reload
+systemctl restart trading-api.service
+```
+
+The root research worker and the restricted API provider test both load this
+file. Do not put broker, Telegram, dashboard, TOTP or MPIN secrets in it. The
+root `.env` remains supported for root-run workers, but the API intentionally
+cannot read that broader secret file.
+
+Then:
 
 1. Unlock Admin and save the relevant capability route.
 2. Use **Test provider** once; confirm success, latency, and reported tokens.
 3. Resume `RESEARCH_AI` only after the bounded test succeeds.
 4. Confirm the first legitimate trace in Artifacts and `/ai/status`.
+
+The Admin screen refreshes automatically when opened and after completed
+actions, but not on the background polling timer while it is open. This keeps
+unsaved model/reason fields intact. Use the top-right **Refresh** button for an
+explicit status refresh.
 
 No credential is committed, sent to the browser, or accepted by the routing
 configuration endpoint.

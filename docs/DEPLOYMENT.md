@@ -166,6 +166,21 @@ chmod 640 deploy/api.env
 Only `DASHBOARD_API_TOKEN` is copied to Netlify. The admin token remains VPS-side
 and is entered interactively when an admin session is needed.)
 
+AI provider credentials use a second least-privilege file. This lets both the
+root research worker and the restricted API's bounded **Test provider** action
+read AI credentials without exposing broker or Telegram secrets to the API:
+
+```bash
+cp deploy/ai.env.example deploy/ai.env
+nano deploy/ai.env                 # set only the provider(s) you use
+chown root:tradingapi deploy/ai.env
+chmod 640 deploy/ai.env
+```
+
+Do not put AI keys only in the root `.env`: root-run research can see them there,
+but `trading-api.service` intentionally cannot, so its provider registry and test
+would correctly report `NOT_CONFIGURED`.
+
 **After any code change to `api/`**, the running `trading-api.service` does **not**
 update itself — it must be redeployed (`git pull` + `sudo systemctl restart trading-api`,
 §30). A dashboard showing "broker unknown", a missing `broker`/`account_value_status`
@@ -201,7 +216,8 @@ sudo chown root:root /root/trading-agent/.env
 for f in memory/.kite_session.json memory/.indstocks_session.json; do
     [ -f "/root/trading-agent/$f" ] && sudo chmod 600 "/root/trading-agent/$f" && sudo chown root:root "/root/trading-agent/$f"
 done
-# deploy/api.env was already set to 640 root:tradingapi in §12 — leave it.
+# deploy/api.env and deploy/ai.env were already set to 640 root:tradingapi in
+# §12 — leave them readable by the service group.
 
 # Write access, only where actually needed:
 sudo chmod -R g+w /root/trading-agent/research

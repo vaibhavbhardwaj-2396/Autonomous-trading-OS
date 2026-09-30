@@ -334,6 +334,8 @@ check("C: deploy/api.env.example (the blank API-secrets template) is among the s
       any(p == "deploy/api.env.example" for p in _staged_paths))
 check("C: the real per-VPS secrets file deploy/api.env is NOT staged (must stay gitignored)",
       not any(p == "deploy/api.env" for p in _staged_paths))
+check("C: the real per-VPS AI secrets file deploy/ai.env is NOT staged (must stay gitignored)",
+      not any(p == "deploy/ai.env" for p in _staged_paths))
 check("C: the real frontend config frontend/config.js is NOT staged (must stay gitignored)",
       not any(p == "frontend/config.js" for p in _staged_paths))
 check("C: the root .env (if present) is NOT staged",
@@ -364,6 +366,8 @@ check("D: deploy/trading-api.service has Restart=always (restart on failure)",
       "Restart=always" in _service_text)
 check("D: deploy/trading-api.service references an EnvironmentFile (secrets not embedded)",
       "EnvironmentFile=" in _service_text)
+check("D: deploy/trading-api.service loads only the dedicated optional AI environment",
+      "EnvironmentFile=-/root/trading-agent/deploy/ai.env" in _service_execstart)
 check("D: deploy/trading-api.service's actual (non-comment) directives have no bash-style "
       "${VAR:-default} syntax (not supported by systemd's ExecStart= substitution)",
       not re.search(r"\$\{\w+:-", _service_execstart))
@@ -379,7 +383,7 @@ check("D: requirements.txt lists gunicorn (the chosen production WSGI server)",
       "gunicorn" in _req_text)
 
 _gitignore_text = (REPO_ROOT / ".gitignore").read_text()
-for pattern in ("deploy/api.env", "frontend/config.js", "memory/state.json", ".env"):
+for pattern in ("deploy/api.env", "deploy/ai.env", "frontend/config.js", "memory/state.json", ".env"):
     check(f"D: .gitignore excludes {pattern}", pattern in _gitignore_text)
 
 

@@ -887,7 +887,7 @@ function aiConfigFormHtml(ai) {
       <button type="button" id="ai-test-provider" class="ghost-btn">Test provider</button>
       <span class="control-form-status"></span>
     </form>
-    <div class="readonly-note">API keys and endpoints are configured on the VPS, never in this browser. OpenAI and Anthropic use fixed official endpoints. Compatible and local endpoints use the server environment.</div>
+    <div class="readonly-note">API keys and endpoints are configured on the VPS, never in this browser. For Anthropic, choose <strong>Anthropic</strong> and enter an exact Claude API model ID such as <code>claude-sonnet-5</code> (not a display name such as “Sonnet 5.5”). OpenAI and Anthropic use fixed official endpoints; compatible and local endpoints use the server environment.</div>
   `;
 }
 

@@ -24,9 +24,22 @@ from .. import memory as rm
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
-except (ImportError, OSError):
-    pass
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv is not None:
+    # Root-run workers retain the root-only trading environment.  The API is
+    # deliberately denied that file and receives only AI credentials through
+    # deploy/ai.env.  Keep the loads independent: PermissionError on the root
+    # file must not prevent the least-privilege file from being read.
+    for _env_file in (
+        Path(__file__).resolve().parents[2] / ".env",
+        Path(__file__).resolve().parents[2] / "deploy" / "ai.env",
+    ):
+        try:
+            load_dotenv(_env_file, override=False)
+        except OSError:
+            continue
 
 PROVIDER_OPENAI = "openai"
 PROVIDER_ANTHROPIC = "anthropic"

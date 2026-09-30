@@ -258,10 +258,14 @@ check("Admin component controls call only the audited component endpoint",
 check("Admin operational health imports the broker sync timestamp formatter",
   /discoveryAdmissionDisplay,\s*syncedAtLabel/.test(VIEWS_SRC));
 check("Admin AI form distinguishes provider company from provider model ID",
-  VIEWS_SRC.includes("Provider company") && VIEWS_SRC.includes("Model ID (from provider)"));
+  VIEWS_SRC.includes("Provider company") && VIEWS_SRC.includes("Model ID (from provider)")
+  && VIEWS_SRC.includes("claude-sonnet-5") && VIEWS_SRC.includes("fixed official endpoints"));
 check("render exceptions are not mislabeled as API network outages",
   APP_SRC.includes("This page could not finish rendering")
   && !APP_SRC.includes('updateBanner([{ ok: false, error: "network" }])'));
+check("Admin polling preserves unsaved form input and manual refresh remains explicit",
+  APP_SRC.includes('activeView === "control" && !force')
+  && APP_SRC.includes('tick({ force: true })'));
 check("artifact explorer exposes server-side search, sorting, and pagination controls",
   VIEWS_SRC.includes("artifact-search-form")
   && VIEWS_SRC.includes("URLSearchParams")

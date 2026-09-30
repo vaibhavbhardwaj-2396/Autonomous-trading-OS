@@ -51,11 +51,13 @@ The watchdog makes no broker or AI call. Validation is read-only with `--no-writ
 
 ## External dependencies
 
-OpenAI research requires a server-side `OPENAI_API_KEY` in the root-owned `.env`. It is
-never committed, returned by the API or sent to the browser. Without it, `RESEARCH_AI`
-must remain PAUSED or appears BLOCKED; deterministic ingestion and experiments continue.
-The worker loads this file only at its provider boundary. A future key installation should
-be verified with one bounded research call and its recorded usage artifact.
+Research AI requires a supported server-side credential in `deploy/ai.env` (for example,
+`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`). Install it as `root:tradingapi` mode `640`; it is
+never committed, returned by the API or sent to the browser. The separate root `.env`
+continues to hold broker credentials and is deliberately unreadable by the API service.
+Without an AI credential, `RESEARCH_AI` must remain PAUSED or appears BLOCKED;
+deterministic ingestion and experiments continue. Verify a new credential with the Admin
+screen's one bounded provider test before resuming AI research.
 
 INDstocks authentication is refreshed daily using TOTP/MPIN credentials in the same
 root-only environment. Failure makes broker data stale and trading fail closed. The
