@@ -27,6 +27,8 @@ row = components.set_state("RESEARCH_AI", "PAUSED", reason="AI_BUDGET_EXHAUSTED"
 check("component pause persists actor, reason and manual resume policy",
       row["desired_state"] == "PAUSED" and row["reason"] == "AI_BUDGET_EXHAUSTED"
       and row["resume_policy"] == "MANUAL")
+check("component lock remains writable by the shared production group",
+      (lock.stat().st_mode & 0o777) == 0o660)
 check("component pause is enforced by allowed()", not components.allowed("RESEARCH_AI", path=state))
 
 now = dt.datetime(2026, 9, 26, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=5, minutes=30)))

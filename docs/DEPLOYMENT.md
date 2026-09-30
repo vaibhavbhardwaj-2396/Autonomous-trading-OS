@@ -224,6 +224,12 @@ sudo chmod -R g+w /root/trading-agent/research
 sudo mkdir -p /root/trading-agent/logs
 sudo chgrp tradingapi /root/trading-agent/logs
 sudo chmod g+w /root/trading-agent/logs
+
+# The audited component control is shared by root-run schedulers and the
+# restricted API. Repair installations created before shared-lock mode was
+# enforced in code.
+sudo chown root:tradingapi /root/trading-agent/control/.component_state.lock
+sudo chmod 660 /root/trading-agent/control/.component_state.lock
 ```
 
 Verify tradingapi genuinely cannot read the trading secrets:

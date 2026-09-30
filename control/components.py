@@ -10,6 +10,8 @@ from __future__ import annotations
 import datetime as dt
 import fcntl
 import json
+import os
+from contextlib import contextmanager
 from pathlib import Path
 
 CONTROL_DIR = Path(__file__).resolve().parent
@@ -64,6 +66,22 @@ def allowed(component: str, *, path: Path = STATE_PATH) -> bool:
     return get(component, path=path)["desired_state"] == "RUNNING"
 
 
+@contextmanager
+def _shared_lock(path: Path):
+    """Keep the root-worker/API lock writable by their shared group."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o660)
+    # Explicit chmod defeats a root worker's usual 022 umask. Production's
+    # setgid control directory supplies the ``tradingapi`` group.
+    os.fchmod(fd, 0o660)
+    with os.fdopen(fd, "r+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield lock
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def set_state(component: str, desired_state: str, *, reason: str, actor: str,
               resume_policy: str = "MANUAL", path: Path = STATE_PATH,
               lock_path: Path = LOCK_PATH) -> dict:
@@ -75,9 +93,7 @@ def set_state(component: str, desired_state: str, *, reason: str, actor: str,
         raise InvalidComponentState(f"resume_policy must be one of {RESUME_POLICIES}")
     if not str(reason).strip() or not str(actor).strip():
         raise InvalidComponentState("reason and actor are required")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    with _shared_lock(lock_path):
         rows = get_all(path=path)
         previous = rows[component]
         history = list(previous.get("history") or [])
