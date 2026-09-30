@@ -55,6 +55,7 @@ Research AI requires a supported server-side credential in `deploy/ai.env` (for 
 `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`). Install it as `root:tradingapi` mode `640`; it is
 never committed, returned by the API or sent to the browser. The separate root `.env`
 continues to hold broker credentials and is deliberately unreadable by the API service.
+Organization-level Anthropic keys also require `ANTHROPIC_WORKSPACE_ID` in the same file.
 Without an AI credential, `RESEARCH_AI` must remain PAUSED or appears BLOCKED;
 deterministic ingestion and experiments continue. Verify a new credential with the Admin
 screen's one bounded provider test before resuming AI research.

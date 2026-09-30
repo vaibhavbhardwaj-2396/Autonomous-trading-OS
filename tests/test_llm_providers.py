@@ -49,6 +49,28 @@ catalog = llm.provider_catalog()
 check("official and compatible adapters are registered", {"openai", "anthropic", "openai_compatible", "local_openai"} == {r["provider"] for r in catalog})
 check("catalog exposes status but no credential", all("credential_status" in r for r in catalog) and "secret-value" not in json.dumps(catalog).lower())
 
+print("\n--- Anthropic workspace routing ---")
+orig_read_json = llm._read_json
+orig_key = llm.os.environ.get(llm.ENV_ANTHROPIC_API_KEY)
+orig_workspace = llm.os.environ.get(llm.ENV_ANTHROPIC_WORKSPACE_ID)
+captured_headers = {}
+def capture_anthropic_request(request):
+    captured_headers.update({k.lower(): v for k, v in request.header_items()})
+    return {"content": [{"type": "text", "text": "{}"}], "usage": {}}
+try:
+    llm.os.environ[llm.ENV_ANTHROPIC_API_KEY] = "secret-value"
+    llm.os.environ[llm.ENV_ANTHROPIC_WORKSPACE_ID] = "workspace-value"
+    llm._read_json = capture_anthropic_request
+    llm.AnthropicProvider().invoke("bounded test", model="model")
+    check("organization-level Anthropic keys send the configured workspace header",
+          captured_headers.get("anthropic-workspace-id") == "workspace-value")
+finally:
+    llm._read_json = orig_read_json
+    if orig_key is None: llm.os.environ.pop(llm.ENV_ANTHROPIC_API_KEY, None)
+    else: llm.os.environ[llm.ENV_ANTHROPIC_API_KEY] = orig_key
+    if orig_workspace is None: llm.os.environ.pop(llm.ENV_ANTHROPIC_WORKSPACE_ID, None)
+    else: llm.os.environ[llm.ENV_ANTHROPIC_WORKSPACE_ID] = orig_workspace
+
 print("\n--- gateway trace and fallback ---")
 store = Store.open(tmp / "research.db")
 orig_resolve, orig_budget = ai_config.resolve_role, ai_budget.budget_allows

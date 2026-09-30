@@ -51,6 +51,7 @@ ENV_PROVIDER = "RESEARCH_AI_PROVIDER"  # legacy emergency override
 ENV_OPENAI_MODEL = "RESEARCH_AI_OPENAI_MODEL"
 ENV_OPENAI_API_KEY = "OPENAI_API_KEY"
 ENV_ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
+ENV_ANTHROPIC_WORKSPACE_ID = "ANTHROPIC_WORKSPACE_ID"
 ENV_COMPATIBLE_API_KEY = "OPENAI_COMPATIBLE_API_KEY"
 ENV_COMPATIBLE_BASE_URL = "OPENAI_COMPATIBLE_BASE_URL"
 ENV_LOCAL_BASE_URL = "LOCAL_AI_BASE_URL"
@@ -137,10 +138,15 @@ class AnthropicProvider:
         body = json.dumps({"model": model, "max_tokens": 4000,
                            "system": SYSTEM_PREAMBLE,
                            "messages": [{"role": "user", "content": prompt}]}).encode()
+        headers = {
+            "x-api-key": key, "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+        workspace_id = (os.environ.get(ENV_ANTHROPIC_WORKSPACE_ID) or "").strip()
+        if workspace_id:
+            headers["anthropic-workspace-id"] = workspace_id
         parsed = _read_json(urllib.request.Request(
-            endpoint, data=body, method="POST", headers={
-                "x-api-key": key, "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json"}))
+            endpoint, data=body, method="POST", headers=headers))
         try:
             text = "".join(x.get("text", "") for x in parsed["content"] if x.get("type") == "text")
             if not text:

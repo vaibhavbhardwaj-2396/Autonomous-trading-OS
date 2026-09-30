@@ -9,7 +9,7 @@ remain server-side and are never returned by the API.
 | Provider ID | Protocol | Authentication | Required environment |
 |---|---|---|---|
 | `openai` | OpenAI Responses API | `API_KEY` | `OPENAI_API_KEY` |
-| `anthropic` | Anthropic Messages API | `API_KEY` | `ANTHROPIC_API_KEY` |
+| `anthropic` | Anthropic Messages API | `API_KEY` | `ANTHROPIC_API_KEY`; `ANTHROPIC_WORKSPACE_ID` for organization-level keys |
 | `openai_compatible` | OpenAI-compatible chat completions | `API_KEY` | `OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_API_KEY` |
 | `local_openai` | OpenAI-compatible chat completions | `LOCAL_NO_AUTH` | `LOCAL_AI_BASE_URL` restricted to loopback |
 
@@ -54,6 +54,11 @@ The root research worker and the restricted API provider test both load this
 file. Do not put broker, Telegram, dashboard, TOTP or MPIN secrets in it. The
 root `.env` remains supported for root-run workers, but the API intentionally
 cannot read that broader secret file.
+
+If Anthropic reports that the key is not scoped to a workspace, copy the
+workspace ID from Anthropic Console into `ANTHROPIC_WORKSPACE_ID`. The gateway
+sends it as the `anthropic-workspace-id` request header; it is never returned
+to the dashboard.
 
 Then:
 
