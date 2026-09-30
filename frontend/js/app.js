@@ -91,7 +91,9 @@ async function tick() {
   } catch (e) {
     // A rendering bug must never take down the polling loop itself.
     console.error("view render failed", e);
-    updateBanner([{ ok: false, error: "network" }]);
+    const banner = document.getElementById("connection-banner");
+    banner.className = "show error";
+    banner.textContent = "This page could not finish rendering. The API may still be healthy; reload the dashboard and check the browser console.";
   }
 }
 

@@ -8,7 +8,8 @@ import { apiGet, apiPost, setAdminToken, hasAdminToken } from "./api.js";
 import {
   esc, money, num, pnlClass, dt, badge, table, errorState,
   brokerCard, accountStaleNotice, accountInfoNotes,
-  accountTotalDisplay, accountSubtotalDisplay, unmanagedHoldingsDisplay, discoveryAdmissionDisplay,
+  accountTotalDisplay, accountSubtotalDisplay, unmanagedHoldingsDisplay,
+  discoveryAdmissionDisplay, syncedAtLabel,
 } from "./format.js";
 
 function el(id) {
@@ -854,18 +855,24 @@ function controlActionsHtml(currentMode) {
 
 function aiConfigFormHtml(ai) {
   const providers = ai.known_providers || [];
+  const providerLabels = {
+    openai: "OpenAI",
+    anthropic: "Anthropic",
+    openai_compatible: "OpenAI-compatible provider",
+    local_openai: "Local OpenAI-compatible endpoint",
+  };
   return `
     <form id="ai-config-form" class="control-form">
       <label>Capability
         <select name="capability">${(ai.capabilities || []).map((c) => `<option value="${c}" ${c === "REASONING" ? "selected" : ""}>${c}</option>`).join("")}</select>
       </label>
-      <label>Provider
+      <label>Provider company
         <select name="provider">
-          ${providers.map((p) => `<option value="${p}" ${p === ai.configured_provider ? "selected" : ""}>${p}</option>`).join("")}
+          ${providers.map((p) => `<option value="${p}" ${p === ai.configured_provider ? "selected" : ""}>${esc(providerLabels[p] || p)}</option>`).join("")}
         </select>
       </label>
-      <label>Model
-        <input type="text" name="model" placeholder="configured provider model id" value="${esc(ai.configured_model || "")}" required />
+      <label>Model ID (from provider)
+        <input type="text" name="model" placeholder="enter the exact API model ID" value="${esc(ai.configured_model || "")}" required />
       </label>
       <label>Fallback provider
         <select name="fallback_provider"><option value="">none</option>${providers.map((p) => `<option value="${p}">${p}</option>`).join("")}</select>
@@ -880,6 +887,7 @@ function aiConfigFormHtml(ai) {
       <button type="button" id="ai-test-provider" class="ghost-btn">Test provider</button>
       <span class="control-form-status"></span>
     </form>
+    <div class="readonly-note">API keys and endpoints are configured on the VPS, never in this browser. OpenAI and Anthropic use fixed official endpoints. Compatible and local endpoints use the server environment.</div>
   `;
 }
 

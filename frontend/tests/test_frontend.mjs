@@ -230,6 +230,7 @@ function stripComments(s) {
   return s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 const VIEWS_SRC = stripComments(readFileSync(join(HERE, "../js/views.js"), "utf8"));
+const APP_SRC = stripComments(readFileSync(join(HERE, "../js/app.js"), "utf8"));
 const INDEX_SRC = readFileSync(join(HERE, "../index.html"), "utf8");
 const primaryNav = [...INDEX_SRC.matchAll(/<button data-view="([^"]+)"[^>]*>([^<]+)<\/button>/g)]
   .map((m) => [m[1], m[2].replace("🔒", "").trim()]);
@@ -254,6 +255,13 @@ check("Overview activity uses the unified operational and research feed",
   VIEWS_SRC.includes('load("/activity?limit=20"'));
 check("Admin component controls call only the audited component endpoint",
   VIEWS_SRC.includes('apiPost("/control/component"'));
+check("Admin operational health imports the broker sync timestamp formatter",
+  /discoveryAdmissionDisplay,\s*syncedAtLabel/.test(VIEWS_SRC));
+check("Admin AI form distinguishes provider company from provider model ID",
+  VIEWS_SRC.includes("Provider company") && VIEWS_SRC.includes("Model ID (from provider)"));
+check("render exceptions are not mislabeled as API network outages",
+  APP_SRC.includes("This page could not finish rendering")
+  && !APP_SRC.includes('updateBanner([{ ok: false, error: "network" }])'));
 check("artifact explorer exposes server-side search, sorting, and pagination controls",
   VIEWS_SRC.includes("artifact-search-form")
   && VIEWS_SRC.includes("URLSearchParams")
