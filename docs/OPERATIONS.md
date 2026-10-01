@@ -19,6 +19,11 @@ schedule is missing. `BLOCKED` means an external dependency is absent. `STALE` m
 schedule exists but its heartbeat is overdue. State transitions generate exception-only
 Telegram alerts; routine healthy cycles do not.
 
+Heartbeat freshness is evaluated against the component's actual active window. The bounded
+research/experiment worker runs from 06:00 through 23:50 IST; between midnight and the
+06:00 start it reports `NOT_DUE`, not `STALE`. At startup it has until 06:15 to complete
+its first heartbeat, after which a missing run is a real stale condition.
+
 Component controls are persistent and audited. The Admin screen can set RUNNING, PAUSED or
 DISABLED with a required reason. Pausing `RESEARCH_AI` does not pause deterministic
 experiments; those are governed separately by `EXPERIMENTS`. Re-enabling a component does
@@ -73,6 +78,11 @@ audit found 109 hypotheses/contracts: 104 DRAFT and 5 REPORTED, with zero eviden
 strategy versions. The bottleneck is therefore DRAFT-to-LOCKED review/promotion, not data
 collection. Backpressure blocks more AI discovery when downstream queues are full; it does
 not fabricate promotions or weaken evidence rules.
+
+The daily Telegram digest separates rolling 24-hour movement from cumulative totals. A
+zero AI-call count includes the latest worker no-work reason and queue backpressure, so it
+does not imply that provider authentication failed. Provider health is still verified
+independently through the Admin bounded provider test and runtime dependency state.
 
 ### Experiment deadlines and recovery
 

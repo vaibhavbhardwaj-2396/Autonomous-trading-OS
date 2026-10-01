@@ -134,6 +134,7 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 
 | Commit | Delivered |
 |---|---|
+| `ddd3b8c` | schedule-aware overnight research heartbeats and diagnostic Telegram digests that explain zero activity/backpressure |
 | `3a23442` | non-owner API reuse of the shared root-owned component-control lock, with permission regression coverage |
 | `3510e91` | shared root-worker/API component-control locking and production Admin resume regression proof |
 | `000ab1f` | Anthropic organization-key workspace routing and isolated request-header proof |
