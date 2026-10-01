@@ -73,5 +73,39 @@ stale = watchdog.reconcile(crontab_text=cron, heartbeats=stale_hb, desired=desir
 data = next(r for r in stale["components"] if r["component"] == "DATA")
 check("overdue scheduled heartbeat becomes STALE", data["effective_state"] == "STALE", data)
 
+overnight = now.replace(hour=1, minute=5)
+old_worker = (overnight-dt.timedelta(hours=2)).isoformat()
+overnight_hb = dict(heartbeats)
+overnight_hb["RESEARCH_AI"] = {"last_attempt":old_worker,"last_success":old_worker}
+overnight_hb["EXPERIMENTS"] = {"last_attempt":old_worker,"last_success":old_worker}
+overnight_state = watchdog.reconcile(crontab_text=cron, heartbeats=overnight_hb,
+                                     desired=desired, now=overnight)
+overnight_workers = [r for r in overnight_state["components"]
+                     if r["component"] in ("RESEARCH_AI", "EXPERIMENTS")]
+check("overnight worker gap is NOT_DUE rather than a false stale alert",
+      all(r["effective_state"] == "HEALTHY" and r["heartbeat_state"] == "NOT_DUE"
+          and r["next_expected_run"].endswith("06:15:00+05:30")
+          for r in overnight_workers)
+      and not any(a["component"] in ("RESEARCH_AI", "EXPERIMENTS")
+                  for a in overnight_state["alerts"]), overnight_state)
+
+startup_grace = overnight.replace(hour=6, minute=5)
+grace_state = watchdog.reconcile(crontab_text=cron, heartbeats=overnight_hb,
+                                 desired=desired, now=startup_grace)
+grace_workers = [r for r in grace_state["components"]
+                 if r["component"] in ("RESEARCH_AI", "EXPERIMENTS")]
+check("06:00 worker receives bounded startup grace before freshness is enforced",
+      all(r["effective_state"] == "HEALTHY" and r["heartbeat_state"] == "NOT_DUE"
+          for r in grace_workers), grace_state)
+
+startup_overdue = overnight.replace(hour=6, minute=16)
+overdue_state = watchdog.reconcile(crontab_text=cron, heartbeats=overnight_hb,
+                                   desired=desired, now=startup_overdue)
+overdue_workers = [r for r in overdue_state["components"]
+                   if r["component"] in ("RESEARCH_AI", "EXPERIMENTS")]
+check("missing worker after startup grace becomes STALE",
+      all(r["effective_state"] == "STALE" and r["heartbeat_state"] == "STALE"
+          for r in overdue_workers), overdue_state)
+
 print(f"\n{PASSED} passed, {FAILED} failed")
 raise SystemExit(1 if FAILED else 0)

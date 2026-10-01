@@ -14,14 +14,47 @@ _IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 
 SPECS = {
     "DATA": {"pattern": "research.recorder", "heartbeat_hours": 24},
-    "RESEARCH_AI": {"pattern": "research.brain.worker", "heartbeat_hours": 1},
-    "EXPERIMENTS": {"pattern": "research.brain.worker", "heartbeat_hours": 1},
+    # The worker deliberately sleeps from midnight until 06:00 IST.  A cron
+    # entry being installed does not mean a heartbeat is due during that
+    # window.  Allow the 06:00 process one cron interval plus five minutes to
+    # complete before enforcing the normal one-hour freshness threshold.
+    "RESEARCH_AI": {"pattern": "research.brain.worker", "heartbeat_hours": 1,
+                    "active_start_hour": 6, "active_end_hour": 24,
+                    "startup_grace_minutes": 15},
+    "EXPERIMENTS": {"pattern": "research.brain.worker", "heartbeat_hours": 1,
+                    "active_start_hour": 6, "active_end_hour": 24,
+                    "startup_grace_minutes": 15},
     "PAPER": {"pattern": "paper.runner run", "heartbeat_hours": 36},
     "BROKER_SYNC": {"pattern": "refresh_indstocks_session.sh", "heartbeat_hours": 30},
     "VALIDATION": {"pattern": "research.validation", "heartbeat_hours": 36},
     "NOTIFICATIONS": {"pattern": "scripts.notification_service digest", "heartbeat_hours": 30},
     "WATCHDOG": {"pattern": "scripts.watchdog", "heartbeat_hours": 1},
 }
+
+
+def _heartbeat_due(spec: dict, now: dt.datetime) -> tuple[bool, Optional[str]]:
+    """Return whether freshness is enforceable and when it next becomes due.
+
+    Most components use a simple maximum age and are always monitored.  A
+    bounded daily schedule may declare an active window; outside it, an old
+    heartbeat is expected rather than stale.  ``next_due`` is the end of the
+    morning startup grace period, not a claim that a process is continuously
+    running.
+    """
+    if "active_start_hour" not in spec:
+        return True, None
+    start = int(spec["active_start_hour"])
+    end = int(spec.get("active_end_hour", 24))
+    grace = int(spec.get("startup_grace_minutes", 0))
+    minute = now.hour * 60 + now.minute
+    due_start = start * 60 + grace
+    due_end = end * 60
+    if due_start <= minute < due_end:
+        return True, None
+    next_day = 1 if minute >= due_end else 0
+    due_at = (now + dt.timedelta(days=next_day)).replace(
+        hour=due_start // 60, minute=due_start % 60, second=0, microsecond=0)
+    return False, due_at.isoformat()
 
 
 def _parse(value) -> Optional[dt.datetime]:
@@ -49,7 +82,11 @@ def reconcile(*, crontab_text: str, heartbeats: dict, dependencies: Optional[dic
         last_attempt = _parse(heartbeat.get("last_attempt"))
         last_success = _parse(heartbeat.get("last_success"))
         age = ((now - last_attempt).total_seconds() / 3600) if last_attempt else None
-        heartbeat_state = "FRESH" if age is not None and age <= spec["heartbeat_hours"] else "STALE"
+        heartbeat_due, next_due = _heartbeat_due(spec, now)
+        if not heartbeat_due:
+            heartbeat_state = "NOT_DUE"
+        else:
+            heartbeat_state = "FRESH" if age is not None and age <= spec["heartbeat_hours"] else "STALE"
         dependency = dependencies.get(name) or {"state": "READY", "reason": None}
         dependency_state = dependency.get("state", "READY")
         if wanted["desired_state"] != "RUNNING":
@@ -59,6 +96,8 @@ def reconcile(*, crontab_text: str, heartbeats: dict, dependencies: Optional[dic
             effective, reason = "CONFIGURATION_DRIFT", "desired RUNNING but scheduler entry is absent"
         elif dependency_state not in ("READY", "HEALTHY"):
             effective, reason = "BLOCKED", dependency.get("reason") or "dependency unavailable"
+        elif not heartbeat_due:
+            effective, reason = "HEALTHY", "scheduler installed; heartbeat is not due outside the active window"
         elif heartbeat_state == "STALE":
             effective, reason = "STALE", "scheduled heartbeat is missing or overdue"
         elif heartbeat.get("last_error"):
@@ -71,7 +110,7 @@ def reconcile(*, crontab_text: str, heartbeats: dict, dependencies: Optional[dic
                "effective_state": effective, "reason": reason,
                "last_success": last_success.isoformat() if last_success else None,
                "last_attempt": last_attempt.isoformat() if last_attempt else None,
-               "next_expected_run": heartbeat.get("next_expected_run"),
+               "next_expected_run": heartbeat.get("next_expected_run") or next_due,
                "resume_policy": wanted.get("resume_policy")}
         rows.append(row)
         if effective in ("CONFIGURATION_DRIFT", "STALE", "DEGRADED"):

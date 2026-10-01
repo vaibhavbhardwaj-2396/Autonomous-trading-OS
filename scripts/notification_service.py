@@ -7,7 +7,8 @@ import json
 import time
 from pathlib import Path
 
-from control import ai_budget, notifications
+from control import ai_budget, notifications, watchdog
+from research.brain.worker import worker_status
 from research.store import Store
 from research.validation import build_snapshot
 from scripts.telegram_notify import send_message
@@ -34,14 +35,52 @@ def deliver(text: str, *, category: str, message_type: str, actor: str) -> dict:
             error=f"{type(exc).__name__}: {exc}")
 
 
-def daily_digest(*, actor: str = "scheduler") -> dict:
-    with Store.open() as store:
-        snapshot = build_snapshot(store)
+def _daily_digest_text(snapshot: dict, budget: dict, paper_perf: dict,
+                       worker: dict, runtime: dict) -> str:
     f = snapshot["funnel"]
-    budget = ai_budget.get_budget_state()
     blockers = snapshot["paper_readiness"]["blockers"]
     datasets = snapshot["data"]["datasets"]
     velocity = snapshot.get("velocity") or {}
+    runtime_rows = runtime.get("components") or []
+    research_row = next((row for row in runtime_rows
+                         if row.get("component") == "RESEARCH_AI"), {})
+    research_state = research_row.get("effective_state") or "UNKNOWN"
+    queue = (worker.get("last_queue_health") or {}).get("snapshot") or {}
+    decision = (worker.get("last_queue_health") or {}).get("decision") or {}
+    queue_reasons = decision.get("blocking_reasons") or []
+    no_work = worker.get("last_no_work_reason") or "none"
+    ai_note = ""
+    if not budget.get("calls_today", 0):
+        ai_note = f" · no call required by latest worker: {no_work}"
+    return "\n".join([
+        "LIVING QUANT — DAILY", "",
+        f"System capacity: {snapshot['capacity']['state']}",
+        f"Research runtime: {research_state}",
+        f"Research heartbeat: {worker.get('last_heartbeat_at') or 'missing'}",
+        f"Experiments: {'ACTIVE' if queue.get('locked_runnable_count', 0) else 'WAITING'}",
+        f"Paper: {'ACTIVE' if snapshot['paper_readiness']['ready'] else 'WAITING'}", "",
+        "Last 24h:",
+        f"Observations +{(velocity.get('observations') or {}).get('24h', 0)}",
+        f"Hypotheses +{(velocity.get('hypotheses') or {}).get('24h', 0)}",
+        f"Evidence +{(velocity.get('evidence') or {}).get('24h', 0)}", "",
+        "Cumulative pipeline:",
+        f"Research packets {datasets.get('research_packet', 0):,}",
+        f"Reported experiments {f['reported_experiments']:,}",
+        f"Evidence {f['evidence']:,} · Strategies {f['strategy_versions']:,}",
+        f"Paper trades {f['paper_trades']:,} · P&L ₹{paper_perf.get('total_net_pnl', 0):,.2f}",
+        f"Drawdown {paper_perf.get('drawdown_pct') if paper_perf.get('drawdown_pct') is not None else '—'}%", "",
+        f"AI: {budget.get('calls_today', 0)} calls · {budget.get('tokens_today', 0)} tokens · cost unknown{ai_note}",
+        f"Queue: {queue.get('draft_count', 0)} drafts · {queue.get('locked_runnable_count', 0)} runnable",
+        f"Backpressure: {'; '.join(queue_reasons) if queue_reasons else 'none'}",
+        f"Main finding: {blockers[0] if blockers else 'No material pipeline blocker detected'}",
+        "Live Promotion: LOCKED",
+    ])
+
+
+def daily_digest(*, actor: str = "scheduler") -> dict:
+    with Store.open() as store:
+        snapshot = build_snapshot(store)
+    budget = ai_budget.get_budget_state()
     paper_perf = {"total_net_pnl": 0.0, "drawdown_pct": None}
     if paper_config.db_path().is_file():
         paper_store = PaperStore.open_readonly()
@@ -49,26 +88,7 @@ def daily_digest(*, actor: str = "scheduler") -> dict:
             paper_perf = PaperPortfolio(paper_store).performance_summary()
         finally:
             paper_store.close()
-    system = "HEALTHY" if snapshot["capacity"]["state"] == "NORMAL" else snapshot["capacity"]["state"]
-    text = "\n".join([
-        "LIVING QUANT — DAILY", "",
-        f"System: {system}", "Research: ACTIVE",
-        f"Experiments: {'ACTIVE' if snapshot['contract_status'].get('locked', 0) else 'WAITING'}",
-        f"Paper: {'ACTIVE' if snapshot['paper_readiness']['ready'] else 'WAITING'}", "",
-        "Today:",
-        f"Observations +{(velocity.get('observations') or {}).get('24h', 0)}",
-        f"Research packets +{datasets.get('research_packet', 0)}",
-        f"Hypotheses +{(velocity.get('hypotheses') or {}).get('24h', 0)}",
-        f"Experiments +{snapshot['contract_status'].get('reported', 0)}", "",
-        "Evidence:",
-        f"Total {f['evidence']:,} · Strategies {f['strategy_versions']:,}",
-        f"Paper trades {f['paper_trades']:,} · P&L ₹{paper_perf.get('total_net_pnl', 0):,.2f}",
-        f"Drawdown {paper_perf.get('drawdown_pct') if paper_perf.get('drawdown_pct') is not None else '—'}%", "",
-        f"AI: {budget.get('calls_today', 0)} calls · {budget.get('tokens_today', 0)} tokens · cost unknown",
-        f"Compute: {snapshot['capacity']['state']}",
-        f"Main finding: {blockers[0] if blockers else 'No material pipeline blocker detected'}",
-        "Live Promotion: LOCKED",
-    ])
+    text = _daily_digest_text(snapshot, budget, paper_perf, worker_status(), watchdog.read_state())
     return deliver(text, category="DAILY_DIGEST", message_type="daily_research_digest", actor=actor)
 
 
