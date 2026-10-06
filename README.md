@@ -142,6 +142,7 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 
 | Commit | Delivered |
 |---|---|
+| `e70b1de` | pre-registered holdouts for new AI research, single-use legacy OOS confirmation, a five-slot confirmation-only reserve, confirmed-parent strategy compilation and end-to-end regression coverage |
 | `c16cd78` | production-calibrated autonomous research capacity (20 locks / rolling 7 days), live capacity telemetry and digest reporting while preserving serial execution and scientific controls |
 | `ddd3b8c` | schedule-aware overnight research heartbeats and diagnostic Telegram digests that explain zero activity/backpressure |
 | `3a23442` | non-owner API reuse of the shared root-owned component-control lock, with permission regression coverage |
