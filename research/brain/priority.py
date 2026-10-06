@@ -205,6 +205,36 @@ def confirmation_parent_contract_id(
         store, contract_id, registry_dir=registry_dir) else None
 
 
+def confirmation_passes(
+    store: Store, contract_id: str, *, registry_dir: Path = REGISTRY_DIR,
+) -> bool:
+    """True only for a statistically and economically valid confirmation.
+
+    Structural lineage and a positive P&L direction are not enough.  Reuse
+    comparison's family-adjusted classification for this exact sibling so a
+    noisy positive holdout cannot promote a hypothesis to ROBUST.
+    """
+    if confirmation_parent_contract_id(
+            store, contract_id, registry_dir=registry_dir) is None:
+        return False
+    try:
+        summary = evaluate_hypothesis_evidence(
+            store, contract_id, registry_dir=registry_dir)
+    except ComparisonRejected:
+        return False
+    variant = next(
+        (v for v in summary.get("variants", []) if v.get("contract_id") == contract_id),
+        None,
+    )
+    return bool(
+        variant
+        and variant.get("direction") == "positive"
+        and not variant.get("insufficient_sample")
+        and variant.get("statistically_significant") is True
+        and variant.get("economically_meaningful") is True
+    )
+
+
 def research_area_for(store: Store, contract_id: str) -> str:
     """The research area (Slice M) of the hypothesis `contract_id` belongs
     to, or UNASSIGNED_AREA if the contract has no resolvable hypothesis or

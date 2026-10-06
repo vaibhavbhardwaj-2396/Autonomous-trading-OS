@@ -46,10 +46,10 @@ def fresh(name):
     return Store.open(db), reg
 
 
-def verdict():
+def verdict(t_stat=5.0):
     return {"n_trades": 40, "win_rate": 0.6, "gross_pnl": 20_000.0,
             "net_pnl": 20_000.0, "total_costs": 0.0,
-            "avg_net_pnl": 500.0, "expectancy_r": 0.2, "t_stat": 5.0}
+            "avg_net_pnl": 500.0, "expectancy_r": 0.2, "t_stat": t_stat}
 
 
 def reported_parent(store, reg, cid="EXP-LEGACY-A", hid="HYP-LEGACY"):
@@ -188,6 +188,31 @@ check("D1: a positive structural holdout makes the hypothesis promotable",
       result.created and result.version_id)
 check("D2: the strategy records the frozen parent, not an arbitrary sibling",
       result.contract_id == parent.id, result)
+
+
+print("\n--- E: positive but noisy holdout evidence does not become ROBUST ---")
+weak_store, weak_reg = fresh("weak-confirmation")
+weak_parent = reported_parent(weak_store, weak_reg, cid="EXP-WEAK-A", hid="HYP-WEAK")
+weak_child = hi.derive_reserved_holdout_contract(
+    weak_store, weak_parent.id, "HYP-WEAK", registry_dir=weak_reg).contract
+weak_child.lock()
+weak_child.status = "reported"
+weak_child.save(weak_reg)
+rm.record_experiment_verdict(weak_store, contract_id=weak_child.id,
+                             hypothesis_id="HYP-WEAK", verdict=verdict(1.7))
+weak_opportunity = next(o for o in opportunity.build_opportunity_pool(
+    weak_store, dt.datetime.now(dt.timezone.utc), registry_dir=weak_reg,
+    log_events=False) if o.hypothesis_id == "HYP-WEAK")
+check("E1: positive P&L below adjusted significance remains PROMISING",
+      weak_opportunity.lifecycle_stage == "PROMISING", weak_opportunity.lifecycle_stage)
+try:
+    strategy_factory.promote_robust_hypothesis(
+        weak_store, "HYP-WEAK", as_of=dt.datetime.now(dt.timezone.utc),
+        contract_registry_dir=weak_reg, strategy_registry_dir=TMP / "weak-strategies")
+    weak_refused = False
+except strategy_factory.StrategyPromotionRefused:
+    weak_refused = True
+check("E2: the strategy factory independently refuses that noisy holdout", weak_refused)
 
 
 print("\n====================================================")

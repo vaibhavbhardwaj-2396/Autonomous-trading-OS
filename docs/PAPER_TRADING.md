@@ -124,7 +124,8 @@ Only the strategy versions whose *most recent* event is `APPROVE` are picked up 
 runner each cycle (`paper.eligibility.list_paper_eligible()`).
 
 For an autonomously compiled research strategy, the minimum admission evidence is a
-`ROBUST` hypothesis backed by a positive structural confirmation plus a deterministic
+`ROBUST` hypothesis backed by a positive, family-adjusted statistically significant
+and economically meaningful structural confirmation plus a deterministic
 StrategyVersion backtest with actual trades and positive after-cost expectancy. The
 operator must still explicitly authorize the append-only `APPROVE` event. A failed or
 inconclusive holdout is never relabeled, loosened or rerun merely to populate paper.

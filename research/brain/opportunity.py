@@ -525,18 +525,13 @@ def _evidence_index(store: Store, as_of: TimeLike, *, registry_dir: Path) -> dic
 
 def _is_robust(store: Store, hypothesis_id: str, verdict: Optional[str], *, registry_dir: Path) -> bool:
     """PROMISING AND at least one validation/holdout sibling (reusing
-    priority.is_confirmation_experiment — the SAME confirmation-experiment
-    concept priority.py already established) has itself been scored with a
-    positive direction (reusing comparison.classify_variant)."""
+    priority.confirmation_passes) is positive, sufficiently sampled,
+    economically meaningful and statistically significant under the same
+    family-adjusted comparison used by the evidence evaluator."""
     if verdict != "PROMISING":
         return False
     for cid in evaluator.contract_ids_for_hypothesis(store, hypothesis_id):
-        if not prio.is_confirmation_experiment(store, cid, registry_dir=registry_dir):
-            continue
-        v = evaluator.verdict_for_contract(store, cid)
-        if v is None:
-            continue
-        if classify_variant(cid, v)["direction"] == "positive":
+        if prio.confirmation_passes(store, cid, registry_dir=registry_dir):
             return True
     return False
 

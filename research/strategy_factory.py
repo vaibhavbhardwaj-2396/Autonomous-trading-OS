@@ -20,7 +20,6 @@ from .brain.opportunity import build_opportunity_pool
 from .brain import priority as research_priority
 from .contracts import REGISTRY_DIR, Contract
 from .experiments import evaluator
-from .experiments.comparison import classify_variant
 from .store import Store, TimeLike
 
 
@@ -56,10 +55,10 @@ def promote_robust_hypothesis(
     for contract_id in evaluator.contract_ids_for_hypothesis(store, hypothesis_id):
         parent_id = research_priority.confirmation_parent_contract_id(
             store, contract_id, registry_dir=contract_registry_dir)
-        verdict = evaluator.verdict_for_contract(store, contract_id)
-        if parent_id is None or verdict is None:
+        if parent_id is None:
             continue
-        if classify_variant(contract_id, verdict)["direction"] != "positive":
+        if not research_priority.confirmation_passes(
+                store, contract_id, registry_dir=contract_registry_dir):
             continue
         try:
             contract = Contract.load(parent_id, contract_registry_dir)

@@ -38,8 +38,10 @@ The general lane therefore remains **20 locks per rolling seven days**, while a 
 ceiling of **25** reserves five additional locks exclusively for genuine
 validation/holdout siblings. This is not a budget override: a confirmation must carry
 `split_of`/`split` lineage, use the ordinary immutable lock primitive, and enter the
-same multiple-testing family. Ordinary discovery and parameter variants remain blocked
-at 20.
+same multiple-testing family. `ROBUST` additionally requires that exact sibling to be
+positive, sufficiently sampled, economically meaningful and statistically significant
+at the family-adjusted threshold. A merely positive noisy holdout remains `PROMISING`.
+Ordinary discovery and parameter variants remain blocked at 20.
 
 New AI ResearchPacket proposals must pre-register a non-overlapping validation or
 holdout window and evaluate discovery first. For legacy discovery-only parents, the

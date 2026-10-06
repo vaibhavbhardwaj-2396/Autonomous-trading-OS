@@ -89,6 +89,10 @@ linked confirmation contracts. This closes the previously unreachable
 `PROMISING -> ROBUST` transition without lowering significance, duplicating a
 test, or weakening paper/live approval boundaries.
 
+`ROBUST` is not awarded for positive P&L alone: the exact linked confirmation
+must also be sufficiently sampled, economically meaningful and statistically
+significant after the research-family adjustment.
+
 ## Roadmap status
 
 | Phase | Outcome | Status |
