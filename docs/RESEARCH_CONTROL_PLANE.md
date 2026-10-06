@@ -485,7 +485,7 @@ derived — has NEITHER. Its priority score could rise arbitrarily high
 gap: when a high-priority opportunity has no executable path, the worker
 can create the smallest one available itself.
 
-### The one substrate strategy implemented: split derivation
+### Substrate strategies: declared split and legacy reserved holdout
 
 `research.brain.opportunity._available_split_key()` looks, read-only, for
 the first `(parent_contract_id, split_key)` pair the hypothesis could still
@@ -500,13 +500,18 @@ DIFFERENT, pre-committed evaluation window. No new rule is ever invented,
 and no Research AI subprocess is ever called: this is a fully deterministic
 action.
 
-This is deliberately the ONLY strategy in v3. A hypothesis that never
-pre-declared a validation/holdout split on any of its ever-locked contracts
-has no substrate for this strategy to create — it stays fully visible and
-correctly scored in the pool, but produces no CREATE_EXPERIMENT action (see
-this section's own "What remains deferred" below). `Action.substrate_type` names the strategy
-explicitly (`"split_derivation"` today) so a future second strategy adds a
-new value there, never a new action kind — the priority scale stays flat.
+New autonomous ResearchPackets must pre-register a non-overlapping validation
+or holdout window, so `split_derivation` is the normal path.
+
+Production also contained legacy discovery-only contracts created before that
+requirement. A positive, reported legacy parent can now receive one
+`reserved_holdout` substrate on the fixed `2025-01-01..2026-06-30` window.
+The parent rules and universe are copied byte-for-byte; the archive must cover
+the complete window; a prior derived holdout or any equivalent OOS contract
+causes a refusal. This is a migration path for frozen old rules, not a retry
+mechanism and not permission to invent a new variant after seeing evidence.
+`Action.substrate_type` distinguishes both strategies without adding a second
+action kind, so they remain comparable on the same priority scale.
 
 ### How duplicate prevention works
 
@@ -525,6 +530,11 @@ A hypothesis with BOTH `"validation"` and `"holdout"` pre-declared can
 legitimately receive CREATE_EXPERIMENT twice — once each — never more; this
 is a second genuine research question (a holdout test after a validation
 one), not a duplicate.
+
+The legacy reserve is stricter: it is single-use per parent and also scans the
+registry for an independently created contract with the same universe, rules,
+exit and reserved OOS window. If one exists, the system treats that result as
+the available evidence instead of manufacturing another attempt.
 
 ### How reassessed/rejected work becomes actionable
 
@@ -598,12 +608,10 @@ plus the hypothesis-claim log, with no new store, no new table.
 
 ### What remains deferred
 
-- **Only one substrate strategy.** A hypothesis with no pre-declared
-  validation/holdout split on any ever-locked contract still gets no
-  CREATE_EXPERIMENT action. A second strategy (e.g. asking the Research AI
-  for a targeted retest variant of a SPECIFIC rejected hypothesis, rather
-  than an arbitrary new idea) is future work — it would add a new
-  `substrate_type` value, not a new action kind.
+- **No adaptive retest invention.** Declared splits and the one fixed legacy
+  holdout are supported. Asking the Research AI to invent a targeted variant
+  for a rejected hypothesis remains deferred because doing so after seeing
+  the result needs a separately governed scientific policy.
 - **No true shared compute allocator.** `max_substrate_creations` is a hard
   per-kind ceiling, exactly like every other cap — not yet traded off
   against `max_experiments`/`max_discovery_attempts`/`max_promotions` by a

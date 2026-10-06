@@ -26,6 +26,28 @@ worker heartbeat, a 180-second experiment deadline, hard cancellation, duplicate
 rejection and resource admission. The new ceiling provides 15 immediately available
 slots from the observed 5/20 state without authorizing an unbounded queue drain.
 
+### Confirmation reserve
+
+The first calibrated production run exposed a separate structural bottleneck: all
+legacy autonomous contracts had discovery data only. They could become `PROMISING`,
+but `ROBUST` requires a positive, structurally linked validation/holdout sibling, so
+the lifecycle had no legal next action. At the same time, the general 20-lock capacity
+was full.
+
+The general lane therefore remains **20 locks per rolling seven days**, while a total
+ceiling of **25** reserves five additional locks exclusively for genuine
+validation/holdout siblings. This is not a budget override: a confirmation must carry
+`split_of`/`split` lineage, use the ordinary immutable lock primitive, and enter the
+same multiple-testing family. Ordinary discovery and parameter variants remain blocked
+at 20.
+
+New AI ResearchPacket proposals must pre-register a non-overlapping validation or
+holdout window and evaluate discovery first. For legacy discovery-only parents, the
+control plane may derive exactly one fixed-rule test on the project-wide reserved
+holdout `2025-01-01..2026-06-30`, but only when the parent is reported and positive,
+the archive covers the entire window, no equivalent OOS contract already exists, and
+the window begins after discovery. It can never retry the same holdout until it passes.
+
 ## Scientific control
 
 Evidence now records an explicit research family, family hypothesis count,
@@ -52,3 +74,7 @@ p-hacking. The independent controls are:
 - draft/runnable queue backpressure;
 - AI call/token budgets;
 - family-wise multiple-testing correction and immutable experiment contracts.
+
+Paper eligibility remains a separate, explicit and attributed event. Neither the
+confirmation reserve nor a `ROBUST` label can silently enroll a strategy in paper, and
+no paper outcome authorizes live execution.

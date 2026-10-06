@@ -81,6 +81,14 @@ timeline. See [Final autonomous product](docs/FINAL_AUTONOMOUS_PRODUCT.md),
 [AI providers](docs/AI_PROVIDERS.md), and
 [Research governance](docs/RESEARCH_GOVERNANCE.md).
 
+New autonomous hypotheses must reserve a non-overlapping holdout before their
+discovery experiment is accepted. Legacy discovery-only work has a single-use,
+fixed-window confirmation path. The ordinary research throttle remains 20 locks
+per rolling seven days; five additional slots are reserved only for structurally
+linked confirmation contracts. This closes the previously unreachable
+`PROMISING -> ROBUST` transition without lowering significance, duplicating a
+test, or weakening paper/live approval boundaries.
+
 ## Roadmap status
 
 | Phase | Outcome | Status |

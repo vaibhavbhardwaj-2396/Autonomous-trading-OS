@@ -35,6 +35,7 @@ def get_product_status(store) -> dict:
         status_counts[contract.status] = status_counts.get(contract.status, 0) + 1
     locks_used = hypothesis_intake.locks_in_period()
     lock_limit = hypothesis_intake.MAX_LOCKS_PER_PERIOD
+    confirmation_limit = hypothesis_intake.MAX_CONFIRMATION_LOCKS_PER_PERIOD
     versions = strategy_registry.list_versions()
     eligible = list_paper_eligible()
 
@@ -132,6 +133,10 @@ def get_product_status(store) -> dict:
         "research_governance": {
             "lock_budget": f"{lock_limit} locks / rolling {hypothesis_intake.LOCK_BUDGET_PERIOD_DAYS} days",
             "locks_used": locks_used, "locks_remaining": max(0, lock_limit - locks_used),
+            "confirmation_budget": (
+                f"{confirmation_limit - lock_limit} reserved confirmation locks / rolling "
+                f"{hypothesis_intake.LOCK_BUDGET_PERIOD_DAYS} days"),
+            "confirmation_locks_remaining": max(0, confirmation_limit - locks_used),
             "lock_budget_purpose": "capacity-calibrated operational throttle, not multiple-testing correction",
             "multiple_testing": "Bonferroni family-wise correction over explicit research families",
             "contract_status": status_counts},

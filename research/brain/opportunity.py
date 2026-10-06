@@ -273,6 +273,12 @@ class SubstrateOutcome(NamedTuple):
     detail: str
 
 
+class SubstratePlan(NamedTuple):
+    parent_contract_id: str
+    split_key: str
+    strategy: str  # "split_derivation" | "reserved_holdout"
+
+
 # ---------------------------------------------------------------------------
 # Audit trail — research.memory.record_opportunity_event(), read back and
 # folded here. Append-only; "current" state is always a fold over history,
@@ -577,6 +583,68 @@ def _available_split_key(
     return None
 
 
+def _available_reserved_holdout(
+    store: Store, hypothesis_id: str, *, registry_dir: Path,
+) -> Optional[str]:
+    """Return one positive legacy parent eligible for the fixed OOS holdout.
+
+    Discovery-only contracts created before the holdout requirement cannot use
+    ``derive_split_contract``.  This selector is deliberately strict: reported
+    positive parent, discovery ending before the reserved window, no previously
+    derived holdout, and no independently-created equivalent OOS contract.
+    """
+    holdout_start, holdout_end = hi.LEGACY_RESERVED_HOLDOUT
+    coverage_end = (store.stats().get("prices") or {}).get("hi")
+    if not coverage_end or str(coverage_end) < holdout_end:
+        return None
+    claims = [r["payload"] for r in rm.query_research_log(store, rm.DATASET_HYPOTHESIS)
+              if r["payload"].get("hypothesis_id") == hypothesis_id]
+    family_ids = evaluator.contract_ids_for_hypothesis(store, hypothesis_id)
+    family_contracts = []
+    for cid in family_ids:
+        try:
+            family_contracts.append(Contract.load(cid, registry_dir))
+        except FileNotFoundError:
+            continue
+    for parent in sorted(family_contracts, key=lambda c: c.id):
+        if parent.status != "reported" or not parent.locked_hash:
+            continue
+        if {"validation", "holdout"} & set(parent.splits or {}):
+            continue
+        if parent.evaluation_end >= holdout_start:
+            continue
+        verdict = evaluator.verdict_for_contract(store, parent.id)
+        if verdict is None or classify_variant(parent.id, verdict)["direction"] != "positive":
+            continue
+        if any(c.get("split_of") == parent.id and c.get("split") == "holdout"
+               for c in claims):
+            continue
+        equivalent = any(
+            c.id != parent.id and c.universe == parent.universe
+            and c.entry_rule == parent.entry_rule and c.exit_rule == parent.exit_rule
+            and c.evaluation_start == holdout_start and c.evaluation_end == holdout_end
+            for c in family_contracts)
+        if equivalent:
+            continue
+        return parent.id
+    return None
+
+
+def _available_substrate_plan(
+    store: Store, opportunity: Opportunity, *, registry_dir: Path,
+) -> Optional[SubstratePlan]:
+    declared = _available_split_key(
+        store, opportunity.hypothesis_id, registry_dir=registry_dir)
+    if declared is not None:
+        return SubstratePlan(declared[0], declared[1], "split_derivation")
+    if opportunity.lifecycle_stage == "PROMISING":
+        parent = _available_reserved_holdout(
+            store, opportunity.hypothesis_id, registry_dir=registry_dir)
+        if parent is not None:
+            return SubstratePlan(parent, "holdout", "reserved_holdout")
+    return None
+
+
 def build_opportunity_pool(
     store: Store, as_of: TimeLike, *, registry_dir: Path = REGISTRY_DIR,
     log_events: bool = True, max_reassessment_events: int = DEFAULT_MAX_REASSESSMENT_EVENTS_PER_CYCLE,
@@ -787,16 +855,22 @@ def attempt_autonomous_promotion(
                                 target_contract_id, "skipped_duplicate",
                                 "an exact-duplicate rule specification already exists")
 
-    within_budget, count = hi.check_research_budget(registry_dir, now=now)
+    is_confirmation = prio.is_confirmation_experiment(
+        store, target_contract_id, registry_dir=registry_dir)
+    lock_limit = (hi.MAX_CONFIRMATION_LOCKS_PER_PERIOD if is_confirmation
+                  else hi.MAX_LOCKS_PER_PERIOD)
+    within_budget, count = hi.check_research_budget(
+        registry_dir, now=now, max_locks=lock_limit)
     if not within_budget:
         return PromotionOutcome(opportunity.id, opportunity.hypothesis_id,
                                 target_contract_id, "skipped_budget",
-                                f"research budget exhausted ({count} locks already this period)")
+                                f"research budget exhausted ({count}/{lock_limit} locks; "
+                                f"lane={'confirmation' if is_confirmation else 'general'})")
 
     try:
         hi.approve_and_lock(
             store, target_contract_id, approved_by=approver,
-            registry_dir=registry_dir, now=now,
+            registry_dir=registry_dir, now=now, max_locks=lock_limit,
         )
     except hi.IntakeRejected as e:
         return PromotionOutcome(opportunity.id, opportunity.hypothesis_id,
@@ -868,17 +942,22 @@ def attempt_create_experiment(
         return SubstrateOutcome(opportunity.id, opportunity.hypothesis_id, None, None, None,
                                 "skipped_frozen", "opportunity is frozen or retired by user override")
 
-    found = _available_split_key(store, opportunity.hypothesis_id, registry_dir=registry_dir)
-    if found is None:
+    plan = _available_substrate_plan(store, opportunity, registry_dir=registry_dir)
+    if plan is None:
         return SubstrateOutcome(opportunity.id, opportunity.hypothesis_id, None, None, None,
                                 "skipped_no_substrate",
                                 "no unused validation/holdout split available to derive")
-    parent_contract_id, split_key = found
+    parent_contract_id, split_key, strategy = plan
 
     try:
-        result = hi.derive_split_contract(
-            store, parent_contract_id, split_key, opportunity.hypothesis_id,
-            registry_dir=registry_dir)
+        if strategy == "reserved_holdout":
+            result = hi.derive_reserved_holdout_contract(
+                store, parent_contract_id, opportunity.hypothesis_id,
+                registry_dir=registry_dir)
+        else:
+            result = hi.derive_split_contract(
+                store, parent_contract_id, split_key, opportunity.hypothesis_id,
+                registry_dir=registry_dir)
     except hi.IntakeRejected as e:
         return SubstrateOutcome(opportunity.id, opportunity.hypothesis_id, parent_contract_id, None,
                                 "split_derivation", "rejected", "; ".join(e.reasons))
@@ -895,10 +974,10 @@ def attempt_create_experiment(
         priority_before=opportunity.priority_score, priority_after=opportunity.priority_score,
         source="research.brain.opportunity",
         extra={"parent_contract_id": parent_contract_id, "created_contract_id": result.contract.id,
-               "substrate_type": "split_derivation", "split_key": split_key},
+               "substrate_type": strategy, "split_key": split_key},
     )
     return SubstrateOutcome(opportunity.id, opportunity.hypothesis_id, parent_contract_id,
-                            result.contract.id, "split_derivation", "created",
+                            result.contract.id, strategy, "created",
                             f"created {result.contract.id} ({split_key} split of {parent_contract_id})")
 
 
@@ -1167,10 +1246,10 @@ def build_action_queue(
             continue
         if o.evidence_verdict is None:
             continue
-        found = _available_split_key(store, o.hypothesis_id, registry_dir=registry_dir)
-        if found is None:
+        plan = _available_substrate_plan(store, o, registry_dir=registry_dir)
+        if plan is None:
             continue
-        parent_cid, split_key = found
+        parent_cid, split_key, strategy = plan
         actions.append(Action(
             kind="CREATE_EXPERIMENT", opportunity_id=o.id, hypothesis_id=o.hypothesis_id,
             contract_id=parent_cid, priority_score=o.priority_score,
@@ -1180,7 +1259,7 @@ def build_action_queue(
                 confidence=o.confidence, reassessment_eligible=o.reassessment_eligible),
             relevance=f"no runnable substrate exists for this {o.lifecycle_stage} opportunity; "
                      f"a {split_key} split can still be derived from {parent_cid}",
-            rationale=o.rationale, substrate_type="split_derivation",
+            rationale=o.rationale, substrate_type=strategy,
         ))
 
     if discovery_available:

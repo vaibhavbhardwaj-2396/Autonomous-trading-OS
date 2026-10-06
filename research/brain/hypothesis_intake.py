@@ -414,6 +414,11 @@ def validate_proposal(proposal: Any) -> list[str]:
             if name in proposal and (not isinstance(value, list) or
                                      any(not isinstance(v, str) for v in value)):
                 problems.append(f"{name} must be a list of strings")
+        splits = proposal.get("splits")
+        if isinstance(splits, dict) and not ({"validation", "holdout"} & set(splits)):
+            problems.append(
+                "ResearchPacket proposals must pre-register a validation or holdout "
+                "window; discovery-only proposals cannot ever reach ROBUST")
 
     # -- free text: type, non-empty, bounded length, no code-like content ---
     for field_name in FREE_TEXT_FIELDS:
@@ -455,6 +460,24 @@ def validate_proposal(proposal: Any) -> list[str]:
         _check_exit_rule(proposal["exit_rule"], problems)
     if "splits" in proposal:
         _check_splits(proposal["splits"], problems)
+        if proposal.get("source_research_packet") and isinstance(proposal["splits"], dict):
+            discovery = proposal["splits"].get("discovery")
+            if isinstance(discovery, list) and len(discovery) == 2:
+                if (proposal.get("evaluation_start"), proposal.get("evaluation_end")) != tuple(discovery):
+                    problems.append(
+                        "ResearchPacket evaluation_start/evaluation_end must match the "
+                        "pre-registered discovery window")
+                d_start, d_end = _parse_date(discovery[0]), _parse_date(discovery[1])
+                for split_name in ("validation", "holdout"):
+                    window = proposal["splits"].get(split_name)
+                    if not (isinstance(window, list) and len(window) == 2):
+                        continue
+                    s_start, s_end = _parse_date(window[0]), _parse_date(window[1])
+                    if d_start and d_end and s_start and s_end and not (
+                            s_start > d_end or d_start > s_end):
+                        problems.append(
+                            f'ResearchPacket splits["{split_name}"] must not overlap '
+                            'the discovery window')
 
     # -- dates ------------------------------------------------------------------
     start = _parse_date(proposal.get("evaluation_start"))
@@ -684,6 +707,14 @@ rolling ceiling while allowing the one-at-a-time worker to clear prioritized
 evidence work in days rather than months.  Scientific multiplicity remains
 controlled independently by family-wise correction; this number is not a
 p-hacking control.  It remains overridable per call for deterministic tests.
+"""
+
+MAX_CONFIRMATION_LOCKS_PER_PERIOD = 25
+"""Total rolling ceiling when the requested lock is a structurally linked
+validation/holdout confirmation.  The ordinary discovery/variant lane remains
+capped at 20; five additional slots are reserved exclusively for evidence that
+can move an already-PROMISING hypothesis toward ROBUST.  Confirmation still
+enters the same multiple-testing ledger and uses the same lock primitive.
 """
 
 LOCK_BUDGET_PERIOD_DAYS = 7
@@ -1224,4 +1255,123 @@ def derive_split_contract(
     if persist_draft:
         sibling.save(registry_dir)
 
+    return IntakeResult(hypothesis_id=hypothesis_id, contract=sibling)
+
+
+LEGACY_RESERVED_HOLDOUT = ("2025-01-01", "2026-06-30")
+
+
+def derive_reserved_holdout_contract(
+    store,
+    parent_contract_id: str,
+    hypothesis_id: str,
+    *,
+    window: tuple[str, str] = LEGACY_RESERVED_HOLDOUT,
+    registry_dir: Path = REGISTRY_DIR,
+    persist_draft: bool = True,
+) -> IntakeResult:
+    """Create one immutable-rule OOS sibling for a legacy discovery-only parent.
+
+    Early autonomous proposals were allowed to declare only ``discovery``.
+    Those contracts can become PROMISING but can never reach ROBUST because
+    ``derive_split_contract`` correctly refuses to invent an undeclared split.
+    This narrowly-scoped migration path preserves that refusal while allowing
+    one fixed, project-wide reserved holdout for a *reported* legacy parent.
+
+    The entry/exit rules, universe and every other scientific field are copied
+    unchanged.  The holdout must begin after the parent's evaluation window,
+    must already exist in the point-in-time price archive, may be derived only
+    once, and is refused if an equivalent contract/window already exists.  The
+    resulting claim carries ordinary ``split_of``/``split=holdout`` lineage, so
+    all existing confirmation, robustness and multiple-testing logic applies.
+    """
+    problems: list[str] = []
+    try:
+        parent = Contract.load(parent_contract_id, registry_dir)
+    except FileNotFoundError:
+        raise IntakeRejected([f"parent contract {parent_contract_id!r} not found"])
+
+    claims = _hypothesis_claims(store, hypothesis_id)
+    owns = any(r["payload"].get("contract_id") == parent_contract_id for r in claims)
+    if not owns:
+        problems.append(
+            f"hypothesis_id {hypothesis_id!r} is not recorded as owning "
+            f"{parent_contract_id!r}")
+    if parent.status != "reported" or not parent.locked_hash:
+        problems.append(
+            f"{parent_contract_id} must be a verified reported parent before a "
+            f"reserved holdout can be derived (status={parent.status!r})")
+    if {"validation", "holdout"} & set(parent.splits or {}):
+        problems.append(
+            f"{parent_contract_id} already declares validation/holdout; use "
+            "derive_split_contract instead of the legacy migration path")
+
+    start, end = (_parse_date(window[0]), _parse_date(window[1]))
+    parent_end = _parse_date(parent.evaluation_end)
+    if start is None or end is None or end <= start:
+        problems.append(f"reserved holdout is not a valid ordered ISO-date window: {window!r}")
+    elif parent_end is None or start <= parent_end:
+        problems.append(
+            f"reserved holdout {window!r} must begin after the parent's "
+            f"evaluation_end {parent.evaluation_end!r}")
+
+    coverage = (store.stats().get("prices") or {}).get("hi")
+    coverage_end = _parse_date(coverage)
+    if end is not None and (coverage_end is None or coverage_end < end):
+        problems.append(
+            f"price archive ends at {coverage!r}; it does not cover reserved "
+            f"holdout end {window[1]!r}")
+
+    prior_sibling_id = _prior_split_derivation(claims, parent_contract_id, "holdout")
+    if prior_sibling_id is not None:
+        problems.append(
+            f"{parent_contract_id}'s reserved holdout was already derived as "
+            f"{prior_sibling_id!r}; confirmation is single-use")
+
+    # Do not retrofit lineage by re-running an independently created contract
+    # with the same rule and OOS window.  Its outcome is evidence, favourable
+    # or not; manufacturing a second attempt would be cherry-picking.
+    for candidate in _registry(registry_dir):
+        if candidate.id == parent_contract_id:
+            continue
+        if (candidate.universe == parent.universe
+                and candidate.entry_rule == parent.entry_rule
+                and candidate.exit_rule == parent.exit_rule
+                and candidate.evaluation_start == window[0]
+                and candidate.evaluation_end == window[1]):
+            problems.append(
+                f"equivalent OOS contract {candidate.id!r} already covers the "
+                "reserved holdout; a second confirmation attempt is refused")
+            break
+
+    if problems:
+        raise IntakeRejected(problems)
+
+    new_id = _next_contract_id(store, hypothesis_id)
+    if any(c.id == new_id and c.status != "draft" for c in _registry(registry_dir)):
+        raise IntakeRejected([f"generated contract_id {new_id!r} collides with a locked contract"])
+
+    sibling = _replace(
+        parent,
+        id=new_id,
+        splits={**parent.splits, "holdout": [window[0], window[1]]},
+        evaluation_start=window[0],
+        evaluation_end=window[1],
+        status="draft",
+        locked_at=None,
+        locked_hash=None,
+        notes=("Legacy discovery-only migration: exact frozen rules evaluated once "
+               f"on reserved OOS holdout {window[0]}..{window[1]}"),
+        research_debt=list(parent.research_debt),
+    )
+    rm.record_hypothesis_proposal(
+        store, claim=parent.hypothesis,
+        source="hypothesis_intake.derive_reserved_holdout_contract",
+        hypothesis_id=hypothesis_id,
+        extra={"contract_id": new_id, "split_of": parent_contract_id,
+               "split": "holdout", "derivation_policy": "reserved_oos.v1",
+               "window": [window[0], window[1]]},
+    )
+    if persist_draft:
+        sibling.save(registry_dir)
     return IntakeResult(hypothesis_id=hypothesis_id, contract=sibling)

@@ -52,6 +52,7 @@ def _daily_digest_text(snapshot: dict, budget: dict, paper_perf: dict,
     no_work = worker.get("last_no_work_reason") or "none"
     locks_used = hypothesis_intake.locks_in_period()
     lock_limit = hypothesis_intake.MAX_LOCKS_PER_PERIOD
+    confirmation_limit = hypothesis_intake.MAX_CONFIRMATION_LOCKS_PER_PERIOD
     ai_note = ""
     if not budget.get("calls_today", 0):
         ai_note = f" · no call required by latest worker: {no_work}"
@@ -76,6 +77,8 @@ def _daily_digest_text(snapshot: dict, budget: dict, paper_perf: dict,
         f"Queue: {queue.get('draft_count', 0)} drafts · {queue.get('locked_runnable_count', 0)} runnable",
         f"Research capacity: {locks_used}/{lock_limit} locks in rolling "
         f"{hypothesis_intake.LOCK_BUDGET_PERIOD_DAYS}d",
+        f"Confirmation reserve: {max(0, confirmation_limit - locks_used)} "
+        "lock(s) available only for validation/holdout siblings",
         f"Backpressure: {'; '.join(queue_reasons) if queue_reasons else 'none'}",
         f"Main finding: {blockers[0] if blockers else 'No material pipeline blocker detected'}",
         "Live Promotion: LOCKED",

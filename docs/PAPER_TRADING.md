@@ -123,6 +123,12 @@ the registry, or whose registered `strategy_id` doesn't match what was passed.
 Only the strategy versions whose *most recent* event is `APPROVE` are picked up by the
 runner each cycle (`paper.eligibility.list_paper_eligible()`).
 
+For an autonomously compiled research strategy, the minimum admission evidence is a
+`ROBUST` hypothesis backed by a positive structural confirmation plus a deterministic
+StrategyVersion backtest with actual trades and positive after-cost expectancy. The
+operator must still explicitly authorize the append-only `APPROVE` event. A failed or
+inconclusive holdout is never relabeled, loosened or rerun merely to populate paper.
+
 ## 5. Fill model and cost model
 
 A paper order fills at the **close of the most recent daily bar** returned by the same

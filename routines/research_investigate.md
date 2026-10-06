@@ -148,13 +148,19 @@ say the same claim more concisely, not more elaborately.
   `event_frequency_zscore`, `close`, `return_1d`. Supported operators: `>`, `>=`, `<`, `<=`,
   `==`, `!=`.
 - `exit_rule` — an object using any of `stop_loss_pct`, `target_pct`, `max_hold_days`
-- `splits` — `{"discovery": ["YYYY-MM-DD", "YYYY-MM-DD"], ...}` — must include a
-  `"discovery"` window at minimum
+- `splits` — must pre-register both non-overlapping windows:
+  `{"discovery": ["2022-01-01", "2024-12-31"],
+  "holdout": ["2025-01-01", "2026-06-30"]}`. A discovery-only proposal is
+  rejected because it could become PROMISING but could never produce the
+  independent structural confirmation required for ROBUST. Do not inspect or
+  tune against the holdout when writing the discovery rule.
 - `independence`, `falsification`, `abandon_condition` — strings, each at most 1000
   characters, pre-committed before any test runs, not written after seeing a result. State
   the rule plainly (e.g. "abandon if discovery-split expectancy_r <= 0"); this is a
   pre-committed decision rule, not a place to argue for it at length.
-- `evaluation_start`, `evaluation_end` — ISO dates, matching the discovery window
+- `evaluation_start`, `evaluation_end` — `"2022-01-01"`, `"2024-12-31"`,
+  matching the discovery window; the holdout is run later as an immutable
+  derived sibling only if discovery evidence merits confirmation
 - `notes` — optional string, at most 2000 characters — deliberately the most room of any
   field. If this hypothesis relates to something in the digest's `evidence` section, briefly
   say how it differs or why it is a legitimate new test of it. This is also where any EXTRA

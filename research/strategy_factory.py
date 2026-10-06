@@ -17,7 +17,10 @@ from strategies.spec import ExitPolicy, RuleCondition, StrategySpec, compile_spe
 
 from . import memory as rm
 from .brain.opportunity import build_opportunity_pool
+from .brain import priority as research_priority
 from .contracts import REGISTRY_DIR, Contract
+from .experiments import evaluator
+from .experiments.comparison import classify_variant
 from .store import Store, TimeLike
 
 
@@ -50,17 +53,24 @@ def promote_robust_hypothesis(
             f"hypothesis {hypothesis_id!r} is {actual}, not ROBUST")
 
     candidates = []
-    from .experiments.evaluator import contract_ids_for_hypothesis
-    for contract_id in contract_ids_for_hypothesis(store, hypothesis_id):
+    for contract_id in evaluator.contract_ids_for_hypothesis(store, hypothesis_id):
+        parent_id = research_priority.confirmation_parent_contract_id(
+            store, contract_id, registry_dir=contract_registry_dir)
+        verdict = evaluator.verdict_for_contract(store, contract_id)
+        if parent_id is None or verdict is None:
+            continue
+        if classify_variant(contract_id, verdict)["direction"] != "positive":
+            continue
         try:
-            contract = Contract.load(contract_id, contract_registry_dir)
+            contract = Contract.load(parent_id, contract_registry_dir)
             contract.verify()
         except (FileNotFoundError, OSError):
             continue
         if contract.status == "reported":
             candidates.append(contract)
     if not candidates:
-        raise StrategyPromotionRefused("no verified reported contract backs the hypothesis")
+        raise StrategyPromotionRefused(
+            "no verified reported parent has a positive structural confirmation")
     contract = sorted(candidates, key=lambda c: c.id)[0]
 
     try:

@@ -188,6 +188,23 @@ def is_confirmation_experiment(
     return summary["verdict"] == "PROMISING"
 
 
+def confirmation_parent_contract_id(
+    store: Store, contract_id: str, *, registry_dir: Path = REGISTRY_DIR,
+) -> Optional[str]:
+    """Return the parent id only when ``contract_id`` is a real confirmation.
+
+    This is the public lineage counterpart to ``is_confirmation_experiment``.
+    Downstream strategy promotion uses it to compile the exact rule whose
+    frozen validation/holdout sibling confirmed it, rather than an arbitrary
+    earlier contract from the same hypothesis family.
+    """
+    split_of, split = _split_metadata(store, contract_id)
+    if split not in ("validation", "holdout"):
+        return None
+    return split_of if is_confirmation_experiment(
+        store, contract_id, registry_dir=registry_dir) else None
+
+
 def research_area_for(store: Store, contract_id: str) -> str:
     """The research area (Slice M) of the hypothesis `contract_id` belongs
     to, or UNASSIGNED_AREA if the contract has no resolvable hypothesis or

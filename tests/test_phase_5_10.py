@@ -18,6 +18,7 @@ from research.experiments import strategy_backtest as sb
 from research.store import IST, Store
 from research.contracts import Contract
 from research import strategy_factory as factory
+from research import memory as research_memory
 from strategies.spec import (ALGORITHM_ID, ContractRuleStrategy, ExitPolicy,
                              RuleCondition, StrategySpec, StrategySpecViolation,
                              compile_spec)
@@ -80,7 +81,7 @@ try:
 
     contract_dir, strategy_dir = tmp / "contracts", tmp / "strategies"
     contract = Contract(
-        id="C-H1", title="H1", hypothesis="edge", null_hypothesis="none",
+        id="C-H1-PARENT", title="H1", hypothesis="edge", null_hypothesis="none",
         universe="watchlist", signal="typed rule",
         entry_rule=json.dumps({"conditions": [{"metric": "close", "op": ">=", "value": 1}]}),
         exit_rule=json.dumps({"stop_loss_pct": 3, "target_pct": 5, "max_hold_days": 5}),
@@ -90,12 +91,34 @@ try:
     contract.lock()
     contract.status = "reported"
     contract.save(contract_dir)
+    confirmation = Contract(
+        id="C-H1-HOLDOUT", title="H1 holdout", hypothesis="edge",
+        null_hypothesis="none", universe=contract.universe, signal=contract.signal,
+        entry_rule=contract.entry_rule, exit_rule=contract.exit_rule,
+        splits={**contract.splits, "holdout": ["2026-02-02", "2026-03-01"]},
+        independence=contract.independence, falsification=contract.falsification,
+        abandon_condition=contract.abandon_condition,
+        evaluation_start="2026-02-02", evaluation_end="2026-03-01")
+    confirmation.lock()
+    confirmation.status = "reported"
+    confirmation.save(contract_dir)
+    research_memory.record_hypothesis_proposal(
+        store, claim="edge", source="test", hypothesis_id="H1",
+        extra={"contract_id": contract.id})
+    research_memory.record_hypothesis_proposal(
+        store, claim="edge", source="test", hypothesis_id="H1",
+        extra={"contract_id": confirmation.id, "split_of": contract.id,
+               "split": "holdout"})
+    strong = {"n_trades": 40, "win_rate": 0.6, "gross_pnl": 20_000.0,
+              "net_pnl": 20_000.0, "total_costs": 0.0,
+              "avg_net_pnl": 500.0, "expectancy_r": 0.2, "t_stat": 5.0}
+    research_memory.record_experiment_verdict(
+        store, contract_id=contract.id, hypothesis_id="H1", verdict=strong)
+    research_memory.record_experiment_verdict(
+        store, contract_id=confirmation.id, hypothesis_id="H1", verdict=strong)
     original_pool = factory.build_opportunity_pool
-    import research.experiments.evaluator as evaluator
-    original_ids = evaluator.contract_ids_for_hypothesis
     factory.build_opportunity_pool = lambda *a, **k: [SimpleNamespace(
         hypothesis_id="H1", lifecycle_stage="ROBUST")]
-    evaluator.contract_ids_for_hypothesis = lambda *a, **k: ["C-H1"]
     try:
         promoted = factory.promote_robust_hypothesis(
             store, "H1", as_of=dt.datetime(2026, 2, 2, tzinfo=IST),
@@ -105,7 +128,6 @@ try:
             contract_registry_dir=contract_dir, strategy_registry_dir=strategy_dir)
     finally:
         factory.build_opportunity_pool = original_pool
-        evaluator.contract_ids_for_hypothesis = original_ids
     check("ROBUST evidence promotes to an immutable registry version", promoted.created)
     check("strategy promotion is idempotent", not repeated.created and
           repeated.version_id == promoted.version_id)
