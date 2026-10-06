@@ -417,6 +417,8 @@ result_k1 = hi.check_research_budget(reg_k, now=now_k, max_locks=5, period_days=
 result_k2 = hi.check_research_budget(reg_k, now=now_k, max_locks=5, period_days=7)
 check("K: check_research_budget() is deterministic against an unchanged registry",
       result_k1 == result_k2 == (True, 3))
+check("K: production default is the calibrated bounded ceiling",
+      hi.MAX_LOCKS_PER_PERIOD == 20)
 
 
 # ---------------------------------------------------------------------------

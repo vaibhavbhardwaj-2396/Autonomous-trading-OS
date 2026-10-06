@@ -1,4 +1,4 @@
-# Research governance and the five-lock audit
+# Research governance and capacity calibration
 
 ## Finding
 
@@ -8,9 +8,23 @@ The source documentation explicitly says the value was not production-tuned.
 It is therefore an operational commitment throttle—not a statistically valid
 multiple-testing correction, AI budget, compute budget, or trading-risk limit.
 
-The release preserves the limit during the audit. Existing drafts are not
+The initial release preserved the limit during the audit. Existing drafts were not
 discarded and no budget override is used. Compute, runtime, queue depth and AI
 spend continue to have their own independent controls.
+
+## October 2026 calibration
+
+The observation window supplied the missing production evidence: 11 of 11 locked
+experiments reached `REPORTED`; the latest five all produced evidence; the optimized
+replay stayed inside its deadline; and the one-vCPU VPS remained `HEALTHY`/`LOW_LOAD`
+(21% load, 76% memory available during the decision audit). The five-lock limit then
+left 94 reviewed drafts idle and every ten-minute heartbeat returning `skipped_budget`.
+
+The operational ceiling is therefore recalibrated to **20 locks per rolling seven
+days**. Execution remains serial, with at most one promotion and one experiment per
+worker heartbeat, a 180-second experiment deadline, hard cancellation, duplicate
+rejection and resource admission. The new ceiling provides 15 immediately available
+slots from the observed 5/20 state without authorizing an unbounded queue drain.
 
 ## Scientific control
 
@@ -29,10 +43,9 @@ AI response.
 
 ## Operational control
 
-The five-lock throttle remains unchanged until an observation window supplies
-measured queue, compute and scientific-completion data. It may later be
-recalibrated as an operational capacity limit, but it must never be described
-as protection against p-hacking. The independent controls are:
+The calibrated throttle may be revisited only from measured queue, compute and
+scientific-completion data. It must never be described as protection against
+p-hacking. The independent controls are:
 
 - worker runtime and per-action bounds;
 - experiment deadline, process cancellation and resource governor;

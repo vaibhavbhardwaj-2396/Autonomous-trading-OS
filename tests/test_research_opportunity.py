@@ -397,7 +397,7 @@ check("G1: fixture sanity — the research budget is now genuinely exhausted",
       not within_budget and count == hi.MAX_LOCKS_PER_PERIOD, (within_budget, count))
 
 hid_g, cid_g = draft(s_g, reg_g, title="one too many",
-                     entry_rule={"conditions": [{"metric": "volume_zscore", "op": ">", "value": 9.0}]})
+                     entry_rule={"conditions": [{"metric": "volume_zscore", "op": ">", "value": 99.0}]})
 pool_g = opp.build_opportunity_pool(s_g, "2024-05-12", registry_dir=reg_g)
 o_g = [o for o in pool_g if o.hypothesis_id == hid_g][0]
 outcome_g = opp.attempt_autonomous_promotion(s_g, o_g, registry_dir=reg_g)

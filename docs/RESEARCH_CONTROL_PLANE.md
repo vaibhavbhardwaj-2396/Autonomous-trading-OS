@@ -183,7 +183,7 @@ replacing the static cost table with real measured cost, is future work.
 3. Refuses an exact-duplicate rule spec (`skipped_duplicate`) —
    `similarity.is_duplicate()`, unmodified.
 4. Checks the **existing, unmodified** research budget
-   (`hypothesis_intake.check_research_budget()`, 5 locks / 7 days by
+   (`hypothesis_intake.check_research_budget()`, 20 locks / 7 days by
    default) — over budget → `skipped_budget`, and `approve_and_lock()` is
    never even called.
 5. Calls `hypothesis_intake.approve_and_lock(store, contract_id,
@@ -377,7 +377,7 @@ requirement to edit the cron.
   historically-simulated Contract) — nowhere near a broker, an order, or
   `memory/state.json`.
 - **The research budget is never bypassed or overridden by this slice.**
-  `hypothesis_intake.check_research_budget()` (5 locks / 7 days, unchanged)
+  `hypothesis_intake.check_research_budget()` (20 locks / 7 days, capacity-calibrated)
   gates every autonomous promotion exactly as it gates a human's own
   `approve_and_lock()` call; the existing `budget_override_by` escalation
   path (a second, distinct human name) is never auto-supplied here.

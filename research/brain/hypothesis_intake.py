@@ -673,12 +673,18 @@ def create_draft(
 # ordinary "approved and locked by" note before this slice.
 # ---------------------------------------------------------------------------
 
-MAX_LOCKS_PER_PERIOD = 5
-"""A deliberately conservative placeholder ceiling — this slice does not
-assume a production-tuned number is known yet (per its own instructions).
-Named and overridable per-call (approve_and_lock(..., max_locks=...) /
-check_research_budget(..., max_locks=...)) rather than buried as a magic
-number inside the gate itself."""
+MAX_LOCKS_PER_PERIOD = 20
+"""Production-calibrated operational ceiling.
+
+The original value of five was an explicitly uncalibrated, human-paced
+placeholder.  Production subsequently completed 11/11 locked experiments,
+including five new evidence-producing runs in one observation window, while
+the resource governor remained healthy/low-load.  Twenty preserves a hard
+rolling ceiling while allowing the one-at-a-time worker to clear prioritized
+evidence work in days rather than months.  Scientific multiplicity remains
+controlled independently by family-wise correction; this number is not a
+p-hacking control.  It remains overridable per call for deterministic tests.
+"""
 
 LOCK_BUDGET_PERIOD_DAYS = 7
 """Width, in days, of the trailing window the budget is measured over,
@@ -763,11 +769,8 @@ def check_research_budget(
 
     `current_count` is the number of locks ALREADY in the rolling period,
     measured BEFORE the lock currently being requested is added to it. With
-    the default max_locks=5: the 1st through 5th locks in a period are each
-    permitted (each one is checked while current_count is 0, 1, 2, 3, and 4
-    respectively — all < 5), bringing the period's total to 5 once the 5th
-    completes; the 6th is refused (checked while current_count is already
-    5, which is not < 5). So max_locks is the maximum number of locks the
+    the default max_locks=20, the first through twentieth locks are permitted
+    and the twenty-first is refused. So max_locks is the maximum number of locks the
     period may ever contain — not "how many are allowed before this one" —
     which matches the slice's own stated budget model verbatim: `locks
     during a rolling period < configured maximum`, evaluated on the count

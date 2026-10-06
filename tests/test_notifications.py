@@ -66,6 +66,8 @@ check("zero AI usage includes the truthful worker/backpressure reason",
 check("digest reports the observed runtime heartbeat instead of hardcoding ACTIVE",
       "Research runtime: HEALTHY" in digest
       and "Research heartbeat: 2026-10-01T12:30:07+05:30" in digest)
+check("digest exposes the calibrated research-capacity ceiling",
+      f"Research capacity: 0/{notification_service.hypothesis_intake.MAX_LOCKS_PER_PERIOD}" in digest)
 
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

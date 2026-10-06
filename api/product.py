@@ -9,7 +9,7 @@ from paper.eligibility import list_paper_eligible
 from paper.store import PaperStore
 from research import contracts
 from research import memory as rm
-from research.brain import draft_backlog
+from research.brain import draft_backlog, hypothesis_intake
 from research.store import iso, now_ist
 from strategies import registry as strategy_registry
 
@@ -33,6 +33,8 @@ def get_product_status(store) -> dict:
     status_counts: dict[str, int] = {}
     for contract in contracts_rows:
         status_counts[contract.status] = status_counts.get(contract.status, 0) + 1
+    locks_used = hypothesis_intake.locks_in_period()
+    lock_limit = hypothesis_intake.MAX_LOCKS_PER_PERIOD
     versions = strategy_registry.list_versions()
     eligible = list_paper_eligible()
 
@@ -127,8 +129,10 @@ def get_product_status(store) -> dict:
         "organization": organization, "current_research": current,
         "timeline": timeline, "blockers": blockers,
         "research_velocity": campaign.get("velocity") or {},
-        "research_governance": {"lock_budget": "5 locks / rolling 7 days",
-            "lock_budget_purpose": "legacy human-paced operational throttle, not multiple-testing correction",
+        "research_governance": {
+            "lock_budget": f"{lock_limit} locks / rolling {hypothesis_intake.LOCK_BUDGET_PERIOD_DAYS} days",
+            "locks_used": locks_used, "locks_remaining": max(0, lock_limit - locks_used),
+            "lock_budget_purpose": "capacity-calibrated operational throttle, not multiple-testing correction",
             "multiple_testing": "Bonferroni family-wise correction over explicit research families",
             "contract_status": status_counts},
         "ai": {"provider": ai.get("effective_provider"), "model": ai.get("effective_model"),
