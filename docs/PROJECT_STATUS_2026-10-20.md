@@ -22,7 +22,8 @@ is not paper eligible.
 
 Live trading is independently blocked for a second, valid reason: the broker
 reports ₹0 free cash and the governed book has `allocated_capital = 0`. The
-account's ₹57,498.21 total value consists of 24 unmanaged personal holdings.
+account's ₹57,498.21 total value consists of two unmanaged personal holding
+positions.
 Those holdings are context only and cannot be treated as autonomous capital or
 sold by the agent. No code fix can or should bypass that mandate.
 
@@ -35,7 +36,7 @@ sold by the agent. No code fix can or should bypass that mandate.
 | API | Running | `trading-api.service` active; local `/health` returned OK, API v1.7.0 | Healthy |
 | Scheduler | Running | cron active; no failed systemd services | Healthy |
 | Broker auth | Valid | refreshed 07:15 IST; ~14.2 hours remained; verification reached broker funds | Healthy at audit |
-| Broker reconciliation | Complete | total ₹57,498.21; 24 holdings; no mismatches | Healthy, but no free cash |
+| Broker reconciliation | Complete | total ₹57,498.21; two holding positions; no mismatches | Healthy, but no free cash |
 | Governed capital | Blocked | allocated capital ₹0; managed equity ₹0; free cash ₹0 | Cannot trade |
 | Live risk state | RED | peak governed capital ₹3,157.24 vs current ₹0; risk budget ₹0 | Correct fail-close |
 | Recorder | Running | 3,417 observations in 7 days; 22,496 total observations | Productive |
@@ -109,7 +110,7 @@ Regardless of that mismatch, today's live result is unambiguous:
 - broker free CNC cash: ₹0;
 - governed allocation: ₹0;
 - agent-managed positions: none;
-- unmanaged personal holdings: 24;
+- unmanaged personal holding positions: two;
 - permissible new order size: ₹0.
 
 The system must not use the entire account balance as trading capital. Market
@@ -148,8 +149,8 @@ mandate. A broker balance can bound liquidity, but it cannot grant authority.
 3. Confirm the duplicate draft is skipped without consuming promotion capacity.
 4. Confirm a later actionable draft is promoted or a precise evidence/budget
    refusal is recorded.
-5. Confirm the dashboard shows the AI proof as recent and exposes actionable
-   versus redundant backlog.
+5. Confirm the dashboard shows the AI proof as recent and the authenticated
+   runtime API exposes actionable versus redundant backlog.
 
 ### P1 — drain and evaluate, without weakening science
 
@@ -195,9 +196,18 @@ mandate. A broker balance can bound liquidity, but it cannot grant authority.
 | Guardrail files | unchanged |
 | Order placement | none |
 | Provider proof | Anthropic success; 81 total tokens; no credential exposed |
-| GitHub CI | pending at report creation |
-| VPS deployment | pending at report creation |
-| Post-deploy worker proof | pending at report creation |
+| GitHub CI | passed for exact SHA `11a9564` ([run 39416526129](https://github.com/vaibhavbhardwaj-2396/Autonomous-trading-OS/actions/runs/39416526129)) |
+| VPS deployment | exact SHA `11a9564` deployed; 62/62 guardrail smoke assertions passed; API restarted healthy |
+| Public serving checks | API `/health` OK v1.7.0; Netlify dashboard HTTP 200 |
+| Post-deploy worker proof | completed in 55.395 s: promoted `EXP-217D1C-A`, ran it, reported 211 trades, recorded evidence, zero errors |
+
+After the proof run, the queue reported 79 total drafts, one redundant draft
+and 78 actionable drafts. The cycle performed two successful actions
+(`PROMOTE`, `RUN_EXPERIMENT`) and no discovery or broker action. The resulting
+evidence moved the hypothesis to `REASSESSING` with confidence 0.3; it did not
+create a strategy or make anything paper eligible. Production then reported
+one real experiment for 20 October, AI healthy from the bounded provider proof,
+zero watchdog alerts, and Paper still correctly `WAITING`.
 
 The project should now be judged on funnel movement and evidence quality, not
 heartbeat count. “Running” means a scheduler is alive; “working” means useful
