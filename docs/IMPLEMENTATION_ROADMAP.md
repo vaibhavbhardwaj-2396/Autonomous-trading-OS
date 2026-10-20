@@ -1,6 +1,6 @@
 # Implementation roadmap and continuation record
 
-Updated: 2026-09-25. User authorized implementing, testing, merging and
+Updated: 2026-10-20. User authorized implementing, testing, merging and
 deploying the agreed roadmap, with routine engineering decisions delegated.
 This is software delivery authorization, not authorization to override trading
 guardrails, change capital, resume live trading, or place orders.
@@ -48,17 +48,23 @@ explicit paper-eligibility event. Phase 11 remains locked regardless of Phase
 
 ## Remaining plan (Phase 11)
 
-1. Restore bounded research/paper schedules only when the external AI budget is
-   intentionally available; today those token-consuming jobs remain paused.
-2. Repair optional/stale market-data sources until readiness is READY rather
+1. Keep the restored bounded research/paper schedules observable and verify
+   useful funnel movement, not heartbeat activity alone. The 20 October audit
+   found and repaired a duplicate-draft promotion livelock; see
+   `docs/PROJECT_STATUS_2026-10-20.md`.
+2. Drain the actionable draft queue within the existing rolling lock budget;
+   do not weaken evidence gates or bulk-lock the backlog.
+3. Repair optional/stale market-data sources until readiness is READY rather
    than DEGRADED.
-3. Collect enough out-of-sample and paper observations for statistical review;
+4. Collect enough out-of-sample and paper observations for statistical review;
    no strategy may skip this evidence gate.
-4. Retain continuous broker reconciliation and daily authentication evidence.
-5. Drill expired auth, quote omission, API outage, process crash, state
+5. Retain continuous broker reconciliation and daily authentication evidence.
+6. Resolve the INDstocks-versus-Zerodha operating-contract mismatch before any
+   live canary or capital allocation.
+7. Drill expired auth, quote omission, API outage, process crash, state
    mismatch, stop failure and deployment rollback.
-6. Prepare one canary strategy/version with explicit risk and rollback limits.
-7. Require separate human approval for that exact canary, then observe it
+8. Prepare one canary strategy/version with explicit risk and rollback limits.
+9. Require separate human approval for that exact canary, then observe it
    before any expansion.
 
 Completion of phases 0–10 does **not** authorize a live order or remove any

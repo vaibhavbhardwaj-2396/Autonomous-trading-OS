@@ -112,6 +112,7 @@ significant after the research-family adjustment.
 | 11 | live-readiness evidence, approval, canary and rollback rehearsal | Pending |
 
 Detailed evidence: [Phases 1–10 acceptance](docs/PHASE_1_10_ACCEPTANCE.md).
+Current audited truth: [Deep status report — 20 October 2026](docs/PROJECT_STATUS_2026-10-20.md).
 Phase 10.5: [Validation campaign](docs/PHASE_10_5_VALIDATION.md),
 [architecture](docs/LIVING_QUANT_ARCHITECTURE.md), and
 [AI-Trader comparison](docs/AI_TRADER_COMPARISON.md).
@@ -146,6 +147,7 @@ Operational docs: [Deployment](docs/DEPLOYMENT.md), [API](docs/API.md),
 
 | Commit | Delivered |
 |---|---|
+| `b89f165` | eliminate duplicate-draft research livelock, stop idle packet inflation and report stale AI connectivity honestly |
 | `60fbb05` | family-adjusted significance and economic-materiality requirement for ROBUST confirmation, preventing positive-but-noisy holdouts from reaching strategy or paper admission |
 | `e70b1de` | pre-registered holdouts for new AI research, single-use legacy OOS confirmation, a five-slot confirmation-only reserve, confirmed-parent strategy compilation and end-to-end regression coverage |
 | `c16cd78` | production-calibrated autonomous research capacity (20 locks / rolling 7 days), live capacity telemetry and digest reporting while preserving serial execution and scientific controls |
