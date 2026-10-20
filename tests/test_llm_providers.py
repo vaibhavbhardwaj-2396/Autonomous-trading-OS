@@ -1,5 +1,6 @@
 """Isolated tests for capability routing, fallback, redaction and traces."""
 from __future__ import annotations
+import datetime as dt
 import json, sys, tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -48,6 +49,25 @@ print("\n--- provider registry ---")
 catalog = llm.provider_catalog()
 check("official and compatible adapters are registered", {"openai", "anthropic", "openai_compatible", "local_openai"} == {r["provider"] for r in catalog})
 check("catalog exposes status but no credential", all("credential_status" in r for r in catalog) and "secret-value" not in json.dumps(catalog).lower())
+orig_get_config_for_catalog = llm.ai_config.get_config
+orig_anthropic_key_for_catalog = llm.os.environ.get(llm.ENV_ANTHROPIC_API_KEY)
+stale_cfg = ai_config.get_config(path=cfg_path)
+stale_cfg["providers"]["anthropic"].update({
+    "health": "HEALTHY",
+    "last_successful_request": (dt.datetime.now().astimezone() - dt.timedelta(days=2)).isoformat(),
+})
+try:
+    llm.ai_config.get_config = lambda: stale_cfg
+    llm.os.environ[llm.ENV_ANTHROPIC_API_KEY] = "secret-value"
+    stale_row = next(r for r in llm.provider_catalog() if r["provider"] == "anthropic")
+    check("a configured provider with a success older than 24h reports STALE, not HEALTHY",
+          stale_row["configured"] is True and stale_row["health"] == "STALE", stale_row)
+finally:
+    llm.ai_config.get_config = orig_get_config_for_catalog
+    if orig_anthropic_key_for_catalog is None:
+        llm.os.environ.pop(llm.ENV_ANTHROPIC_API_KEY, None)
+    else:
+        llm.os.environ[llm.ENV_ANTHROPIC_API_KEY] = orig_anthropic_key_for_catalog
 
 print("\n--- Anthropic workspace routing ---")
 orig_read_json = llm._read_json

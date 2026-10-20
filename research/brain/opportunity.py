@@ -845,10 +845,19 @@ def attempt_autonomous_promotion(
                                 opportunity.contract_id, "skipped_not_eligible",
                                 f"lifecycle_stage={opportunity.lifecycle_stage} is not promotable")
 
-    if opportunity.is_duplicate:
+    # With an explicit target (the worker path), decide redundancy for that
+    # exact draft.  Opportunity.is_duplicate is intentionally symmetric over
+    # a whole hypothesis and previously caused every member of a duplicate
+    # group to refuse forever.  The legacy no-target path keeps its documented
+    # aggregate behaviour for callers that have not selected a specific draft.
+    duplicate_of = (similarity.redundant_draft_of(
+        store, target_contract_id, registry_dir=registry_dir)
+        if contract_id is not None else None)
+    if duplicate_of or (contract_id is None and opportunity.is_duplicate):
         return PromotionOutcome(opportunity.id, opportunity.hypothesis_id,
                                 target_contract_id, "skipped_duplicate",
-                                "an exact-duplicate rule specification already exists")
+                                "an exact-duplicate rule specification already exists"
+                                + (f" ({duplicate_of})" if duplicate_of else ""))
 
     is_confirmation = prio.is_confirmation_experiment(
         store, target_contract_id, registry_dir=registry_dir)
@@ -1190,7 +1199,17 @@ def build_action_queue(
         pending = hi.pending_drafts(registry_dir=registry_dir)
     except Exception:  # noqa: BLE001 — a read-only ranking helper never raises
         pending = []
+    try:
+        redundant_drafts = similarity.redundant_draft_map(
+            store, registry_dir=registry_dir)
+    except Exception:  # noqa: BLE001 — fail closed on uncertain duplicates
+        redundant_drafts = {c.id: "duplicate scan unavailable" for c in pending}
     for c in pending:
+        # Exact redundant drafts are historical/audit-visible but not
+        # executable commitments.  Excluding them prevents the highest-ranked
+        # refused action from consuming the one-per-heartbeat promotion cap.
+        if c.id in redundant_drafts:
+            continue
         try:
             hid = evaluator.resolve_hypothesis_id(store, c.id)
         except Exception:  # noqa: BLE001

@@ -46,6 +46,7 @@ from research.brain import opportunity as opp  # noqa: E402
 from research.brain import worker as w  # noqa: E402
 from research.sources.base import run_source  # noqa: E402
 from research import recorder  # noqa: E402
+from research import memory as rm  # noqa: E402
 
 PASSED, FAILED = 0, 0
 
@@ -617,6 +618,31 @@ check("R2: RUN_EXPERIMENT and DISCOVER still compete on the same scale",
       {"RUN_EXPERIMENT", "DISCOVER"} <= {a.kind for a in queue_r})
 check("R3: (full 40-check coverage lives in tests/test_research_worker_selection.py, "
       "re-run as part of this task's own validation — see the final report)", True)
+
+
+# ===========================================================================
+print("\n--- R2: idle/backpressured heartbeats do not fabricate ResearchPackets ---")
+# ===========================================================================
+
+s_r2 = fresh_store("r2")
+reg_r2 = fresh_registry("r2")
+for i in range(3):
+    hi.create_draft(s_r2, make_proposal(
+        title=f"distinct backlog {i}",
+        hypothesis=f"distinct threshold {i} has a measurable effect",
+        entry_rule={"conditions": [{"metric": "volume_zscore", "op": ">",
+                                      "value": 3.0 + i}]}), registry_dir=reg_r2)
+lim_r2 = w.WorkerLimits(max_discovery_attempts=1, max_experiments=0,
+                        max_promotions=0, max_substrate_creations=0,
+                        draft_backlog_high_watermark=3, cooldown_seconds=0)
+r_r2 = w.run_worker_cycle(s_r2, now_ist(), limits=lim_r2, registry_dir=reg_r2,
+                          runner=lambda p: json.dumps({"no_proposal": True, "reason": "unused"}),
+                          state_path=fresh_state("r2"))
+packet_rows_r2 = rm.query_research_log(s_r2, rm.DATASET_RESEARCH_PACKET, limit=None)
+check("R2.1: discovery is correctly blocked by the actionable draft watermark",
+      r_r2.discovery_attempts == 0, str(r_r2.queue_health))
+check("R2.2: a heartbeat with no DISCOVER action persists zero ResearchPackets",
+      packet_rows_r2 == [], str(packet_rows_r2))
 
 
 # ===========================================================================

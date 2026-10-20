@@ -201,6 +201,7 @@ from control import components as component_control
 # axes rather than one combined thing.
 from control import resources as rg
 from . import queue_policy as qpol
+from . import similarity
 
 RESEARCH_DIR = Path(__file__).resolve().parent.parent
 RUN_LOG = RESEARCH_DIR / "worker_runs.jsonl"
@@ -595,7 +596,6 @@ def run_worker_cycle(
         digest = build_digest(store, as_of, registry_dir=registry_dir)
         digest_as_of = digest.get("as_of")
         research_packet = build_packet(digest)
-        persist_packet(store, research_packet)
     except Exception as e:  # noqa: BLE001
         errors.append(f"digest: {type(e).__name__}: {e}")
 
@@ -700,12 +700,17 @@ def run_worker_cycle(
         # closed for new AI discovery while leaving already-runnable work
         # eligible; lack of queue visibility is never a reason to add more.
         try:
+            pending_drafts = hi.pending_drafts(registry_dir=registry_dir)
+            redundant_drafts = similarity.redundant_draft_map(
+                store, registry_dir=registry_dir)
             snapshot = qpol.ResearchQueueSnapshot(
-                draft_count=len(hi.pending_drafts(registry_dir=registry_dir)),
+                draft_count=sum(1 for c in pending_drafts if c.id not in redundant_drafts),
                 locked_runnable_count=len(sched.eligible_contracts(store, registry_dir=registry_dir)),
                 reported_count=sum(1 for o in pool if o.evidence_verdict is not None),
                 promising_count=sum(1 for o in pool if o.lifecycle_stage == "PROMISING"),
                 robust_count=sum(1 for o in pool if o.lifecycle_stage == "ROBUST"),
+                total_draft_count=len(pending_drafts),
+                redundant_draft_count=len(redundant_drafts),
             )
             decision = qpol.ResearchQueuePolicy(
                 draft_high_watermark=limits.draft_backlog_high_watermark,
@@ -807,6 +812,12 @@ def run_worker_cycle(
         elif action.kind == "DISCOVER":
             discovery_attempts += 1
             try:
+                # A ResearchPacket is an admitted AI-discovery input, not a
+                # heartbeat receipt.  Persist it only when discovery is
+                # actually selected; this prevents idle/backpressured cycles
+                # from inflating product activity counters.
+                if research_packet is not None:
+                    persist_packet(store, research_packet)
                 result = inv.investigate(
                     store, as_of, runner=runner, registry_dir=registry_dir,
                     digest=(research_packet if require_significance else digest),

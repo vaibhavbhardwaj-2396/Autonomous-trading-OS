@@ -22,6 +22,11 @@ class ResearchQueueSnapshot:
     promising_count: int = 0
     robust_count: int = 0
     strategy_candidate_count: int = 0
+    # ``draft_count`` is the actionable queue used for admission.  These two
+    # diagnostics preserve visibility into exact duplicates retained for
+    # audit without letting them permanently starve discovery.
+    total_draft_count: int = 0
+    redundant_draft_count: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)

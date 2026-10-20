@@ -459,6 +459,43 @@ check("L1: every opportunity in a real pool still reports portfolio_relevance=No
 
 
 # ---------------------------------------------------------------------------
+print("\n--- L2: exact-duplicate drafts cannot livelock the promotion lane ---")
+# ---------------------------------------------------------------------------
+
+s_l2 = fresh_store("l2")
+reg_l2 = fresh_registry("l2")
+_, cid_l21 = draft(s_l2, reg_l2, title="First copy")
+_, cid_l22 = draft(s_l2, reg_l2, title="Second copy")
+pool_l2 = opp.build_opportunity_pool(s_l2, "2024-05-12", registry_dir=reg_l2)
+queue_l2 = opp.build_action_queue(
+    s_l2, pool_l2, registry_dir=reg_l2, discovery_available=False)
+promotions_l2 = [a for a in queue_l2 if a.kind == "PROMOTE"]
+check("L2.1: two draft copies yield exactly one actionable promotion, not two permanent refusals",
+      len(promotions_l2) == 1, str([(a.kind, a.contract_id) for a in queue_l2]))
+check("L2.2: the canonical draft is selected deterministically",
+      promotions_l2 and promotions_l2[0].contract_id == min(cid_l21, cid_l22),
+      str([cid_l21, cid_l22]))
+snapshot_run_l2 = w.run_worker_cycle(
+    s_l2, now_ist(), registry_dir=reg_l2, state_path=fresh_state("l2-snapshot"),
+    limits=w.WorkerLimits(max_discovery_attempts=0, max_experiments=0,
+                          max_promotions=0, max_substrate_creations=0,
+                          cooldown_seconds=0))
+snapshot_l2 = (snapshot_run_l2.queue_health or {}).get("snapshot") or {}
+check("L2.3: queue telemetry separates total, redundant and actionable drafts",
+      snapshot_l2.get("total_draft_count") == 2 and
+      snapshot_l2.get("redundant_draft_count") == 1 and
+      snapshot_l2.get("draft_count") == 1, str(snapshot_l2))
+r_l2 = w.run_worker_cycle(
+    s_l2, now_ist(), registry_dir=reg_l2, state_path=fresh_state("l2"),
+    limits=w.WorkerLimits(max_discovery_attempts=0, max_experiments=0,
+                          max_promotions=1, max_substrate_creations=0,
+                          cooldown_seconds=0))
+check("L2.4: the selected canonical draft really promotes instead of returning skipped_duplicate",
+      r_l2.promoted_hypothesis_ids and
+      any(a.get("outcome") == "promoted" for a in r_l2.action_log), str(r_l2.action_log))
+
+
+# ---------------------------------------------------------------------------
 print("\n--- M: isolation is unchanged by this slice ---")
 # ---------------------------------------------------------------------------
 

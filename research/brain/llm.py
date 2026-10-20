@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import datetime as dt
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -236,9 +237,20 @@ def provider_catalog() -> list[dict]:
     for name in KNOWN_PROVIDERS:
         row = dict(cfg["providers"][name])
         configured, status = _credential_status(name, row)
+        health = row.get("health") or ("UNVERIFIED" if configured else status)
+        last_success = row.get("last_successful_request")
+        if configured and health == "HEALTHY" and last_success:
+            try:
+                stamp = dt.datetime.fromisoformat(str(last_success))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
+                if dt.datetime.now(stamp.tzinfo) - stamp > dt.timedelta(hours=24):
+                    health = "STALE"
+            except (TypeError, ValueError):
+                health = "UNVERIFIED"
         row.update({"provider": name, "configured": configured,
                     "credential_status": status,
-                    "health": row.get("health") or ("UNVERIFIED" if configured else status),
+                    "health": health,
                     "rate_limit_state": row.get("rate_limit_state") or "UNKNOWN",
                     "usage": row.get("usage") or {}, "cost": row.get("cost")})
         out.append(row)

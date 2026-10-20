@@ -155,3 +155,35 @@ def is_duplicate(
         for g in duplicate_groups(store, registry_dir=registry_dir)
         for m in g.members
     )
+
+
+def redundant_draft_map(
+    store: Store, *, registry_dir: Path = REGISTRY_DIR,
+) -> dict[str, str]:
+    """Map each redundant DRAFT to the contract that makes it redundant.
+
+    ``is_duplicate()`` deliberately answers the symmetric question "is this
+    contract in a duplicate group?" and therefore marks *every* group member.
+    Queue admission needs a different, asymmetric answer: retain exactly one
+    canonical draft when a group contains drafts only, or retain the existing
+    non-draft member when the rule has already progressed.  Otherwise a group
+    of two drafts makes both unpromotable forever.
+
+    Selection is deterministic: non-drafts precede drafts, then contract id.
+    The function is read-only and scans the registry once.
+    """
+    redundant: dict[str, str] = {}
+    for group in duplicate_groups(store, registry_dir=registry_dir):
+        ordered = sorted(group.members, key=lambda m: (m.status == "draft", m.contract_id))
+        canonical = ordered[0]
+        for member in ordered[1:]:
+            if member.status == "draft":
+                redundant[member.contract_id] = canonical.contract_id
+    return redundant
+
+
+def redundant_draft_of(
+    store: Store, contract_id: str, *, registry_dir: Path = REGISTRY_DIR,
+) -> Optional[str]:
+    """Return the canonical predecessor for a redundant draft, if any."""
+    return redundant_draft_map(store, registry_dir=registry_dir).get(contract_id)

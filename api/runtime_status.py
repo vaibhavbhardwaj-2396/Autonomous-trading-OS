@@ -31,8 +31,10 @@ def get_runtime_status(store) -> dict:
     worker_age = _age_hours(worker.get("last_heartbeat_at"))
     recorder_age = _age_hours((op["recorder"].get("last_run") or {}).get("finished_at") or
                               (op["recorder"].get("last_run") or {}).get("ts"))
-    ai_connected = next((p.get("configured") for p in ai["provider_catalog"]
-                         if p["provider"] == ai["effective_provider"]), False)
+    ai_provider = next((p for p in ai["provider_catalog"]
+                        if p["provider"] == ai["effective_provider"]), {})
+    ai_connected = bool(ai_provider.get("configured"))
+    ai_health = ai_provider.get("health") or ("CONNECTED" if ai_connected else "NOT_CONFIGURED")
     system_state = "HEALTHY" if reconciled.get("healthy") and control["mode"] == "RUNNING" else (
         control["mode"] if control["mode"] != "RUNNING" else "DEGRADED")
     research_state = (effective.get("RESEARCH_AI") or {}).get("effective_state") or (
@@ -40,7 +42,7 @@ def get_runtime_status(store) -> dict:
     indicators = [
         {"key":"system", "label":"SYSTEM", "state":system_state, "detail":f"{len(reconciled.get('alerts', []))} watchdog alerts", "target":"system"},
         {"key":"research", "label":"RESEARCH", "state":research_state, "detail":(effective.get("RESEARCH_AI") or {}).get("reason"), "target":"research"},
-        {"key":"ai", "label":"AI", "state":f"{(ai['effective_provider'] or 'NONE').upper()} / {'CONNECTED' if ai_connected else 'NO PROVIDER CONFIGURED'}", "target":"control"},
+        {"key":"ai", "label":"AI", "state":f"{(ai['effective_provider'] or 'NONE').upper()} / {ai_health if ai_connected else 'NO PROVIDER CONFIGURED'}", "detail":f"last successful request: {ai_provider.get('last_successful_request') or 'never'}", "target":"control"},
         {"key":"data", "label":"DATA", "state":(effective.get("DATA") or {}).get("effective_state") or op["recorder"]["state"], "detail":(effective.get("DATA") or {}).get("reason"), "target":"research"},
         {"key":"broker", "label":"BROKER", "state":"SEE ACCOUNT", "target":"trading"},
         {"key":"paper", "label":"PAPER", "state":"WAITING" if not campaign["paper_readiness"]["ready"] else ((effective.get("PAPER") or {}).get("effective_state") or "READY"), "detail":"No eligible StrategyVersion" if not campaign["paper_readiness"]["ready"] else (effective.get("PAPER") or {}).get("reason"), "target":"paper"},
@@ -69,12 +71,14 @@ def get_runtime_status(store) -> dict:
         "dependencies": [row["dependency_state"]],
     } for row in reconciled.get("components", [])]
     matrix.append({"module":"AI_GATEWAY", "expected_state":"provider-neutral",
-                   "actual_state":"CONNECTED" if ai_connected else "NO_PROVIDER_CONFIGURED",
+                   "actual_state":ai_health if ai_connected else "NO_PROVIDER_CONFIGURED",
                    "scheduler_state":"N/A", "heartbeat_state":"N/A",
-                   "dependency_state":"READY" if ai_connected else "NOT_CONFIGURED",
+                   "dependency_state":"READY" if ai_connected and ai_health == "HEALTHY" else ("STALE" if ai_connected else "NOT_CONFIGURED"),
                    "last_successful_run":ai["budget"].get("last_call_at"),
                    "last_attempt":ai["budget"].get("last_call_at"), "next_expected_run":None,
-                   "last_error":None if ai_connected else "no enabled route has a server-side provider credential",
+                   "last_error":None if ai_connected and ai_health == "HEALTHY" else (
+                       "configured provider has no successful request in the last 24 hours"
+                       if ai_connected else "no enabled route has a server-side provider credential"),
                    "queue_depth":queue, "dependencies":["ANY_CONFIGURED_PROVIDER"]})
     return {"as_of": now_ist().isoformat(), "indicators": indicators, "active_work": active,
             "runtime_matrix": matrix, "funnel": campaign["funnel"], "conversion": campaign["conversion"],
